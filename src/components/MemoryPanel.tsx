@@ -80,6 +80,16 @@ export function MemoryPanel() {
             </Chip>
           ))}
         </div>
+        <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+          <Chip tone="tone-ok" title={`${stats.fresh_days} 天内入库视为新鲜`}>
+            新鲜 {stats.fresh}
+          </Chip>
+          <Chip tone={stats.stale > 0 ? 'tone-warn' : 'tone-idle'}>陈旧 {stats.stale}</Chip>
+          <Chip tone="tone-idle">最旧 {stats.oldest_days} 天</Chip>
+          <Chip tone="tone-idle" title="超过该天数会在写入时自动下线">
+            过期阈值 {stats.max_age_days} 天
+          </Chip>
+        </div>
       </div>
 
       <div>

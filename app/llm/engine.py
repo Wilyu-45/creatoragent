@@ -1,7 +1,9 @@
-"""统一调用入口与两级容错（移植自 server/llm/index.ts）。
+"""统一调用入口与多级容错（移植自 server/llm/index.ts）。
 
-   1. 网络 / 5xx / 超时 / 429 → 指数退避重试（最多 3 次）
-   2. 仍然失败 → 降级到内置离线引擎，保证流程不中断（plan.md D10 降级策略）
+   1. 命中响应缓存 → 直接复用，不产生二次费用（plan.md 4.5「缓存」）
+   2. 网络 / 5xx / 超时 / 429 → 指数退避重试（最多 3 次）
+   3. 仍然失败 → 降级到内置离线引擎，保证流程不中断（plan.md D10 降级策略）
+   4. 成本超预算 → 熔断到离线引擎，守住单任务成本上限（plan.md D12）
 """
 
 from __future__ import annotations
@@ -11,8 +13,11 @@ import time
 
 from ..config import LLMSettings, get_config
 from ..logger import create_logger
+from .cache import response_cache
+from .cost import cost_guard
 from .mock import MockProvider
 from .openai_provider import OpenAICompatibleProvider
+from .pricing import cost_of
 from .types import LLMProvider, LLMRequest, LLMResponse
 
 log = create_logger("llm")
@@ -62,14 +67,33 @@ def current_provider_name() -> str:
 
 
 def chat(request: LLMRequest) -> LLMResponse:
+    # 1) 成本熔断：本任务已超预算，后续步骤一律走离线引擎，不再产生费用
+    if cost_guard.should_cut():
+        fallback = _mock.chat(request)
+        fallback.degraded_reason = "成本熔断：本任务已达成本预算，后续步骤改用内置离线引擎"
+        return fallback
+
     provider = resolve_provider()
     if getattr(provider, "simulated", False):
         return _mock.chat(request)
 
+    cache_key: str | None = None
+    if get_config().llm_cache:
+        cache_key = response_cache.key(
+            getattr(provider, "name", "unknown"), getattr(provider, "model", ""), request
+        )
+        cached = response_cache.get(cache_key)
+        if cached is not None:
+            cached.latency_ms = 0
+            log.info(f"[{request.purpose}] 命中响应缓存，跳过模型调用")
+            return cached
+
     last_error: Exception | None = None
+    response: LLMResponse | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            return provider.chat(request)
+            response = provider.chat(request)
+            break
         except Exception as error:  # noqa: BLE001
             last_error = error
             message = str(error)
@@ -80,6 +104,21 @@ def chat(request: LLMRequest) -> LLMResponse:
             if not retriable or attempt == MAX_ATTEMPTS:
                 break
             time.sleep(0.4 * 2 ** (attempt - 1))
+
+    if response is not None:
+        usage = response.usage
+        cost_guard.charge(
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            cost_of(
+                response.model or getattr(provider, "model", ""),
+                usage.prompt_tokens,
+                usage.completion_tokens,
+            ),
+        )
+        if cache_key is not None:
+            response_cache.put(cache_key, response)
+        return response
 
     reason = str(last_error)
     log.error(f"[{request.purpose}] 真实模型不可用，降级到内置离线引擎：{reason}")

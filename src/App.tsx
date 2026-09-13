@@ -5,6 +5,7 @@ import { ArtifactViewer } from './components/ArtifactViewer.tsx';
 import { BriefForm } from './components/BriefForm.tsx';
 import { MetricsPanel } from './components/MetricsPanel.tsx';
 import { Pipeline } from './components/Pipeline.tsx';
+import { PublishPanel } from './components/PublishPanel.tsx';
 import { Scorecard } from './components/Scorecard.tsx';
 import { SettingsDrawer } from './components/SettingsDrawer.tsx';
 import { TaskList } from './components/TaskList.tsx';
@@ -20,7 +21,7 @@ import type {
   TaskSummary,
 } from './lib/api.ts';
 import { api, subscribeTask } from './lib/api.ts';
-import { formatCost, STATUS_LABEL, statusTone } from './lib/format.ts';
+import { formatCost, formatDateTime, STATUS_LABEL, statusTone } from './lib/format.ts';
 
 type Tab = 'pipeline' | 'artifacts' | 'timeline' | 'metrics';
 
@@ -178,6 +179,20 @@ export function App() {
     }
   };
 
+  /** 发布登记 / 效果回填后刷新当前任务与列表。 */
+  const handlePublishChanged = useCallback(async (): Promise<void> => {
+    if (!activeId) return;
+    try {
+      const data = await api.getTask(activeId);
+      setDetail(data);
+      setEvents(data.events);
+      await loadTasks();
+      void loadMetrics();
+    } catch {
+      /* 刷新失败时保留上一次快照 */
+    }
+  }, [activeId, loadTasks, loadMetrics]);
+
   const handleSaveSettings = async (patch: Record<string, unknown>): Promise<void> => {
     setSaving(true);
     try {
@@ -272,6 +287,20 @@ export function App() {
                       <Chip tone="tone-idle" mono>
                         {formatCost(detail.task.tokens.cost_usd)}
                       </Chip>
+                      {detail.task.tokens.cached > 0 ? (
+                        <Chip tone="tone-ok" title="命中 LLM 缓存的调用次数">
+                          缓存 {detail.task.tokens.cached}
+                        </Chip>
+                      ) : null}
+                      {detail.task.tokens.cut_off ? <Chip tone="tone-warn">成本熔断</Chip> : null}
+                      {detail.task.published_at ? (
+                        <Chip tone="tone-ok">已排期 {formatDateTime(detail.task.published_at)}</Chip>
+                      ) : null}
+                      {detail.task.intent_conflicts > 0 ? (
+                        <Chip tone="tone-warn" title="黑板意图租约冲突次数">
+                          租约冲突 {detail.task.intent_conflicts}
+                        </Chip>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -282,6 +311,8 @@ export function App() {
               </div>
 
               <ApprovalPanel task={detail.task} busy={deciding} onDecide={handleDecide} />
+
+              <PublishPanel task={detail.task} onChanged={handlePublishChanged} onToast={showToast} />
 
               <div className="tabs" style={{ marginTop: 16 }}>
                 {TABS.map((item) => (

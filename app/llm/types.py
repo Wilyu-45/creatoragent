@@ -47,7 +47,9 @@ class LLMResponse:
     latency_ms: int = 0
     #: True 表示来自内置离线模拟引擎或降级兜底
     simulated: bool = False
-    #: 降级说明（例如真实模型不可用）
+    #: True 表示命中响应缓存（未真正产生一次模型调用）
+    cached: bool = False
+    #: 降级说明（例如真实模型不可用、成本熔断）
     degraded_reason: str | None = None
 
 

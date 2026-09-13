@@ -27,6 +27,7 @@ import os
 import re
 import threading
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from ..config import MEMORY_FILE
@@ -51,6 +52,15 @@ MAX_CARDS = 500
 
 #: 低于该分数的候选不返回，避免「什么都召回一点」的虚假命中
 MIN_SCORE = 0.2
+
+#: 知识存活上限（天）：超过即「过期下线」（creator.md A11「管理版本、过期知识」）
+MAX_AGE_DAYS = 180
+
+#: 新鲜阈值（天）：用于「知识新鲜度」统计与同分时的优先次序
+FRESH_DAYS = 30
+
+#: 陈旧阈值（天）：超过则在统计里标记为待更新（不影响召回）
+STALE_DAYS = 120
 
 #: 文本三项权重之和为 0.6，乘以 _W_TEXT_GAIN 后归一——「文本完全命中」单项即可触顶；
 #: 元数据（品牌 0.25 / 渠道 0.1 / 行业 0.05）作为加成，合计上限 0.4。
@@ -116,6 +126,18 @@ class MemoryCard:
         return asdict(self)
 
 
+def _age_days(card: MemoryCard) -> int:
+    """卡片年龄（天）。``created_at`` 缺失或不可解析时返回 0（按新卡片处理）。"""
+    try:
+        created = datetime.fromisoformat(str(card.created_at))
+    except (TypeError, ValueError):
+        return 0
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    seconds = (datetime.now(timezone.utc) - created).total_seconds()
+    return max(0, int(seconds // 86400))
+
+
 @dataclass
 class MemoryHit:
     """一次召回的命中结果，带分数与命中理由（便于前端与调试解释）。"""
@@ -123,9 +145,14 @@ class MemoryHit:
     card: MemoryCard
     score: float
     reasons: list[str] = field(default_factory=list)
+    #: 卡片年龄（天）与新鲜度；用于「知识新鲜度」统计与同分时的优先次序
+    age_days: int = 0
+    fresh: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "age_days": self.age_days,
+            "fresh": self.fresh,
             "id": self.card.id,
             "task_id": self.card.task_id,
             "brand": self.card.brand,
@@ -173,6 +200,9 @@ class MemoryStore:
                     self._index[_digest(card.kind, card.title, card.content)] = card
                 if self._cards:
                     log.info(f"已加载 {len(self._cards)} 条跨任务知识卡片")
+                    # 启动即清理过期知识，避免旧卡片参与本轮召回
+                    if self._sweep_expired():
+                        self.flush()
             except FileNotFoundError:
                 pass
             except Exception as error:  # noqa: BLE001 - 记忆库损坏不应阻断服务
@@ -269,6 +299,7 @@ class MemoryStore:
 
             if added:
                 self._evict()
+                self._sweep_expired()
 
         if added:
             self.flush()
@@ -285,6 +316,25 @@ class MemoryStore:
         for card in dropped:
             self._index.pop(_digest(card.kind, card.title, card.content), None)
         log.warn(f"记忆库超出上限，淘汰 {len(dropped)} 条最旧知识")
+
+    def _sweep_expired(self) -> int:
+        """下线超过 ``MAX_AGE_DAYS`` 的过期知识，返回下线条数（调用方需持锁）。
+
+        ``_evict`` 解决的是「库太满」，这里解决的是「知识太旧」：平台玩法与
+        品牌口径变化很快，过期卡片继续参与召回会污染新任务的判断
+        （creator.md 要求 A11 管理版本、标签、权限与过期知识）。
+        """
+        kept: list[MemoryCard] = []
+        dropped: list[MemoryCard] = []
+        for card in self._cards:
+            (dropped if _age_days(card) > MAX_AGE_DAYS else kept).append(card)
+        if not dropped:
+            return 0
+        self._cards = kept
+        for card in dropped:
+            self._index.pop(_digest(card.kind, card.title, card.content), None)
+        log.warn(f"记忆库下线 {len(dropped)} 条超过 {MAX_AGE_DAYS} 天的过期知识")
+        return len(dropped)
 
     # ---------------------------- 检索 ---------------------------- #
 
@@ -337,9 +387,19 @@ class MemoryStore:
 
             if score < MIN_SCORE:
                 continue
-            hits.append(MemoryHit(card=card, score=min(score, 1.0), reasons=reasons))
+            age = _age_days(card)
+            hits.append(
+                MemoryHit(
+                    card=card,
+                    score=min(score, 1.0),
+                    reasons=reasons,
+                    age_days=age,
+                    fresh=age <= FRESH_DAYS,
+                )
+            )
 
-        hits.sort(key=lambda hit: (hit.score, hit.card.created_at), reverse=True)
+        # 同分时优先新鲜知识（creator.md 把「知识新鲜度」列为知识层 KPI）
+        hits.sort(key=lambda hit: (hit.score, -hit.age_days), reverse=True)
         top = hits[: max(0, top_k)]
 
         if top:
@@ -380,6 +440,12 @@ class MemoryStore:
             "brands": sorted({card.brand for card in cards if card.brand}),
             "tasks": len({card.task_id for card in cards}),
             "reused": sum(1 for card in cards if card.hits > 0),
+            # 知识新鲜度：过期下线阈值 / 最旧卡片 / 新鲜与陈旧数量
+            "max_age_days": MAX_AGE_DAYS,
+            "fresh_days": FRESH_DAYS,
+            "oldest_days": max((_age_days(card) for card in cards), default=0),
+            "fresh": sum(1 for card in cards if _age_days(card) <= FRESH_DAYS),
+            "stale": sum(1 for card in cards if _age_days(card) > STALE_DAYS),
         }
 
 

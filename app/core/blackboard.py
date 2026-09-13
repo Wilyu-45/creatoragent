@@ -106,12 +106,37 @@ class Blackboard:
     def declare_intent(
         self, task_id: str, agent_id: str, direction: str, ttl_ms: int = INTENT_TTL_MS
     ) -> IntentEntry | None:
-        """声明工作方向并获取租约；若方向已被他人持有则返回 None。"""
+        """声明工作方向并获取租约；未取得租约时返回 None。
+
+        兼容入口，只关心「有没有拿到」；需要区分首次获取 / 续期 / 冲突时用
+        :meth:`acquire_intent`。注意续期场景（同一智能体重复声明）也会返回租约，
+        这与旧实现「重复声明返回 None」不同，旧调用方未依赖该差异。
+        """
+        entry, _ = self.acquire_intent(task_id, agent_id, direction, ttl_ms)
+        return entry
+
+    def acquire_intent(
+        self, task_id: str, agent_id: str, direction: str, ttl_ms: int = INTENT_TTL_MS
+    ) -> tuple[IntentEntry | None, str]:
+        """原子地获取或续期工作租约（plan.md 2.2.2 / 4.5「租约机制 + 冲突重试」）。
+
+        返回 ``(租约, 结果)``，结果是三者之一：
+
+        * ``claimed``  —— 方向空闲，抢占成功；
+        * ``renewed``  —— 同一智能体在该方向上已有租约（节点重放、断点续跑），
+          原地续期而不是把自己锁死；这是相比旧实现唯一的行为变化；
+        * ``conflict`` —— 已被其它智能体持有，调用方应退避重试。
+        """
         with self._lock:
             self._sweep_expired_intents()
             key = f"{task_id}::{direction}"
-            if any(i.key == key for i in self._intents):
-                return None
+            holder = next((i for i in self._intents if i.key == key), None)
+            if holder is not None:
+                if holder.agent_id == agent_id:
+                    holder.expires_at = iso_in(ttl_ms / 1000)
+                    self._mark_dirty()
+                    return holder, "renewed"
+                return holder, "conflict"
             entry = IntentEntry(
                 key=key,
                 task_id=task_id,
@@ -122,7 +147,21 @@ class Blackboard:
             )
             self._intents.append(entry)
             self._mark_dirty()
-            return entry
+            return entry, "claimed"
+
+    def release_task_intents(self, task_id: str) -> int:
+        """回收某任务的全部租约，返回释放条数。
+
+        任务进入终态（交付 / 驳回 / 失败）时调用，避免租约残留到 TTL 到期；
+        对同一任务反复推进 revision 的场景，也能防止旧方向的租约长期占位。
+        """
+        with self._lock:
+            before = len(self._intents)
+            self._intents = [i for i in self._intents if i.task_id != task_id]
+            released = before - len(self._intents)
+            if released:
+                self._mark_dirty()
+            return released
 
     def release_intent(self, key: str) -> None:
         with self._lock:

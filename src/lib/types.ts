@@ -191,6 +191,7 @@ export type ArtifactType =
   | 'compliance_report'
   | 'visual_brief'
   | 'channel_adaptation'
+  | 'publish_plan'
   | 'effect_report'
   | 'knowledge_card'
   | 'final_delivery';
@@ -233,6 +234,10 @@ export interface AgentMetrics {
   provider: string;
   model: string;
   simulated: boolean;
+  /** 该次调用是否命中 LLM 响应缓存（plan.md 4.5「成本熔断 + 缓存」） */
+  cached: boolean;
+  /** 是否因成本熔断而强制走离线引擎 */
+  cut_off: boolean;
 }
 
 export interface AgentResult {
@@ -373,6 +378,17 @@ export interface PipelineNode {
   finished_at: string | null;
 }
 
+export interface TokenUsage {
+  prompt: number;
+  completion: number;
+  cost_usd: number;
+  /** 计费调用次数与其中命中缓存的次数 */
+  calls: number;
+  cached: number;
+  /** 是否已触发成本熔断 */
+  cut_off: boolean;
+}
+
 export interface TaskRecord {
   id: string;
   brief: Brief;
@@ -390,7 +406,7 @@ export interface TaskRecord {
   revisions: RevisionRecord[];
   gates: GateRecord[];
   scorecard: QualityScorecard | null;
-  tokens: { prompt: number; completion: number; cost_usd: number };
+  tokens: TokenUsage;
   approval: {
     required: boolean;
     decision: 'pending' | 'approved' | 'rejected';
@@ -398,6 +414,12 @@ export interface TaskRecord {
     decided_at: string | null;
   };
   error: string | null;
+  /** 黑板租约冲突次数（并发压力指标） */
+  intent_conflicts: number;
+  /** 发布排期生效时间（审批通过后自动生成） */
+  published_at: string | null;
+  /** 回填的发布后真实效果数据，用于 A10 复盘 */
+  feedback_actuals?: Record<string, unknown> | null;
 }
 
 /* ------------------------------------------------------------------ */

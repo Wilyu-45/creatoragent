@@ -26,6 +26,9 @@ export function MetricsPanel({ metrics }: { metrics: MetricsView | null }) {
   }
 
   const { system, providers, agents } = metrics;
+  const cost = system.cost;
+  const cache = system.cache;
+  const leases = system.leases;
 
   return (
     <div>
@@ -61,6 +64,49 @@ export function MetricsPanel({ metrics }: { metrics: MetricsView | null }) {
               {provider.simulated ? '（离线）' : ''}
             </Chip>
           ))}
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-title">
+          成本 · 缓存 · 并发 <span className="count">· 预算熔断与黑板租约</span>
+        </div>
+        <div className="grid-3">
+          <div className="card">
+            <div className="muted small">累计成本</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>{formatCost(cost.total_cost_usd)}</div>
+          </div>
+          <div className="card">
+            <div className="muted small">平均单篇成本</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>{formatCost(cost.avg_cost_per_task_usd)}</div>
+          </div>
+          <div className="card">
+            <div className="muted small">单任务预算</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>{formatCost(cost.budget_usd)}</div>
+          </div>
+          <div className="card">
+            <div className="muted small">缓存命中</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>{formatNumber(cache.hits)}</div>
+            <div className="muted small">未命中 {formatNumber(cache.misses)}</div>
+          </div>
+          <div className="card">
+            <div className="muted small">租约冲突</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>{formatNumber(leases.conflicts)}</div>
+            <div className="muted small">活跃租约 {formatNumber(leases.active)}</div>
+          </div>
+        </div>
+
+        <div className="row" style={{ marginTop: 14 }}>
+          <Chip tone={cost.cut_off_tasks > 0 ? 'tone-warn' : 'tone-ok'}>熔断任务 {cost.cut_off_tasks}</Chip>
+          <Chip tone="tone-info">token 预算 {formatNumber(cost.token_budget)}</Chip>
+          <Chip tone="tone-info">命中缓存调用 {cost.cached_calls}</Chip>
+          <Chip tone={cache.hitRate > 0 ? 'tone-ok' : 'tone-idle'}>
+            缓存命中率 {formatNumber(cache.hitRate * 100, 1)}%
+          </Chip>
+          <Chip tone="tone-idle">
+            缓存条目 {formatNumber(cache.entries)} / {formatNumber(cache.capacity)}
+          </Chip>
+          <Chip tone="tone-idle">存活账本 {formatNumber(cost.activeLedgers)}</Chip>
         </div>
       </div>
 

@@ -37,6 +37,7 @@ from ..llm.json_utils import (
     normalize_confidence,
     normalize_score,
 )
+from ..llm.pricing import DEFAULT_PRICE, PRICING, cost_of, price_of  # noqa: F401
 from ..llm.types import ChatMessage, LLMRequest
 
 # ------------------------------------------------------------------ #
@@ -111,25 +112,8 @@ def system_prompt(meta: AgentMeta, body: str) -> str:
 # 结构化调用                                                          #
 # ------------------------------------------------------------------ #
 
-#: 每百万 token 的美元单价（in / out）
-PRICING: dict[str, tuple[float, float]] = {
-    "gpt-4o-mini": (0.15, 0.6),
-    "gpt-4o": (2.5, 10.0),
-    "gpt-4.1-mini": (0.4, 1.6),
-    "deepseek-chat": (0.27, 1.1),
-    "qwen-plus": (0.4, 1.2),
-    "qwen-max": (1.6, 6.4),
-}
-
-DEFAULT_PRICE = (0.5, 1.5)
-
-
-def price_of(model: str) -> tuple[float, float]:
-    lowered = (model or "").lower()
-    for key, price in PRICING.items():
-        if key in lowered:
-            return price
-    return DEFAULT_PRICE
+#: 计价表已迁到 ``llm/pricing.py``（供 llm 层的成本熔断共用），
+#: 这里仍以同名转出 ``PRICING`` / ``DEFAULT_PRICE`` / ``price_of`` 兼容旧引用。
 
 
 @dataclass
@@ -173,17 +157,16 @@ def call_with_prompts(
         snippet = response.content[:200]
         raise ValueError(f"{meta.id} 返回内容无法解析为 JSON：{snippet}")
 
-    price_in, price_out = price_of(response.model)
     usage = response.usage
     metrics = AgentMetrics(
         latency_ms=response.latency_ms,
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
-        cost_usd=(usage.prompt_tokens / 1_000_000) * price_in
-        + (usage.completion_tokens / 1_000_000) * price_out,
+        cost_usd=cost_of(response.model, usage.prompt_tokens, usage.completion_tokens),
         provider=response.provider,
         model=response.model,
         simulated=response.simulated,
+        cached=response.cached,
     )
     return StructuredResult(data=parsed, raw=response.content, metrics=metrics)
 

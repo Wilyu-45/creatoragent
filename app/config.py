@@ -62,6 +62,12 @@ class RuntimeConfig:
     max_revisions: int = 2
     quality_threshold: int = 75
     auto_approve: bool = False
+    #: 单任务成本上限（美元）；超出即熔断到离线引擎（plan.md D12）
+    cost_budget_usd: float = 0.5
+    #: 单任务 token 上限，对应 plan.md 2.4「单 Session token 消耗 > 50K 触发审查」
+    token_budget: int = 50_000
+    #: 是否启用 LLM 响应缓存（plan.md 4.5）
+    llm_cache: bool = True
     llm: LLMSettings = field(default_factory=LLMSettings)
 
 
@@ -95,6 +101,9 @@ def _build_config() -> RuntimeConfig:
         max_revisions=_int(os.environ.get("MAX_REVISIONS"), 2),
         quality_threshold=_int(os.environ.get("QUALITY_THRESHOLD"), 75),
         auto_approve=_bool(os.environ.get("AUTO_APPROVE"), False),
+        cost_budget_usd=_num(os.environ.get("COST_BUDGET_USD"), 0.5),
+        token_budget=_int(os.environ.get("TOKEN_BUDGET"), 50_000),
+        llm_cache=_bool(os.environ.get("LLM_CACHE"), True),
         llm=LLMSettings(
             provider=provider,  # type: ignore[arg-type]
             base_url=os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1",
@@ -125,6 +134,12 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
         _config.quality_threshold = int(patch["qualityThreshold"])
     if patch.get("autoApprove") is not None:
         _config.auto_approve = bool(patch["autoApprove"])
+    if patch.get("costBudgetUsd") is not None:
+        _config.cost_budget_usd = max(0.0, float(patch["costBudgetUsd"]))
+    if patch.get("tokenBudget") is not None:
+        _config.token_budget = max(0, int(patch["tokenBudget"]))
+    if patch.get("llmCache") is not None:
+        _config.llm_cache = bool(patch["llmCache"])
     llm_patch = patch.get("llm") or {}
     if llm_patch:
         for key, value in llm_patch.items():
@@ -163,6 +178,9 @@ def public_config() -> dict[str, Any]:
         "maxRevisions": _config.max_revisions,
         "qualityThreshold": _config.quality_threshold,
         "autoApprove": _config.auto_approve,
+        "costBudgetUsd": _config.cost_budget_usd,
+        "tokenBudget": _config.token_budget,
+        "llmCache": _config.llm_cache,
         "llm": {
             "provider": llm.provider,
             "baseUrl": llm.base_url,

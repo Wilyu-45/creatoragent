@@ -16,6 +16,7 @@ const TYPE_LABEL: Record<ArtifactType, string> = {
   compliance_report: '品牌合规报告',
   visual_brief: '视觉美术指导',
   channel_adaptation: '渠道适配与发布策略',
+  publish_plan: '多平台发布排期',
   effect_report: '效果预估报告',
   knowledge_card: '知识沉淀卡片',
   final_delivery: '最终交付物',
@@ -1079,6 +1080,77 @@ function ChannelView({ content }: { content: Record<string, unknown> }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* A9 发布排期（审批通过后生成）                                        */
+/* ------------------------------------------------------------------ */
+
+const SCHEDULE_STATUS: Record<string, { label: string; tone: string }> = {
+  scheduled: { label: '待发布', tone: 'tone-warn' },
+  published: { label: '已发布', tone: 'tone-ok' },
+};
+
+function PublishPlanView({ content }: { content: Record<string, unknown> }) {
+  const schedule = asRecordArray(content.schedule);
+  const mode = asText(content.mode);
+  return (
+    <>
+      <Section title="发布概要">
+        <div className="row" style={{ marginBottom: 8 }}>
+          <Chip tone="tone-info">{asText(content.brand)}</Chip>
+          <Chip tone="tone-idle">主渠道 {asText(content.primary_channel)}</Chip>
+          <Chip tone="tone-idle">{mode === 'manual' ? '人工投放' : mode || '人工投放'}</Chip>
+        </div>
+        <Kv
+          pairs={[
+            ['审批生效时间', asText(content.approved_at)],
+            ['最近登记发布', asText(content.last_published_at) || '—'],
+            ['说明', asText(content.notes) || '—'],
+          ]}
+        />
+      </Section>
+      <Section title={`渠道 × 时段排期（${schedule.length} 条）`}>
+        <Table head={['序号', '渠道', '建议时段', '状态', '投放标题', '发布链接']}>
+          {schedule.map((row, index) => {
+            const status = asText(row.status);
+            const meta = SCHEDULE_STATUS[status] ?? { label: status, tone: 'tone-idle' };
+            return (
+              <tr key={index}>
+                <td className="mono">{asText(row.order)}</td>
+                <td>
+                  <strong>{asText(row.channel)}</strong>
+                </td>
+                <td className="mono">{asText(row.slot) || '—'}</td>
+                <td>
+                  <Chip tone={meta.tone}>{meta.label}</Chip>
+                </td>
+                <td>{asText(row.title) || '—'}</td>
+                <td className="muted small">{asText(row.url) || '—'}</td>
+              </tr>
+            );
+          })}
+        </Table>
+      </Section>
+      {schedule.some((row) => asTextArray(row.recommended_slots).length) ? (
+        <Section title="各渠道推荐时段">
+          <Table head={['渠道', '备选时段']}>
+            {schedule.map((row, index) => (
+              <tr key={index}>
+                <td>{asText(row.channel)}</td>
+                <td className="muted small">{asTextArray(row.recommended_slots).join(' / ') || '—'}</td>
+              </tr>
+            ))}
+          </Table>
+        </Section>
+      ) : null}
+      {asTextArray(content.checklist).length ? (
+        <Section title="投放前检查清单">
+          <Bullets items={asTextArray(content.checklist)} ordered />
+        </Section>
+      ) : null}
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* A11 记忆与知识库                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -1173,6 +1245,7 @@ const RENDERERS: Partial<Record<ArtifactType, (props: { content: Record<string, 
   compliance_report: ComplianceView,
   visual_brief: VisualBriefView,
   channel_adaptation: ChannelView,
+  publish_plan: PublishPlanView,
   effect_report: EffectView,
   knowledge_card: KnowledgeView,
   final_delivery: DeliveryView,

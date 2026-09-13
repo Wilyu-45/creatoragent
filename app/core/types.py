@@ -157,7 +157,8 @@ class TaskPacket(BaseModel):
 ArtifactType = Literal[
     "task_plan", "strategy_brief", "creative_concept", "content_plan", "copy_draft",
     "edited_copy", "fact_check_report", "compliance_report", "visual_brief",
-    "channel_adaptation", "effect_report", "knowledge_card", "final_delivery",
+    "channel_adaptation", "publish_plan", "effect_report", "knowledge_card",
+    "final_delivery",
 ]
 
 #: 产物类型 → 中文标题（UI 与归档时使用）。
@@ -172,6 +173,7 @@ ARTIFACT_LABEL: dict[str, str] = {
     "compliance_report": "合规审查报告",
     "visual_brief": "视觉指导",
     "channel_adaptation": "渠道适配稿",
+    "publish_plan": "发布排期",
     "effect_report": "效果复盘报告",
     "knowledge_card": "知识沉淀卡片",
     "final_delivery": "最终交付件",
@@ -219,6 +221,10 @@ class AgentMetrics(BaseModel):
     provider: str = ""
     model: str = ""
     simulated: bool = False
+    #: 该次调用是否命中 LLM 响应缓存（plan.md 4.5「成本熔断 + 缓存」）
+    cached: bool = False
+    #: 是否因成本熔断而强制走离线引擎
+    cut_off: bool = False
 
 
 class Handoff(BaseModel):
@@ -398,6 +404,11 @@ class TokenUsage(BaseModel):
     prompt: int = 0
     completion: int = 0
     cost_usd: float = 0.0
+    #: 计费调用次数与其中命中缓存的次数（用于 /api/metrics 的缓存命中率）
+    calls: int = 0
+    cached: int = 0
+    #: 是否已触发成本熔断（plan.md 2.4「单篇内容成本 > 预算 120% 熔断」）
+    cut_off: bool = False
 
 
 class ApprovalState(BaseModel):
@@ -431,6 +442,10 @@ class TaskRecord(BaseModel):
     tokens: TokenUsage = Field(default_factory=TokenUsage)
     approval: ApprovalState = Field(default_factory=ApprovalState)
     error: str | None = None
+    #: 黑板租约冲突次数（plan.md 4.5 风险缓解的可观测指标）
+    intent_conflicts: int = 0
+    #: 发布排期时间（approval 通过后自动生成的生效时间）
+    published_at: str | None = None
 
 
 # ------------------------------------------------------------------ #

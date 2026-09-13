@@ -6,7 +6,8 @@
 * 主流程：建任务 → SSE 实时事件 → 挂起等待人工 → ``decide`` → 归档交付
 * 自动审批：``autoApprove`` 走完全程
 * 记忆闭环：``/api/memory``、``/api/memory/search``，以及第二个任务是否真的复用了第一个任务沉淀的知识
-* 聚合视图：``/api/tasks``、``/api/metrics``
+* 发布闭环：``/api/tasks/{id}/publish`` 登记发布、``/api/tasks/{id}/feedback`` 回填效果并触发 A10 复盘
+* 聚合视图：``/api/tasks``、``/api/metrics``（含成本 / 缓存 / 黑板租约指标）
 * 错误分支：404 / 400 / 409（重复裁决、删除运行中任务）
 * 持久化：任务 JSON、``checkpoints.sqlite``、``blackboard.json``、``memory.json``
 
@@ -237,6 +238,53 @@ def main() -> int:
             print(f"    复用来源：{reuse[0]['source']}")
         ok = ok and bool(recalled) and bool(reuse)
 
+        print("\n[GET/POST /api/tasks/{id}/publish（审批后自动排期 → 登记发布）]")
+        plan = call("GET", f"/api/tasks/{task_id}/publish").json()
+        slots = plan["schedule"]
+        print(f"  排期渠道 {len(slots)} 个："
+              + "、".join(f"{s['channel']}@{s['slot']}" for s in slots[:3]))
+        ok = ok and bool(slots)
+
+        published = call("POST", f"/api/tasks/{task_id}/publish", json={}).json()
+        print(f"  登记发布 → {published['published']}")
+        ok = ok and bool(published["published"])
+
+        print("\n[POST /api/tasks/{id}/feedback（效果回填 → A10 复盘 → A/B 结论）]")
+        first_channel = slots[0]["channel"] if slots else ""
+        feedback = call(
+            "POST",
+            f"/api/tasks/{task_id}/feedback",
+            json={
+                "channel": first_channel,
+                "window": "发布后 72 小时",
+                "metrics": {
+                    "exposure": 12000,
+                    "clicks": 480,
+                    "interactions": 260,
+                    "conversions": 24,
+                },
+            },
+        ).json()
+        artifacts = task_of(task_id)["artifacts"]
+        review = next(
+            (
+                a
+                for a in artifacts
+                if a["type"] == "effect_report"
+                and (a["content"] or {}).get("mode") == "post_publish_review"
+            ),
+            None,
+        )
+        review_content = (review or {}).get("content") or {}
+        comparison = review_content.get("predicted_comparison") or {}
+        conclusion = review_content.get("ab_conclusion") or {}
+        print(f"  复盘 verdict={comparison.get('verdict')} "
+              f"实际CTR={review_content.get('actuals', {}).get('ctr')}% "
+              f"预估中位={comparison.get('predicted_mid')}% A/B={conclusion.get('winner')} "
+              f"可放量={conclusion.get('ready_to_scale')}")
+        ok = ok and review is not None and bool(feedback["artifact_id"])
+        ok = ok and bool(comparison.get("verdict")) and bool(conclusion.get("note"))
+
         print("\n[GET /api/tasks 与 /api/metrics]")
         tasks = call("GET", "/api/tasks").json()["tasks"]
         print(f"  任务列表 {len(tasks)} 条；首条 phase_label={tasks[0]['phase_label']} "
@@ -245,7 +293,15 @@ def main() -> int:
         print(f"  total={metrics['total_tasks']} completed={metrics['completed']} "
               f"avg_score={metrics['avg_overall_score']} gate_pass={metrics['gate_pass_rate']} "
               f"p99={metrics['p99_agent_latency_ms']}ms simulated={metrics['simulated_ratio']}%")
+        cost = metrics["cost"]
+        leases = metrics["leases"]
+        print(f"  成本：单篇=${cost['avg_cost_per_task_usd']} 预算=${cost['budget_usd']} "
+              f"熔断任务={cost['cut_off_tasks']} 缓存命中率={metrics['cache']['hitRate']}")
+        print(f"  黑板租约：活动={leases['active']} 累计冲突={leases['conflicts']}")
         ok = ok and metrics["total_tasks"] >= 2 and metrics["completed"] == 2
+        ok = ok and {"cost", "cache", "leases"} <= set(metrics)
+        # 任务全部结束，说明租约都已成对释放（无残留）
+        ok = ok and leases["active"] == 0
 
         print("\n[错误分支]")
         detail_404 = call("GET", "/api/tasks/nope").status_code

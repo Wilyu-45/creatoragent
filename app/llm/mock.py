@@ -1156,6 +1156,164 @@ def generate_analysis(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def generate_analysis_review(ctx: dict[str, Any]) -> dict[str, Any]:
+    """发布后复盘：真实数据 vs 发布前预估（A/B 闭环回填，plan.md v2.0）。
+
+    与 ``generate_analysis`` 的区别：那个是**发布前预估**，这个拿运营回填的
+    真实曝光 / 点击 / 互动 / 转化做**归因与结论**，并给出可放量判断。
+    """
+    brief = as_brief(ctx)
+    rule = channel_rule(brief.channel)
+    actuals = rec(ctx.get("actuals"))
+    predicted = rec(rec(ctx.get("predicted")).get("predicted"))
+
+    exposure = int(as_num(actuals.get("exposure"), 0))
+    clicks = int(as_num(actuals.get("clicks"), 0))
+    interactions = int(as_num(actuals.get("interactions"), 0))
+    conversions = int(as_num(actuals.get("conversions"), 0))
+    window = as_str(actuals.get("window"), "发布后 72 小时")
+
+    ctr = round((clicks / exposure * 100) if exposure else 0.0, 2)
+    engagement = round((interactions / exposure * 100) if exposure else 0.0, 2)
+    conversion = round((conversions / clicks * 100) if clicks else 0.0, 2)
+
+    pred_ctr = rec(predicted.get("ctr"))
+    pred_mid = as_num(pred_ctr.get("mid"), 0)
+    delta = round(ctr - pred_mid, 2) if pred_mid else 0.0
+    if not pred_mid:
+        verdict = "缺少预估基线"
+    elif delta > 0.5:
+        verdict = "超预期"
+    elif delta >= -0.5:
+        verdict = "符合预期"
+    else:
+        verdict = "低于预期"
+
+    return {
+        "mode": "post_publish_review",
+        "window": window,
+        "channel": brief.channel,
+        "actuals": {
+            "exposure": exposure,
+            "clicks": clicks,
+            "interactions": interactions,
+            "conversions": conversions,
+            "ctr": ctr,
+            "engagement": engagement,
+            "conversion": conversion,
+        },
+        "predicted_comparison": {
+            "metric": "ctr",
+            "predicted_mid": pred_mid,
+            "predicted_low": as_num(pred_ctr.get("low"), 0),
+            "predicted_high": as_num(pred_ctr.get("high"), 0),
+            "actual": ctr,
+            "delta": delta,
+            "verdict": verdict,
+            "note": (
+                f"预估 CTR 区间 {as_num(pred_ctr.get('low'), 0)}~{as_num(pred_ctr.get('high'), 0)}%，"
+                f"实际 {ctr}%（{clicks}/{exposure}）"
+                if pred_mid
+                else f"实际 CTR {ctr}%（{clicks}/{exposure}），无发布前预估可对照"
+            ),
+        },
+        "attribution": [
+            {
+                "factor": "标题钩子",
+                "impact": "high" if abs(delta) >= 0.5 else "medium",
+                "note": (
+                    f"实际 CTR {ctr}%，比预估中位{delta:+.2f} 个百分点，"
+                    + (
+                        "标题与目标人群的匹配度强于预期，该方向可沉淀为模板"
+                        if delta >= 0
+                        else "标题与受众痛点仍有偏差，建议重做钩子方向"
+                    )
+                ),
+            },
+            {
+                "factor": "互动结构",
+                "impact": "high" if engagement >= 3 else "medium",
+                "note": (
+                    f"互动率 {engagement}%（{interactions} 次），"
+                    + ("评论区可作为下一条选题的来源" if engagement >= 3 else "建议预置引导评论提升互动")
+                ),
+            },
+            {
+                "factor": "发布时段",
+                "impact": "medium",
+                "note": f"{window}内累计曝光 {exposure} 次，未出现明显流量断档",
+            },
+            {
+                "factor": "转化路径",
+                "impact": "medium",
+                "note": f"转化率 {conversion}%（{conversions} 次），转化承接主要取决于落地页，内容侧已给到行动引导",
+            },
+        ],
+        "ab_conclusion": {
+            "hypothesis": f"{rule.format} 的标题钩子方向",
+            "winner": "A" if delta >= 0 else "B",
+            "confidence": 0.6 if abs(delta) < 1 else 0.75,
+            "note": (
+                f"实际 CTR {ctr}% vs 预估中位 {pred_mid}%，"
+                + (
+                    "当前方向成立，可继续沿用并做小幅迭代"
+                    if delta >= 0
+                    else "当前方向未达预估，建议按对照组方案重做一版"
+                )
+                if pred_mid
+                else f"实际 CTR {ctr}%，建议先补一组对照再下结论"
+            ),
+            "ready_to_scale": bool(abs(delta) >= 0.5 and engagement >= 2),
+        },
+        "optimizations": [
+            {
+                "priority": "high",
+                "action": "把本条的标题钩子沉淀为可复用模板",
+                "expected_gain": f"同类内容 CTR 稳定在 {ctr}% 附近",
+                "effort": "低",
+            },
+            {
+                "priority": "high" if engagement < 3 else "medium",
+                "action": "把评论区高频疑问转为下一条选题",
+                "expected_gain": "互动率 +10%~20%",
+                "effort": "低",
+            },
+            {
+                "priority": "medium",
+                "action": "对表现最好的渠道追加同方向内容，形成话题聚合",
+                "expected_gain": "自然流量叠加 +20%",
+                "effort": "中",
+            },
+        ],
+        "next_brief_suggestions": [
+            f"围绕「{as_str(brief.keywords[0] if brief.keywords else brief.industry)}」做同主题延伸，复用本次有效钩子",
+            f"{window}的数据已可判定方向，建议对最优渠道追加投放预算",
+            "下一轮补齐对照组：同一内容两个标题方向各半量投放，用数据决策",
+        ],
+        "cautions": [
+            "复盘结论基于已回填的投放窗口数据，样本量有限，不代表长期规律",
+            "平台算法与流量分配变化可能使结论失效，建议 7 天后复核一次",
+        ],
+        "confidence": 0.78,
+        "risks": [
+            "回填数据由人工录入，存在口径不一致的风险",
+            "单次投放样本不足以支撑强因果结论",
+        ],
+        "evidence": [
+            {
+                "claim": f"实际 CTR {ctr}%（{clicks}/{exposure}）",
+                "source": "运营回填的投放数据",
+                "reliability": 0.9,
+            },
+            {
+                "claim": f"发布前预估中位 {pred_mid}%",
+                "source": "A10 发布前预估",
+                "reliability": 0.6,
+            },
+        ],
+    }
+
+
 # ------------------------------------------------------------------ #
 # A8 视觉美术指导                                                     #
 # ------------------------------------------------------------------ #
@@ -1779,6 +1937,7 @@ GENERATORS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "A8.visual": generate_visual,
     "A9.channel": generate_channel,
     "A10.analyze": generate_analysis,
+    "A10.review": generate_analysis_review,
     "A11.memory": generate_memory,
 }
 

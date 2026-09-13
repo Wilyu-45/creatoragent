@@ -30,6 +30,7 @@ from __future__ import annotations
 import copy
 import sqlite3
 import threading
+import time
 from typing import Any, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -40,9 +41,11 @@ from langgraph.types import Command, interrupt
 from ..agents.base import AgentRunContext
 from ..agents.registry import get_agent
 from ..config import CHECKPOINT_FILE, get_config
+from ..knowledge.industry import publish_slots
 from ..knowledge.memory import memory_store
+from ..llm.cost import cost_guard
 from ..logger import create_logger
-from .blackboard import blackboard
+from .blackboard import INTENT_TTL_MS, blackboard
 from .clock import now_iso
 from .events import event_bus, new_id
 from .gatekeeper import build_scorecard, decide_gate, to_gate_records
@@ -52,6 +55,7 @@ from .types import (
     ApprovalState,
     Artifact,
     Brief,
+    IntentEntry,
     PipelineNode,
     QualityScorecard,
     RevisionRecord,
@@ -91,6 +95,10 @@ MEMORY_RECALL_TOP_K = 5
 
 #: 安全阀：正常流程远低于此值，命中说明出现了未预期的环路。
 RECURSION_LIMIT = 200
+
+#: 黑板租约的重试策略（plan.md 4.5「租约机制 + 原子操作 + 冲突重试」）
+INTENT_ATTEMPTS = 3
+INTENT_BACKOFF_SECONDS = 0.15
 
 
 class TurnBudgetExceeded(Exception):
@@ -169,6 +177,7 @@ class Orchestrator:
         builder.add_node("a10", self._node_agent("A10"))
         builder.add_node("a11", self._node_agent("A11"))
         builder.add_node("approval", self._node_approval)
+        builder.add_node("publish", self._node_publish)
         builder.add_node("delivery", self._node_delivery)
 
         builder.add_edge(START, "a0")
@@ -198,8 +207,10 @@ class Orchestrator:
         builder.add_conditional_edges(
             "approval",
             self._route_approval,
-            {"delivered": "delivery", "revise": "a4", "rejected": END},
+            {"delivered": "publish", "revise": "a4", "rejected": END},
         )
+        # 审批通过后先生成发布排期（creator.md §5 第 12 步、门禁表「发布 → A9」），再归档交付
+        builder.add_edge("publish", "delivery")
         builder.add_edge("delivery", END)
 
         return builder.compile(checkpointer=self._checkpointer())
@@ -284,6 +295,9 @@ class Orchestrator:
         }
         # resuming 时传 None，让 LangGraph 从检查点继续；否则注入初始状态。
         payload: Any = None if resuming else self._initial_state(task)
+        cfg = get_config()
+        # 成本账本绑定到本任务的执行线程，llm.chat 据此计费并在超预算时熔断
+        cost_guard.begin(task.id, budget_usd=cfg.cost_budget_usd, token_budget=cfg.token_budget)
         try:
             while True:
                 output = self._graph.invoke(payload, config)
@@ -300,6 +314,10 @@ class Orchestrator:
         except Exception as error:  # noqa: BLE001 - 任何异常都要落成 failed，不能吞掉
             self._handle_fatal(task, error)
         finally:
+            self._settle_cost(task)
+            released = blackboard.release_task_intents(task.id)
+            if released:
+                log.info(f"任务 {task.id} 进入终态，回收 {released} 条黑板租约")
             with self._lock:
                 self._running.discard(task.id)
                 self._waiters.pop(task.id, None)
@@ -459,6 +477,11 @@ class Orchestrator:
     def _node_delivery(self, state: PipelineState) -> PipelineState:
         task = self._task(state)
         self._publish_delivery(task, str(state.get("approval_comment") or ""))
+        return {}
+
+    def _node_publish(self, state: PipelineState) -> PipelineState:
+        """审批通过 → 生成多平台发布排期（creator.md §5 第 12 步、门禁表「发布 → A9」）。"""
+        self._stage_publish(self._task(state))
         return {}
 
     # ---------------------------------------------------------------- #
@@ -667,6 +690,37 @@ class Orchestrator:
     # 单步执行                                                          #
     # ---------------------------------------------------------------- #
 
+    def _acquire_lease(
+        self, task: TaskRecord, agent_id: str, direction: str
+    ) -> tuple[IntentEntry | None, str]:
+        """获取黑板工作租约，冲突时退避重试（plan.md 2.2.2 / 4.5）。
+
+        同一任务内的租约冲突只可能来自「节点重放 / 断点续跑残留的旧租约」，
+        ``acquire_intent`` 对同源租约做续期（``renewed``），所以正常情况第 1 次即可拿到；
+        极端情况下记录 ``intent_conflicts`` 后放行执行 —— 不让一个「观测性机制」
+        把流水线彻底卡死，冲突次数则作为可观测指标留给 /api/metrics。
+        """
+        for attempt in range(1, INTENT_ATTEMPTS + 1):
+            entry, outcome = blackboard.acquire_intent(
+                task.id, agent_id, direction, INTENT_TTL_MS
+            )
+            if entry is not None:
+                if outcome == "renewed":
+                    log.info(f"{agent_id} 续期黑板租约 {direction}（节点重放或断点续跑）")
+                return entry, outcome
+            if attempt < INTENT_ATTEMPTS:
+                time.sleep(INTENT_BACKOFF_SECONDS * attempt)
+
+        task.intent_conflicts += 1
+        self._publish(
+            task,
+            "log",
+            f"{agent_id} 未取得黑板租约（{direction} 已被占用），已记录冲突并继续执行",
+            {"agent_id": agent_id, "direction": direction, "conflicts": task.intent_conflicts},
+            "warn",
+        )
+        return None, "conflict"
+
     def _run_agent_step(
         self, task: TaskRecord, agent_id: str, feedback: list[str] | None = None
     ) -> AgentResult:
@@ -703,11 +757,8 @@ class Orchestrator:
             blackboard.add_activity(
                 task.id, "A4", "收到返工意见", f"revision:{task.revision_round}"
             )
-        blackboard.declare_intent(
-            task.id,
-            agent_id,
-            f"{definition.meta.produces}@r{task.revision_round}",
-            180_000,
+        lease, _ = self._acquire_lease(
+            task, agent_id, f"{definition.meta.produces}@r{task.revision_round}"
         )
 
         ctx = AgentRunContext(
@@ -737,6 +788,11 @@ class Orchestrator:
             )
             self._save(task)
             raise
+        finally:
+            # 租约必须成对释放：残留租约会让同一方向的后续 revision 轮次拿不到租约
+            if lease is not None:
+                blackboard.release_intent(lease.key)
+            self._sync_cost(task)
 
         for artifact in result.artifacts:
             blackboard.put_artifact(artifact)
@@ -879,11 +935,26 @@ class Orchestrator:
                 "draft": self._effective_draft(task, True),
             }
         if agent_id == "A10":
-            return {
+            upstream = {
                 "strategy": get("strategy_brief"),
                 "plan": get("content_plan"),
                 "draft": self._effective_draft(task, True),
             }
+            # 效果数据回填后重跑 A10：带上真实数据与发布前的预估基线，
+            # A10 会据此切到「发布后复盘」模式，而不是再算一次预估。
+            actuals = getattr(task, "feedback_actuals", None)
+            if isinstance(actuals, dict) and actuals:
+                upstream["actuals"] = actuals
+                upstream["predicted"] = next(
+                    (
+                        dict(artifact.content)
+                        for artifact in task.artifacts
+                        if artifact.type == "effect_report"
+                        and artifact.content.get("mode") == "pre_publish_estimate"
+                    ),
+                    {},
+                )
+            return upstream
         if agent_id == "A11":
             # A11 是收敛型智能体，需要看到全链路产物才能提炼可复用知识
             return {
@@ -1060,6 +1131,246 @@ class Orchestrator:
     # 最终交付 / 驳回 / 失败                                            #
     # ---------------------------------------------------------------- #
 
+    def _stage_publish(self, task: TaskRecord) -> None:
+        """生成发布排期：把 A9 的渠道适配稿变成可执行的「渠道 × 时段」清单。
+
+        creator.md 的门禁表把「发布」划给 A9，并要求人工审批通过后才发布，
+        因此这一步放在 approval 之后、delivery 之前。这里只产出排期与投放清单，
+        真正的平台投放仍由运营执行，随后通过 ``/api/tasks/{id}/feedback`` 回填效果数据。
+        """
+        self._enter_phase(task, "PUBLISHED")
+        channel_plan = self._content_of(task, "channel_adaptation")
+        platforms = channel_plan.get("platforms")
+        platforms = platforms if isinstance(platforms, list) else []
+
+        primary_slots = publish_slots(task.brief.channel)
+        schedule: list[dict[str, Any]] = []
+        for index, item in enumerate(platforms):
+            if not isinstance(item, dict):
+                continue
+            channel = str(item.get("channel") or task.brief.channel)
+            slots = publish_slots(channel)
+            schedule.append(
+                {
+                    "order": index + 1,
+                    "channel": channel,
+                    # 优先用 A9 给出的建议时段，缺失时按渠道经验值兜底
+                    "slot": str(item.get("publish_slot") or (slots[0] if slots else "")),
+                    "recommended_slots": slots,
+                    "title": item.get("title") or "",
+                    "keywords": item.get("keywords") or [],
+                    "status": "scheduled",
+                    "published_at": None,
+                    "url": "",
+                }
+            )
+        if not schedule:
+            schedule.append(
+                {
+                    "order": 1,
+                    "channel": task.brief.channel,
+                    "slot": primary_slots[0] if primary_slots else "",
+                    "recommended_slots": primary_slots,
+                    "title": "",
+                    "keywords": [],
+                    "status": "scheduled",
+                    "published_at": None,
+                    "url": "",
+                }
+            )
+
+        stamp = now_iso()
+        task.published_at = stamp
+        content: dict[str, Any] = {
+            "brand": task.brief.brand,
+            "primary_channel": task.brief.channel,
+            "approved_at": stamp,
+            "mode": "manual",
+            "schedule": schedule,
+            "checklist": [
+                "确认各渠道标题 / 正文 / 话题标签已按适配稿替换",
+                "确认配图与文案口径一致（以 A8 的图文对照结论为准）",
+                "投放后 24~72 小时内回填曝光 / 点击 / 互动数据，触发复盘",
+            ],
+            "notes": "排期为建议时段，不构成效果承诺",
+        }
+
+        artifact = self._write_artifact(
+            task,
+            agent_id="A9",
+            type_="publish_plan",
+            title="多平台发布排期",
+            content=content,
+            text="\n".join(
+                f"{item['order']}. {item['channel']}｜{item['slot']}｜{item['status']}"
+                for item in schedule
+            ),
+            tags=["发布", "排期", task.brief.channel],
+        )
+        task.results.append(
+            AgentResult(
+                task_id=task.id,
+                agent_id="A9",
+                status="success",
+                summary=f"生成 {len(schedule)} 条渠道发布排期，等待投放与效果回填",
+                artifacts=[artifact],
+                confidence=0.9,
+                metrics={"provider": "orchestrator", "model": "builtin", "simulated": True},
+                created_at=now_iso(),
+            )
+        )
+        self._publish(
+            task,
+            "log",
+            f"发布排期已生成：{len(schedule)} 个渠道待投放（审批通过后自动排期）",
+            {"artifact_id": artifact.id, "channels": [item["channel"] for item in schedule]},
+        )
+
+    # ---------------------------------------------------------------- #
+    # 发布与效果回填（creator.md §5 第 12 步、plan.md v2.0 自动发布）      #
+    # ---------------------------------------------------------------- #
+
+    @staticmethod
+    def _latest_publish_plan(task: TaskRecord) -> Artifact | None:
+        return next((a for a in reversed(task.artifacts) if a.type == "publish_plan"), None)
+
+    def publish_schedule(self, task_id: str) -> dict[str, Any]:
+        """读取当前发布排期（``GET /api/tasks/{id}/publish``）。"""
+        task = task_store.get(task_id)
+        if task is None:
+            raise KeyError("任务不存在")
+        artifact = self._latest_publish_plan(task)
+        return {
+            "task_id": task.id,
+            "phase": task.phase,
+            "status": task.status,
+            "published_at": task.published_at,
+            "artifact_id": artifact.id if artifact else None,
+            "schedule": list(artifact.content.get("schedule") or []) if artifact else [],
+        }
+
+    def mark_published(self, task_id: str, channel: str = "", url: str = "") -> dict[str, Any]:
+        """把排期中的一个渠道（``channel`` 为空表示全部）登记为已发布。
+
+        系统不代运营点「发布」按钮（各平台开放接口差异大且需要授权），
+        但必须记录「哪个渠道、什么时候投出去」这份事实 —— 否则后续回填的
+        效果数据没有可对齐的基线，A/B 结论也就无从谈起。
+        """
+        task = task_store.get(task_id)
+        if task is None:
+            raise KeyError("任务不存在")
+        artifact = self._latest_publish_plan(task)
+        if artifact is None:
+            raise ValueError("该任务还没有发布排期，请先完成审批")
+
+        target = channel.strip()
+        schedule = [
+            dict(item)
+            for item in (artifact.content.get("schedule") or [])
+            if isinstance(item, dict)
+        ]
+        stamp = now_iso()
+        matched: list[str] = []
+        for item in schedule:
+            if target and str(item.get("channel")) != target:
+                continue
+            if str(item.get("status")) == "published":
+                continue
+            item["status"] = "published"
+            item["published_at"] = stamp
+            if url:
+                item["url"] = url
+            matched.append(str(item.get("channel")))
+
+        if not matched:
+            raise ValueError(f"渠道「{target or '全部'}」没有待发布的排期项（可能已登记过）")
+
+        content = dict(artifact.content)
+        content["schedule"] = schedule
+        content["last_published_at"] = stamp
+        updated = self._write_artifact(
+            task,
+            agent_id="A9",
+            type_="publish_plan",
+            title="多平台发布排期（已更新）",
+            content=content,
+            text="\n".join(
+                f"{item.get('order')}. {item.get('channel')}｜{item.get('slot')}｜{item.get('status')}"
+                for item in schedule
+            ),
+            tags=["发布", "排期", task.brief.channel],
+        )
+        if not task.published_at:
+            task.published_at = stamp
+        self._publish(
+            task,
+            "log",
+            f"已登记发布：{len(matched)} 个渠道（{'、'.join(matched)}）",
+            {"artifact_id": updated.id, "channels": matched},
+        )
+        self._save(task, True)
+
+        return {
+            "task_id": task.id,
+            "published": matched,
+            "published_at": stamp,
+            "artifact_id": updated.id,
+            "schedule": schedule,
+        }
+
+    def record_feedback(self, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """回填发布后的真实效果数据，并触发 A10 复盘（A/B 闭环回填）。
+
+        做法是把真实数据挂到任务上再重跑 A10：上游一旦出现 ``actuals``，
+        A10 就从「发布前预估」切到「发布后复盘」，产出 ``effect_report`` 新版本。
+        复盘与预估因此共用同一个智能体与同一种产物类型，不必再造一个 A12。
+        """
+        task = task_store.get(task_id)
+        if task is None:
+            raise KeyError("任务不存在")
+        if task.status in ("running", "awaiting_approval"):
+            raise ValueError("任务仍在执行中，暂时不能回填效果数据")
+
+        raw = payload.get("metrics")
+        metrics = raw if isinstance(raw, dict) else {}
+        cleaned = {
+            key: value
+            for key, value in metrics.items()
+            if isinstance(value, (int, float, str)) and not isinstance(value, bool)
+        }
+        if not cleaned:
+            raise ValueError("metrics 不能为空，至少需要 exposure 与 clicks")
+
+        channel = str(payload.get("channel") or task.brief.channel)
+        actuals: dict[str, Any] = {
+            "channel": channel,
+            "window": str(payload.get("window") or "发布后 72 小时"),
+            **cleaned,
+        }
+        task.feedback_actuals = actuals  # type: ignore[attr-defined]
+
+        try:
+            self.mark_published(task_id, channel, str(payload.get("url") or ""))
+        except ValueError:
+            # 排期里没有该渠道也要允许回填，避免运营被流程细节挡住
+            log.warn(f"任务 {task.id} 回填时未找到渠道 {channel} 的待发布排期项，仅记录数据")
+
+        result = self._run_agent_step(task, "A10")
+        self._publish(
+            task,
+            "log",
+            f"效果数据已回填（{channel}），A10 完成复盘并给出 A/B 结论",
+            {"channel": channel, "actuals": actuals},
+        )
+        self._save(task, True)
+
+        return {
+            "task": task,
+            "result": result,
+            "actuals": actuals,
+            "artifact": result.artifacts[-1] if result.artifacts else None,
+        }
+
     def _publish_delivery(self, task: TaskRecord, comment: str) -> None:
         draft = self._effective_draft(task, True)
         versions = draft.get("versions")
@@ -1120,6 +1431,21 @@ class Orchestrator:
                 "copy_aligned": aligned.get("aligned", True),
             },
             "knowledge_cards": cards,
+            # 交付件直接带上发布排期，运营拿到即可执行；status/published_at 由回填接口更新
+            "publish_schedule": [
+                {
+                    "channel": item.get("channel"),
+                    "slot": item.get("slot"),
+                    "status": item.get("status"),
+                    "published_at": item.get("published_at"),
+                    "url": item.get("url"),
+                }
+                for item in (
+                    self._content_of(task, "publish_plan").get("schedule") or []
+                )
+                if isinstance(item, dict)
+            ],
+            "published_at": task.published_at,
             "scorecard": task.scorecard.model_dump(mode="json") if task.scorecard else None,
             "review_summary": {
                 "editor": self._summary_of(task, "A5"),
@@ -1210,6 +1536,36 @@ class Orchestrator:
             return {}
         return artifact.content
 
+    def _sync_cost(self, task: TaskRecord) -> None:
+        """把成本账本同步进任务记录，让前端与 /api/metrics 看到实时花费。
+
+        账本是唯一事实来源：缓存命中不计费但计入 ``cached``，熔断后 ``cut_off`` 置位。
+        """
+        ledger = cost_guard.ledger(task.id)
+        if ledger is None:
+            return
+        task.tokens.calls = ledger.calls
+        task.tokens.cached = ledger.cached
+        task.tokens.cut_off = ledger.cut_off
+        task.tokens.cost_usd = round(ledger.cost_usd, 6)
+
+    def _settle_cost(self, task: TaskRecord) -> None:
+        """任务终态时结算账本；发生熔断时补一条可解释的事件。"""
+        self._sync_cost(task)
+        ledger = cost_guard.end(task.id)
+        if ledger is None:
+            return
+        if ledger.cut_off:
+            self._publish(
+                task,
+                "log",
+                f"成本熔断生效：调用 {ledger.calls} 次（缓存命中 {ledger.cached} 次），"
+                f"花费 ${ledger.cost_usd:.4f}，超出预算的部分已由离线引擎兜底",
+                {"cost": ledger.to_dict()},
+                "warn",
+            )
+        self._save(task, True)
+
     def _finish_rejected(self, task: TaskRecord, reason: str) -> None:
         task.status = "rejected"
         task.phase = "REJECTED"
@@ -1219,6 +1575,7 @@ class Orchestrator:
         task.approval.decision = "rejected"
         task.approval.comment = reason
         task.approval.decided_at = task.finished_at
+        blackboard.release_task_intents(task.id)
         self._publish(task, "task.status", f"任务被驳回：{reason}", {"status": "rejected"}, "warn")
         task_store.schedule_save(task, True)
 
@@ -1230,6 +1587,7 @@ class Orchestrator:
         task.finished_at = now_iso()
         self._publish(task, "task.failed", f"任务执行失败：{message}", {"error": message}, "error")
         log.error(f"任务 {task.id} 失败", error)
+        blackboard.release_task_intents(task.id)
         task_store.schedule_save(task, True)
 
     # ---------------------------------------------------------------- #

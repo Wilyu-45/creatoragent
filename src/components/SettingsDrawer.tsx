@@ -31,6 +31,9 @@ export function SettingsDrawer({
   const [maxRevisions, setMaxRevisions] = useState(config.maxRevisions);
   const [qualityThreshold, setQualityThreshold] = useState(config.qualityThreshold);
   const [autoApprove, setAutoApprove] = useState(config.autoApprove);
+  const [costBudgetUsd, setCostBudgetUsd] = useState(config.costBudgetUsd);
+  const [tokenBudget, setTokenBudget] = useState(config.tokenBudget);
+  const [llmCache, setLlmCache] = useState(config.llmCache);
 
   const save = (): void => {
     const patch: Record<string, unknown> = {
@@ -44,6 +47,9 @@ export function SettingsDrawer({
       maxRevisions,
       qualityThreshold,
       autoApprove,
+      costBudgetUsd,
+      tokenBudget,
+      llmCache,
     };
     if (apiKey.trim()) patch.apiKey = apiKey.trim();
     onSave(patch);
@@ -163,6 +169,36 @@ export function SettingsDrawer({
               />
               自动审批（新任务默认跳过人工裁决）
             </label>
+
+            <div className="section-h">成本与缓存</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>单任务成本上限（USD）</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={costBudgetUsd}
+                  onChange={(e) => setCostBudgetUsd(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>单任务 token 上限</label>
+                <input type="number" min="0" value={tokenBudget} onChange={(e) => setTokenBudget(Number(e.target.value))} />
+              </div>
+            </div>
+            <label className="row small" style={{ marginTop: 12, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={llmCache}
+                onChange={(e) => setLlmCache(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              启用 LLM 响应缓存（重复请求直接复用，省钱且零延迟）
+            </label>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              成本或 token 任一超限即触发熔断：后续步骤自动改用内置离线引擎，保证交付链路不中断。
+            </div>
 
             <div className="row" style={{ justifyContent: 'flex-end', marginTop: 18 }}>
               <button className="btn btn-primary" onClick={save} disabled={saving}>

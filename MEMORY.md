@@ -90,7 +90,7 @@ scripts/
   smoke_api.py           # 端到端验收（REST/SSE/错误分支/持久化/静态托管/新增阶段/记忆召回）
 src/                     # 前端；契约类型自持于 src/lib/types.ts
   components/MemoryPanel.tsx   # 设置抽屉「记忆库」标签页：统计 + 检索召回 + 卡片列表
-server/                  # 旧 TypeScript 实现（保留作参照，已不被引用；首次提交已建立，可择机删除）
+  components/PublishPanel.tsx  # 发布登记 + 效果回填（触发 A10 复盘）
 ```
 
 ---
@@ -132,15 +132,50 @@ server/                  # 旧 TypeScript 实现（保留作参照，已不被�
   `/settings`(GET/PUT)、`/tasks`(GET/POST)、`/tasks/:id`(GET/DELETE)、`/tasks/:id/decide`、
   `/tasks/:id/events`(SSE)、`/metrics`、`/tasks/:id/blackboard`。
 
+### 4.1b 后端 · 第三轮加固（2026-09-13，已完成）
+
+- **黑板 Intent 租约闭环**：`blackboard.acquire_intent(task_id, agent_id, direction, ttl_ms)` 返回
+  `(IntentEntry|None, "claimed"|"renewed"|"conflict")`，`release_task_intents(task_id)` 在任务终态回收；
+  编排层 `_acquire_lease()` 冲突重试并累计 `task.intent_conflicts`，`_run_agent_step` 的 `finally` 释放租约。
+- **成本核算 + 熔断 + 缓存**：`app/llm/pricing.py`（迁出定价）、`app/llm/cost.py`（一任务一账本
+  `cost_guard.begin/should_cut/charge/ledger/end/metrics`，超 `cost_budget_usd` 或 `token_budget` 即熔断到离线引擎）、
+  `app/llm/cache.py`（`response_cache`，键含 provider/model/temperature/max_tokens/messages，容量 256、TTL 1h）；
+  `llm/engine.py` 的 `chat()` 前置熔断判断 + 缓存命中复用 + 成功后计费与写缓存；`LLMResponse.cached` 透传。
+- **知识过期下线与新鲜度**：`memory.py` 增加 `MAX_AGE_DAYS=180`（超期自动下线）、`FRESH_DAYS=30`、
+  `STALE_DAYS=120`；`MemoryHit` 带 `age_days/fresh`，同分优先新鲜；`stats()` 增加新鲜度统计。
+- **发布排期与效果回填复盘闭环**：编排新增 `_node_publish/_stage_publish`（审批通过后生成 `publish_plan`，
+  阶段 PUBLISHED）、`publish_schedule()`、`mark_published()`、`record_feedback()`；A10 上游注入 `actuals`
+  时从「发布前预估」切换到「发布后复盘」（`REVIEW_SCHEMA` / `normalize_review` / `_run_review`）；
+  `mock.py` 新增 `A10.review`。
+- **接口扩展**：`GET/POST /api/tasks/:id/publish`、`POST /api/tasks/:id/feedback`；
+  `/api/metrics` 的 `system` 新增 `cost` / `cache` / `leases`；`/api/settings` 支持
+  `costBudgetUsd` / `tokenBudget` / `llmCache`。
+- **配置**：`RuntimeConfig` 增加 `cost_budget_usd=0.5`、`token_budget=50000`、`llm_cache=True`
+  （环境变量 `COST_BUDGET_USD` / `TOKEN_BUDGET` / `LLM_CACHE`）。
+- **清理旧实现**：`git rm -r server/`（TypeScript 后端目录），`tsconfig.json` 的 `include` 去掉 `"server"`，
+  `package.json` 清空 `dependencies`。
+- **契约扩展**：`ArtifactType` 增加 `publish_plan`；`TokenUsage` 增加 `calls/cached/cut_off`；
+  `TaskRecord` 增加 `intent_conflicts/published_at`；`AgentMetrics` 增加 `cached/cut_off`。
+- **验收同步**：`smoke_api.py` 增加发布排期 → 登记发布 → 效果回填复盘断言，以及
+  `/api/metrics` 的 cost/cache/leases 断言（含 `leases['active'] == 0`）。
+
 ### 4.2 前端（`npm run build` 通过）
 
-- Topbar、侧栏任务列表、流水线看板、共享黑板产物查看器（13 种类型 + 版本 diff）、
-  事件时间线、审批面板、指标面板、新建任务弹窗、设置抽屉（含知识库 / 记忆库两个标签页）。
+- Topbar、侧栏任务列表、流水线看板、共享黑板产物查看器（**14 种类型** + 版本 diff）、
+  事件时间线、审批面板、发布与效果回填面板、指标面板、新建任务弹窗、
+  设置抽屉（含知识库 / 记忆库两个标签页）。
 - 实时性：SSE 订阅（`since` 续传）+ 2.5s 详情轮询兜底，按 `seq` 去重。
-- **契约解耦**：类型改由 `src/lib/types.ts` 自持（原先 import 旧的 `server/core/types.ts`），
-  并补齐 `VISUAL_ADAPT / CHANNEL_ADAPT / MEMORY` 阶段与 `visual_brief / channel_adaptation /
-  knowledge_card` 产物类型；`ArtifactViewer` 新增视觉、渠道、知识三类专用视图。
+- **契约解耦**：类型自持于 `src/lib/types.ts`（不再 import 旧的 `server/`），
+  并补齐 `VISUAL_ADAPT / CHANNEL_ADAPT / MEMORY / PUBLISHED` 阶段与
+  `visual_brief / channel_adaptation / publish_plan / knowledge_card` 产物类型；
+  `ArtifactViewer` 新增视觉、渠道、**发布排期**、知识四类专用视图。
+- **发布面板**（`src/components/PublishPanel.tsx`）：审批后自动出现，逐渠道/批量「登记发布」，
+  并回填曝光/点击/互动/转化触发 A10 复盘；任务详情头部显示已排期与租约冲突徽标。
+- **指标面板**：新增「成本 · 缓存 · 并发」区块（累计/平均成本、预算、熔断任务数、
+  缓存命中率与命中/未命中、黑板活跃租约与冲突）。
+- **设置抽屉**：新增「成本与缓存」分组（单任务成本上限、token 上限、LLM 响应缓存开关）。
 - **记忆库面板**（`src/components/MemoryPanel.tsx`）：展示卡片总数 / 容量 / 覆盖任务 / 各类型分布，
+  **新增新鲜度统计（新鲜 / 陈旧 / 最旧天数 / 过期阈值）**；
   内置检索框（走 `POST /api/memory/search`，与智能体召回同源），
   命中项显示分数、命中理由与复用建议，下方列出全部卡片及其来源任务。
 
@@ -252,12 +287,16 @@ server/                  # 旧 TypeScript 实现（保留作参照，已不被�
 - [x] A8 视觉美术指导、A9 渠道与 SEO、A11 记忆与知识库智能体 —— 已完成并进入 LangGraph 主流水线。
 - [x] 记忆库「写入 → 检索召回」闭环（RAG）—— 已完成：卡片持久化 + 打分召回 + A1/A2/A4 注入 + 检索接口 + 前端面板。
 - [x] 检查点清理 —— 已完成：删除任务时按 `thread_id` 回收 `writes`/`checkpoints`。
+- [x] 成本熔断与响应缓存 —— 已完成：一任务一账本、超预算熔断到离线引擎、响应缓存命中复用。
+- [x] 共享黑板租约机制与冲突重试 —— 已完成：`acquire_intent/release_task_intents` + 冲突退避与计数。
+- [x] 发布排期与 A/B 效果回填闭环 —— 已完成：审批后生成 `publish_plan`，登记发布 + 回填触发 A10 复盘。
+- [x] 知识过期下线策略 —— 已完成：`MAX_AGE_DAYS` 自动下线 + `FRESH_DAYS/STALE_DAYS` 新鲜度。
+- [x] 删除旧 `server/`（TypeScript）目录 —— 已完成（`git rm -r server/`）。
+- [x] 用户使用说明文档 —— 已完成：根目录 `USER_GUIDE.md`。
 - [ ] 换向量检索（当前是 2-gram + 元数据加成的 RAG-lite；接口已按 vector-ready 设计）。
-- [ ] 真实模型链路压测与 Prompt 调优；成本熔断与缓存。
-- [ ] 共享黑板并发冲突的租约机制与冲突重试（当前记忆库已加进程内 RLock，黑板尚未加租约）。
-- [ ] 多平台一键发布 / 自动排期；A/B 测试闭环回填效果数据（A9 已给出建议发布时段，尚未真正定时发布）。
-- [ ] 记忆库的多租户/权限与「知识过期下线」策略（当前只有容量上限淘汰最旧）。
-- [ ] 旧 `server/`（TypeScript）在确认契约完全对齐后可以删除（当前 `src/` 已不再 import 它）。
+- [ ] 真实模型链路压测与 Prompt 调优。
+- [ ] 多平台真实一键发布（各平台开放接口授权与鉴权差异大，当前为「登记事实 + 复盘」闭环）。
+- [ ] 记忆库的多租户 / 权限。
 
 ---
 
@@ -333,3 +372,17 @@ server/                  # 旧 TypeScript 实现（保留作参照，已不被�
     ```
 
     若 `rebase` 出现冲突，先 `git ls-tree -r --name-only origin/main` 看清远端已有哪些文件再决定保留策略。
+
+- **2026-09-13（第三轮：剩余条目闭环 + 用户文档）**
+  - 依据《plan.md》与《creator.md》清点并落地尚未实现的条目：
+    - **黑板 Intent 租约**：`blackboard.acquire_intent/release_task_intents`，编排层登记/续租/冲突退避 + `intent_conflicts` 计数。
+    - **成本核算 / 预算熔断 / 响应缓存**：新增 `app/llm/pricing.py`、`cost.py`、`cache.py`；
+      `chat()` 前置熔断 + 缓存复用 + 计费；配置项 `cost_budget_usd/token_budget/llm_cache`。
+    - **知识过期下线与新鲜度**：`memory.py` 的 `MAX_AGE_DAYS/FRESH_DAYS/STALE_DAYS` + 同分优先新鲜 + 统计。
+    - **发布闭环**：`publish_plan` 产物、`/tasks/:id/publish`、`/tasks/:id/feedback`、A10 发布后复盘（`A10.review`）。
+    - **删除旧 `server/`**：`git rm -r server/`，同步 `tsconfig.json` 与 `package.json`。
+    - **用户文档**：新增 `USER_GUIDE.md`（启动、界面导览、实操流程、配置表、接口速查、FAQ）。
+  - 前端同步：`publish_plan` 视图、`PublishPanel` 发布/回填、指标面板成本与缓存区块、
+    设置抽屉成本分组、记忆库新鲜度 chips。
+  - 验证：`scripts/doctor.py` 通过；`scripts/smoke_api.py` **通过（exit 0，含发布闭环与 cost/cache/leases 断言）**；
+    `npm run typecheck` 与 `npm run build` 通过。

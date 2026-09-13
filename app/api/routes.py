@@ -28,6 +28,8 @@ from ..knowledge.compliance import INDUSTRY_RULES, LEXICON_GROUPS
 from ..knowledge.industry import CHANNEL_RULES, INDUSTRY_PROFILES
 from ..knowledge.memory import CARD_KINDS, KIND_LABEL, memory_store
 from ..llm import resolve_provider
+from ..llm.cache import response_cache
+from ..llm.cost import cost_guard
 from ..logger import create_logger
 
 log = create_logger("api")
@@ -97,6 +99,8 @@ def task_summary(task: TaskRecord) -> dict[str, Any]:
         "phase_label": PHASE_LABEL.get(task.phase, task.phase),
         "revision_round": task.revision_round,
         "turn_used": task.turn_used,
+        "intent_conflicts": task.intent_conflicts,
+        "published_at": task.published_at,
         "scorecard": task.scorecard.model_dump(mode="json") if task.scorecard else None,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
@@ -244,6 +248,12 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
             patch[key] = body[key]
     if isinstance(body.get("autoApprove"), bool):
         patch["autoApprove"] = body["autoApprove"]
+    for key in ("costBudgetUsd", "tokenBudget"):
+        value = body.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            patch[key] = value
+    if isinstance(body.get("llmCache"), bool):
+        patch["llmCache"] = body["llmCache"]
 
     update_config(patch)
     log.info(
@@ -322,6 +332,57 @@ def decide(task_id: str, payload: dict[str, Any] | None = Body(default=None)) ->
     except Exception as error:  # noqa: BLE001
         raise HTTPException(status_code=409, detail=str(error)) from error
     return {"task": task_summary(task)}
+
+
+@router.get("/tasks/{task_id}/publish")
+def read_publish_plan(task_id: str) -> dict[str, Any]:
+    """读取任务的发布排期（审批通过后由编排层自动生成）。"""
+    try:
+        return orchestrator.publish_schedule(task_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/tasks/{task_id}/publish")
+def mark_task_published(
+    task_id: str, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """登记发布：把某个渠道（不传 ``channel`` 表示全部）标记为已发布。"""
+    body: dict[str, Any] = payload or {}
+    try:
+        return orchestrator.mark_published(
+            task_id, str(body.get("channel") or ""), str(body.get("url") or "")
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/tasks/{task_id}/feedback")
+def submit_feedback(
+    task_id: str, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """回填发布后的真实效果数据，触发 A10 复盘并形成 A/B 结论。
+
+    请求体形如 ``{"channel": "小红书", "window": "发布后 72 小时",
+    "metrics": {"exposure": 12000, "clicks": 480, "interactions": 260, "conversions": 24}}``。
+    """
+    body: dict[str, Any] = payload or {}
+    try:
+        outcome = orchestrator.record_feedback(task_id, body)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    artifact = outcome["artifact"]
+    return {
+        "task": task_summary(outcome["task"]),
+        "actuals": outcome["actuals"],
+        "result": outcome["result"].model_dump(mode="json"),
+        "artifact_id": artifact.id if artifact else None,
+    }
 
 
 @router.get("/tasks/{task_id}/blackboard")
@@ -435,6 +496,9 @@ def metrics() -> dict[str, Any]:
 
     all_results = [result for task in tasks for result in task.results]
     simulated = sum(1 for result in all_results if result.metrics.simulated)
+    cached_calls = sum(1 for result in all_results if result.metrics.cached)
+    cut_off_tasks = sum(1 for task in tasks if task.tokens.cut_off)
+    total_cost = sum(task.tokens.cost_usd for task in tasks)
 
     provider = resolve_provider()
     config = get_config()
@@ -463,6 +527,24 @@ def metrics() -> dict[str, Any]:
             "p99_agent_latency_ms": p99,
             "tokens": tokens,
             "simulated_ratio": _rate(simulated, len(all_results)),
+            # 成本相关指标（plan.md 2.4「单篇内容成本」「成本熔断」）
+            "cost": {
+                "total_cost_usd": round(total_cost, 6),
+                "avg_cost_per_task_usd": (
+                    round(total_cost / len(completed), 6) if completed else 0
+                ),
+                "budget_usd": config.cost_budget_usd,
+                "token_budget": config.token_budget,
+                "cut_off_tasks": cut_off_tasks,
+                "cached_calls": cached_calls,
+                **(cost_guard.metrics()),
+            },
+            # 缓存与租约：缓存命中率体现省钱效率，租约冲突体现黑板并发压力
+            "cache": response_cache.stats(),
+            "leases": {
+                "active": len(blackboard.active_intents()),
+                "conflicts": sum(task.intent_conflicts for task in tasks),
+            },
         },
         "providers": [
             {

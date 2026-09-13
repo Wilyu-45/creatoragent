@@ -1,4 +1,4 @@
-import type { AgentEvent, BlackboardSnapshot, Brief, TaskRecord } from './types.ts';
+import type { AgentEvent, AgentResult, BlackboardSnapshot, Brief, TaskRecord } from './types.ts';
 
 export interface TaskSummary {
   id: string;
@@ -16,6 +16,10 @@ export interface TaskSummary {
   artifact_count: number;
   approval: TaskRecord['approval'];
   error: string | null;
+  /** 黑板租约冲突次数 */
+  intent_conflicts: number;
+  /** 发布排期生效时间 */
+  published_at: string | null;
 }
 
 export interface AgentMetaView {
@@ -43,6 +47,12 @@ export interface PublicConfigView {
   maxRevisions: number;
   qualityThreshold: number;
   autoApprove: boolean;
+  /** 单任务成本上限（美元），超出即熔断到离线引擎 */
+  costBudgetUsd: number;
+  /** 单任务 token 上限 */
+  tokenBudget: number;
+  /** 是否启用 LLM 响应缓存 */
+  llmCache: boolean;
   llm: {
     provider: 'mock' | 'openai';
     baseUrl: string;
@@ -62,9 +72,41 @@ export interface HealthView {
   provider: { name: string; model: string; simulated: boolean };
 }
 
+/** 成本核算视图（/api/metrics → system.cost）。 */
+export interface CostView {
+  total_cost_usd: number;
+  avg_cost_per_task_usd: number;
+  budget_usd: number;
+  token_budget: number;
+  cut_off_tasks: number;
+  cached_calls: number;
+  /** cost_guard 全局统计：累计熔断任务数与存活账本数 */
+  cutOffTasks: number;
+  activeLedgers: number;
+}
+
+/** 响应缓存视图（/api/metrics → system.cache） */
+export interface CacheView {
+  entries: number;
+  capacity: number;
+  ttlSeconds: number;
+  hits: number;
+  misses: number;
+  hitRate: number;
+}
+
+/** 黑板租约视图（/api/metrics → system.leases） */
+export interface LeaseView {
+  active: number;
+  conflicts: number;
+}
+
 export interface MetricsView {
   system: Record<string, number> & {
     tokens: { prompt: number; completion: number; cost_usd: number };
+    cost: CostView;
+    cache: CacheView;
+    leases: LeaseView;
   };
   providers: { name: string; model: string; simulated: boolean }[];
   agents: {
@@ -113,6 +155,9 @@ export interface MemoryCardView {
 export interface MemoryHitView extends MemoryCardView {
   score: number;
   reasons: string[];
+  /** 卡片年龄（天）与新鲜度 */
+  age_days: number;
+  fresh: boolean;
 }
 
 export interface MemoryView {
@@ -123,9 +168,53 @@ export interface MemoryView {
     brands: string[];
     tasks: number;
     reused: number;
+    /** 知识新鲜度：过期下线阈值 / 最旧卡片 / 新鲜与陈旧数量 */
+    max_age_days: number;
+    fresh_days: number;
+    oldest_days: number;
+    fresh: number;
+    stale: number;
   };
   kinds: { kind: string; label: string }[];
   cards: MemoryCardView[];
+}
+
+/** 发布排期中的单个渠道条目。 */
+export interface PublishScheduleItem {
+  order: number;
+  channel: string;
+  slot: string;
+  recommended_slots: string[];
+  title: string;
+  keywords: string[];
+  /** scheduled | published */
+  status: string;
+  published_at: string | null;
+  url: string;
+}
+
+export interface PublishScheduleView {
+  task_id: string;
+  phase: TaskRecord['phase'];
+  status: TaskRecord['status'];
+  published_at: string | null;
+  artifact_id: string | null;
+  schedule: PublishScheduleItem[];
+}
+
+export interface MarkPublishedView {
+  task_id: string;
+  published: string[];
+  published_at: string;
+  artifact_id: string;
+  schedule: PublishScheduleItem[];
+}
+
+export interface FeedbackView {
+  task: TaskSummary;
+  actuals: Record<string, unknown>;
+  result: AgentResult;
+  artifact_id: string | null;
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -172,6 +261,20 @@ export const api = {
     request<{ task: TaskSummary }>(`/api/tasks/${id}/decide`, {
       method: 'POST',
       body: JSON.stringify({ decision, comment }),
+    }),
+  publishSchedule: (id: string) => request<PublishScheduleView>(`/api/tasks/${id}/publish`),
+  markPublished: (id: string, channel = '', url = '') =>
+    request<MarkPublishedView>(`/api/tasks/${id}/publish`, {
+      method: 'POST',
+      body: JSON.stringify({ channel, url }),
+    }),
+  submitFeedback: (
+    id: string,
+    payload: { channel?: string; window?: string; url?: string; metrics: Record<string, number | string> },
+  ) =>
+    request<FeedbackView>(`/api/tasks/${id}/feedback`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
 };
 

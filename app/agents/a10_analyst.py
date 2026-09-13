@@ -80,7 +80,41 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run(ctx: AgentRunContext) -> AgentResult:
+REVIEW_SCHEMA = """{
+  "predicted_comparison": {"metric": "ctr", "predicted_mid": 0, "actual": 0, "delta": 0, "verdict": "超预期|符合预期|低于预期", "note": ""},
+  "actuals": {"exposure": 0, "clicks": 0, "interactions": 0, "conversions": 0, "ctr": 0, "engagement": 0, "conversion": 0},
+  "attribution": [{"factor": "", "impact": "high|medium|low", "note": ""}],
+  "ab_conclusion": {"hypothesis": "", "winner": "A|B", "confidence": 0.0, "note": "", "ready_to_scale": false},
+  "optimizations": [{"priority": "high|medium|low", "action": "", "expected_gain": "", "effort": ""}],
+  "next_brief_suggestions": [""],
+  "cautions": [""],
+  "confidence": 0.0,
+  "risks": [""],
+  "evidence": [{"claim": "", "source": "", "reliability": 0.0}]
+}"""
+
+
+def normalize_review(data: dict[str, Any], actuals: dict[str, Any]) -> dict[str, Any]:
+    """复盘结果归一化：``mode`` 固定为 ``post_publish_review``。
+
+    前端据此区分同为 ``effect_report`` 的两种产物——发布前预估与发布后复盘。
+    """
+    cautions = as_str_array(data.get("cautions"))
+    return {
+        "mode": "post_publish_review",
+        "window": as_str(actuals.get("window"), "发布后 72 小时"),
+        "channel": as_str(actuals.get("channel")),
+        "actuals": as_obj(data.get("actuals")) or dict(actuals),
+        "predicted_comparison": as_obj(data.get("predicted_comparison")),
+        "attribution": as_obj_array(data.get("attribution")),
+        "ab_conclusion": as_obj(data.get("ab_conclusion")),
+        "optimizations": as_obj_array(data.get("optimizations")),
+        "next_brief_suggestions": as_str_array(data.get("next_brief_suggestions")),
+        "cautions": cautions or ["复盘结论基于已回填的投放窗口数据，样本有限，不代表长期规律"],
+    }
+
+
+def _run_estimate(ctx: AgentRunContext) -> AgentResult:
     brief = ctx.brief
     draft = ctx.upstream_of("draft")
     plan = ctx.upstream_of("plan")
@@ -160,6 +194,90 @@ def run(ctx: AgentRunContext) -> AgentResult:
             handoff={"to": None, "reason": "分析完成，等待人工审批"},
         ),
     )
+
+
+def _run_review(ctx: AgentRunContext, actuals: dict[str, Any]) -> AgentResult:
+    """发布后复盘：拿真实数据与发布前预估对照，输出归因与 A/B 结论。"""
+    brief = ctx.brief
+    predicted = ctx.upstream_of("predicted")
+    window = as_str(actuals.get("window"), "发布后 72 小时")
+
+    ctx.emit("收到运营回填的真实效果数据，开始发布后复盘")
+
+    user = f"""【复盘对象】{brief.channel}｜观察窗口：{window}
+品牌：{brief.brand}｜目标：{brief.objective}｜受众：{brief.audience}
+
+【真实数据（运营回填）】
+曝光：{as_str(actuals.get('exposure'))}｜点击：{as_str(actuals.get('clicks'))}
+互动：{as_str(actuals.get('interactions'))}｜转化：{as_str(actuals.get('conversions'))}
+
+【发布前预估（用于对照，可能缺失）】
+{content_to_text(predicted) if predicted else '（无预估基线，请只做绝对表现解读，不要编造对照数据）'}
+
+请输出复盘报告，严格要求 JSON 结构如下：
+{REVIEW_SCHEMA}"""
+
+    result = call_with_prompts(
+        ctx,
+        META,
+        SYSTEM,
+        user,
+        "A10.review",
+        {
+            "brief": brief.model_dump(mode="json"),
+            "actuals": actuals,
+            "predicted": predicted,
+        },
+    )
+
+    content = normalize_review(result.data, actuals)
+    comparison = as_obj(content["predicted_comparison"])
+    optimizations = as_obj_array(content["optimizations"])
+    verdict = as_str(comparison.get("verdict"), "已完成复盘")
+
+    ctx.emit("发布后复盘完成", {"verdict": verdict, "delta": comparison.get("delta")})
+
+    artifact = build_artifact(
+        ctx,
+        META,
+        ArtifactDraft(
+            type="effect_report",
+            title="发布后效果复盘报告",
+            content=content,
+            text=content_to_text(content),
+            tags=["数据分析", "复盘", brief.channel],
+        ),
+    )
+
+    return build_result(
+        ctx,
+        META,
+        result.metrics,
+        ResultDraft(
+            summary=(
+                f"完成发布后复盘：{verdict}"
+                f"（实际 CTR {as_str(as_obj(content['actuals']).get('ctr'))}%），"
+                f"输出 {len(optimizations)} 条优化建议与下一轮 Brief 建议"
+            ),
+            artifacts=[artifact],
+            confidence=read_confidence(result.data, 0.78),
+            risks=read_risks(result.data),
+            evidence=read_evidence(result.data),
+            handoff={"to": None, "reason": "复盘完成，结论可用于下一轮 Brief"},
+        ),
+    )
+
+
+def run(ctx: AgentRunContext) -> AgentResult:
+    """A10 有两种模式，由编排层注入的上游数据决定：
+
+    * 上游带 ``actuals``（运营回填的真实数据）→ 发布后复盘；
+    * 否则 → 发布前效果预估。
+    """
+    actuals = ctx.upstream.get("actuals")
+    if isinstance(actuals, dict) and actuals:
+        return _run_review(ctx, actuals)
+    return _run_estimate(ctx)
 
 
 a10_analyst = AgentDefinition(meta=META, run=run)

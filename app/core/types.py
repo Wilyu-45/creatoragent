@@ -446,6 +446,9 @@ class TaskRecord(BaseModel):
     intent_conflicts: int = 0
     #: 发布排期时间（approval 通过后自动生成的生效时间）
     published_at: str | None = None
+    #: 归属租户（plan.md D17「数据隔离」）。未启用鉴权时固定为 ``default``，
+    #: 启用 ``CREATOR_API_TOKENS`` 后由请求方 token 决定，列表与详情按此过滤。
+    tenant: str = "default"
 
 
 # ------------------------------------------------------------------ #

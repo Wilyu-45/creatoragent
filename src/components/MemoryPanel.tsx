@@ -90,6 +90,15 @@ export function MemoryPanel() {
             过期阈值 {stats.max_age_days} 天
           </Chip>
         </div>
+        <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+          <Chip tone="tone-info" title={`向量提供方：${stats.embedding.provider}｜模型：${stats.embedding.model}`}>
+            向量检索 {stats.embedding.provider}
+          </Chip>
+          <Chip tone="tone-idle" title="语义分量在混合打分中的权重，0 表示纯关键词">
+            语义权重 {stats.embedding.weight}
+          </Chip>
+          <Chip tone="tone-idle">已建索引 {stats.vector_indexed} 条</Chip>
+        </div>
       </div>
 
       <div>
@@ -125,6 +134,11 @@ export function MemoryPanel() {
                       <Chip key={reason}>{reason}</Chip>
                     ))}
                     <Chip tone={scoreTone(hit.score * 100)}>score {hit.score}</Chip>
+                    {hit.vector_score > 0 ? (
+                      <Chip tone="tone-idle" title="查询与卡片的向量余弦相似度">
+                        语义 {hit.vector_score}
+                      </Chip>
+                    ) : null}
                   </span>
                 </div>
                 <div className="muted small" style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>

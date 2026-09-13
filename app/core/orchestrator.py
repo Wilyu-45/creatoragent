@@ -49,6 +49,7 @@ from .blackboard import INTENT_TTL_MS, blackboard
 from .clock import now_iso
 from .events import event_bus, new_id
 from .gatekeeper import build_scorecard, decide_gate, to_gate_records
+from .publisher import compute_due_at, dispatch as dispatch_webhook, is_due
 from .store import task_store
 from .types import (
     AgentResult,
@@ -219,7 +220,9 @@ class Orchestrator:
     # 任务创建                                                          #
     # ---------------------------------------------------------------- #
 
-    def create_task(self, brief: Brief, auto_approve: bool = False) -> TaskRecord:
+    def create_task(
+        self, brief: Brief, auto_approve: bool = False, tenant: str = "default"
+    ) -> TaskRecord:
         stamp = now_iso()
         task = TaskRecord(
             id=new_id("task"),
@@ -231,6 +234,7 @@ class Orchestrator:
             created_at=stamp,
             updated_at=stamp,
             finished_at=None,
+            tenant=tenant or "default",
             pipeline=[
                 PipelineNode(
                     agent_id=stage["agent"],  # type: ignore[arg-type]
@@ -1131,6 +1135,39 @@ class Orchestrator:
     # 最终交付 / 驳回 / 失败                                            #
     # ---------------------------------------------------------------- #
 
+    @staticmethod
+    def _schedule_item(
+        *,
+        order: int,
+        channel: str,
+        slot: str,
+        title: str,
+        keywords: Any,
+        slots: list[str],
+    ) -> dict[str, Any]:
+        """构造一条排期项。
+
+        ``due_at`` 由建议时段换算而来，供后台自动投递判断「是否到点」；
+        ``dispatch_status`` / ``attempts`` / ``last_error`` 记录投递回执，
+        与人工「登记发布」共用同一条状态机。
+        """
+        return {
+            "order": order,
+            "channel": channel,
+            "slot": slot,
+            "recommended_slots": list(slots),
+            "title": title,
+            "keywords": keywords or [],
+            "status": "scheduled",
+            "published_at": None,
+            "url": "",
+            # 自动投递相关字段（plan.md v2.0「自动发布」）
+            "due_at": compute_due_at(slot),
+            "dispatch_status": "pending",
+            "attempts": 0,
+            "last_error": "",
+        }
+
     def _stage_publish(self, task: TaskRecord) -> None:
         """生成发布排期：把 A9 的渠道适配稿变成可执行的「渠道 × 时段」清单。
 
@@ -1151,32 +1188,26 @@ class Orchestrator:
             channel = str(item.get("channel") or task.brief.channel)
             slots = publish_slots(channel)
             schedule.append(
-                {
-                    "order": index + 1,
-                    "channel": channel,
+                self._schedule_item(
+                    order=index + 1,
+                    channel=channel,
                     # 优先用 A9 给出的建议时段，缺失时按渠道经验值兜底
-                    "slot": str(item.get("publish_slot") or (slots[0] if slots else "")),
-                    "recommended_slots": slots,
-                    "title": item.get("title") or "",
-                    "keywords": item.get("keywords") or [],
-                    "status": "scheduled",
-                    "published_at": None,
-                    "url": "",
-                }
+                    slot=str(item.get("publish_slot") or (slots[0] if slots else "")),
+                    title=str(item.get("title") or ""),
+                    keywords=item.get("keywords") or [],
+                    slots=slots,
+                )
             )
         if not schedule:
             schedule.append(
-                {
-                    "order": 1,
-                    "channel": task.brief.channel,
-                    "slot": primary_slots[0] if primary_slots else "",
-                    "recommended_slots": primary_slots,
-                    "title": "",
-                    "keywords": [],
-                    "status": "scheduled",
-                    "published_at": None,
-                    "url": "",
-                }
+                self._schedule_item(
+                    order=1,
+                    channel=task.brief.channel,
+                    slot=primary_slots[0] if primary_slots else "",
+                    title="",
+                    keywords=[],
+                    slots=primary_slots,
+                )
             )
 
         stamp = now_iso()
@@ -1317,6 +1348,196 @@ class Orchestrator:
             "artifact_id": updated.id,
             "schedule": schedule,
         }
+
+    def dispatch_publish(
+        self,
+        task_id: str,
+        channel: str = "",
+        *,
+        force: bool = True,
+    ) -> dict[str, Any]:
+        """按排期把内容投递给发布 webhook（``POST /api/tasks/{id}/publish/dispatch``）。
+
+        * ``force=True``（手动触发）：忽略 ``due_at``，立即投递；
+        * ``force=False``（后台定时器）：只投递已到期且未发布的条目。
+
+        投递通道是平台无关的（见 ``core/publisher.py``）；未配置 ``PUBLISH_WEBHOOK_URL``
+        时退化为「登记发布」，让离线环境也走同一条状态机。
+        """
+        task = task_store.get(task_id)
+        if task is None:
+            raise KeyError("任务不存在")
+        artifact = self._latest_publish_plan(task)
+        if artifact is None:
+            raise ValueError("该任务还没有发布排期，请先完成审批")
+
+        cfg = get_config()
+        target = channel.strip()
+        stamp = now_iso()
+        schedule = [
+            dict(item)
+            for item in (artifact.content.get("schedule") or [])
+            if isinstance(item, dict)
+        ]
+        platform_body = {
+            str(item.get("channel")): str(item.get("body") or "")
+            for item in (self._content_of(task, "channel_adaptation").get("platforms") or [])
+            if isinstance(item, dict)
+        }
+
+        dispatched: list[str] = []
+        failed: list[str] = []
+        skipped: list[str] = []
+        for item in schedule:
+            name = str(item.get("channel"))
+            if target and name != target:
+                continue
+            if str(item.get("status")) == "published":
+                continue
+            if not force and not is_due(item):
+                skipped.append(name)
+                continue
+
+            ok, detail = dispatch_webhook(
+                cfg.publish.webhook_url,
+                {
+                    "task_id": task.id,
+                    "brand": task.brief.brand,
+                    "product": task.brief.product,
+                    "channel": name,
+                    "slot": item.get("slot"),
+                    "due_at": item.get("due_at"),
+                    "title": item.get("title"),
+                    "keywords": item.get("keywords") or [],
+                    "body": platform_body.get(name, ""),
+                },
+                retry=cfg.publish.retry,
+                timeout_ms=cfg.llm.timeout_ms,
+            )
+            item["attempts"] = int(item.get("attempts") or 0) + 1
+            item["last_error"] = "" if ok else detail
+            if ok:
+                item["dispatch_status"] = "dispatched"
+            elif not cfg.publish.webhook_url:
+                # 未配置 webhook：与人工「登记发布」等价，保证离线可用
+                item["dispatch_status"] = "skipped"
+            else:
+                item["dispatch_status"] = "failed"
+                failed.append(name)
+                continue
+            item["status"] = "published"
+            item["published_at"] = stamp
+            dispatched.append(name)
+
+        if not dispatched and not failed:
+            if skipped:
+                # 后台定时器扫描时未到点，属正常情况：不落盘、不改版本
+                return {
+                    "task_id": task.id,
+                    "dispatched": [],
+                    "failed": [],
+                    "skipped": skipped,
+                    "published_at": task.published_at,
+                    "artifact_id": artifact.id,
+                    "schedule": schedule,
+                }
+            raise ValueError(f"渠道「{target or '全部'}」没有待发布的排期项（可能已登记过）")
+
+        content = dict(artifact.content)
+        content["schedule"] = schedule
+        content["mode"] = "auto" if cfg.publish.webhook_url else "manual"
+        content["last_published_at"] = stamp
+        updated = self._write_artifact(
+            task,
+            agent_id="A9",
+            type_="publish_plan",
+            title="多平台发布排期（已投递）",
+            content=content,
+            text="\n".join(
+                f"{item.get('order')}. {item.get('channel')}｜{item.get('slot')}｜"
+                f"{item.get('dispatch_status')}"
+                for item in schedule
+            ),
+            tags=["发布", "排期", "自动投递", task.brief.channel],
+        )
+        if dispatched and not task.published_at:
+            task.published_at = stamp
+        self._publish(
+            task,
+            "log",
+            f"发布投递：成功 {len(dispatched)}｜失败 {len(failed)}"
+            + (f"（{'、'.join(dispatched)}）" if dispatched else ""),
+            {"artifact_id": updated.id, "dispatched": dispatched, "failed": failed},
+        )
+        self._save(task, True)
+
+        return {
+            "task_id": task.id,
+            "dispatched": dispatched,
+            "failed": failed,
+            "skipped": skipped,
+            "published_at": task.published_at,
+            "artifact_id": updated.id,
+            "schedule": schedule,
+        }
+
+    def publish_queue(
+        self, *, due_only: bool = False, tenant: str | None = None
+    ) -> dict[str, Any]:
+        """跨任务的待发布队列（``GET /api/publish/queue``），按到期时间升序。
+
+        ``due_only=True`` 只返回已到期的条目，供后台定时器消费；
+        ``tenant`` 用于鉴权开启时把队列限定在当前租户内。
+        """
+        items: list[dict[str, Any]] = []
+        for task in task_store.list():
+            if task.status in ("rejected", "failed"):
+                continue
+            if tenant and task.tenant != tenant:
+                continue
+            artifact = self._latest_publish_plan(task)
+            if artifact is None:
+                continue
+            for item in artifact.content.get("schedule") or []:
+                if not isinstance(item, dict) or str(item.get("status")) == "published":
+                    continue
+                if due_only and not is_due(item):
+                    continue
+                items.append(
+                    {
+                        "task_id": task.id,
+                        "brand": task.brief.brand,
+                        "product": task.brief.product,
+                        "channel": item.get("channel"),
+                        "slot": item.get("slot"),
+                        "due_at": item.get("due_at"),
+                        "dispatch_status": item.get("dispatch_status") or "pending",
+                        "attempts": item.get("attempts") or 0,
+                        "last_error": item.get("last_error") or "",
+                        "title": item.get("title") or "",
+                        "task_status": task.status,
+                    }
+                )
+        # 没有 due_at 的条目（时段文案无法解析）排到最后，仍需人工触发
+        items.sort(key=lambda row: str(row.get("due_at") or "~"))
+        return {"total": len(items), "items": items}
+
+    def dispatch_due(self, tenant: str | None = None) -> dict[str, Any]:
+        """后台定时器入口：投递所有已到期的排期项（``POST /api/publish/tick``）。"""
+        queue = self.publish_queue(due_only=True, tenant=tenant)
+        dispatched: list[str] = []
+        failed: list[str] = []
+        for row in queue["items"]:
+            try:
+                outcome = self.dispatch_publish(
+                    str(row["task_id"]), str(row["channel"]), force=False
+                )
+            except (KeyError, ValueError) as error:
+                log.warn(f"自动投递跳过 {row['task_id']}/{row['channel']}：{error}")
+                continue
+            dispatched.extend(outcome["dispatched"])
+            failed.extend(outcome["failed"])
+        return {"due": queue["total"], "dispatched": dispatched, "failed": failed}
 
     def record_feedback(self, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         """回填发布后的真实效果数据，并触发 A10 复盘（A/B 闭环回填）。

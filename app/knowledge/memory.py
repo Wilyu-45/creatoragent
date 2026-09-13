@@ -6,17 +6,22 @@
 * **为其他智能体提供 RAG 检索**——``retrieve()`` 按「文本相关度 + 品牌/渠道/行业元数据」
   打分召回，供 A1/A2/A4 在下一次创作中复用品牌调性、有效表达与历史案例。
 
-为什么不用向量库
-----------------
-MVP 不引入 embedding 依赖：中文按 2-gram、英文/数字按词切分做 TF 加权重叠，
-再叠加品牌/渠道/行业命中加成即可覆盖「同品牌历史资产复用」这一主场景。
-接口刻意保持 ``retrieve(query, …, top_k) -> list[MemoryHit]`` 的形状，
-日后替换为向量检索时上层无需改动（与 plan.md 2.2.3 的 RAG Server 位置一致）。
+混合检索（关键词 + 向量）
+------------------------
+* **关键词分量**：中文按 2-gram、英文/数字按词切分做重叠度打分，叠加品牌/渠道/行业加成，
+  负责「精确命中」；
+* **语义分量**：``embedding.embed_texts`` 把查询与卡片映射为向量后算余弦，
+  负责「换个说法也能召回」。
+
+两者按 ``cfg.embedding.weight`` 线性混合；权重为 0 时退化为纯关键词检索，
+与历史行为完全一致。默认向量是本地 hashing embedding（零依赖、可离线），
+配置 ``EMBEDDING_PROVIDER=openai`` 即可切到任意 OpenAI 兼容 ``/embeddings`` 端点，
+远端不可用时自动回退本地向量，检索永不因 embedding 服务故障而中断。
 
 知识新鲜度
 ----------
-``MAX_CARDS`` 限制库容量，超出后淘汰最久未更新的卡片（等价于「过期知识」下线），
-避免长期运行后检索被陈年噪声淹没。
+``MAX_CARDS`` 限制库容量，超出后淘汰最久未更新的卡片；``MAX_AGE_DAYS`` 让超过半年的
+知识「过期下线」，避免长期运行后检索被陈年噪声淹没（creator.md A11「管理版本、过期知识」）。
 """
 
 from __future__ import annotations
@@ -24,16 +29,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from ..config import MEMORY_FILE
+from ..config import MEMORY_FILE, get_config
 from ..core.clock import now_iso
 from ..core.events import new_id
 from ..logger import create_logger
+from .embedding import cosine, describe as describe_embedding, embed_texts, tokenize
 
 log = create_logger("memory")
 
@@ -72,20 +77,13 @@ _W_BRAND = 0.25
 _W_CHANNEL = 0.1
 _W_INDUSTRY = 0.05
 
-_FIELD_WORD_RE = re.compile(r"[a-z0-9]+")
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+#: 向量余弦超过该值即认为是「语义相近」，写进命中理由
+_VECTOR_REASON = 0.35
 
 
 def _tokens(text: str) -> set[str]:
-    """中文取 2-gram（不足 2 字时退回单字），英文/数字取词。"""
-    lowered = (text or "").lower()
-    tokens = set(_FIELD_WORD_RE.findall(lowered))
-    cjk = _CJK_RE.findall(lowered)
-    if len(cjk) >= 2:
-        tokens.update("".join(pair) for pair in zip(cjk, cjk[1:]))
-    else:
-        tokens.update(cjk)
-    return tokens
+    """中文取 2-gram（不足 2 字时退回单字），英文/数字取词（与向量口径一致）。"""
+    return set(tokenize(text))
 
 
 def _overlap(query: set[str], text: str) -> float:
@@ -148,6 +146,8 @@ class MemoryHit:
     #: 卡片年龄（天）与新鲜度；用于「知识新鲜度」统计与同分时的优先次序
     age_days: int = 0
     fresh: bool = True
+    #: 语义分量：查询向量与卡片向量的余弦（0 表示未启用向量或维度不可比）
+    vector: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,6 +166,7 @@ class MemoryHit:
             "reuse_hint": self.card.reuse_hint,
             "created_at": self.card.created_at,
             "score": round(self.score, 4),
+            "vector_score": round(self.vector, 4),
             "reasons": list(self.reasons),
         }
 
@@ -176,6 +177,10 @@ class MemoryStore:
     def __init__(self) -> None:
         self._cards: list[MemoryCard] = []
         self._index: dict[str, MemoryCard] = {}
+        #: card_id → 向量（懒计算、进程内缓存；落盘只存原文，向量可随时重建）
+        self._vectors: dict[str, list[float]] = {}
+        #: 向量缓存对应的提供方指纹；配置变更时整体失效
+        self._vector_key: tuple[str, str, int] = ("", "", 0)
         self._lock = threading.RLock()
         self._loaded = False
 
@@ -315,6 +320,7 @@ class MemoryStore:
         self._cards = self._cards[overflow:]
         for card in dropped:
             self._index.pop(_digest(card.kind, card.title, card.content), None)
+            self._vectors.pop(card.id, None)
         log.warn(f"记忆库超出上限，淘汰 {len(dropped)} 条最旧知识")
 
     def _sweep_expired(self) -> int:
@@ -333,10 +339,28 @@ class MemoryStore:
         self._cards = kept
         for card in dropped:
             self._index.pop(_digest(card.kind, card.title, card.content), None)
+            self._vectors.pop(card.id, None)
         log.warn(f"记忆库下线 {len(dropped)} 条超过 {MAX_AGE_DAYS} 天的过期知识")
         return len(dropped)
 
     # ---------------------------- 检索 ---------------------------- #
+
+    def _ensure_vectors(self, cards: list[MemoryCard]) -> None:
+        """懒计算并缓存卡片向量；提供方 / 模型 / 维度变更时整体失效重算。"""
+        cfg = get_config().embedding
+        key = (cfg.provider, cfg.model if cfg.provider == "openai" else "local", cfg.dim)
+        with self._lock:
+            if key != self._vector_key:
+                self._vectors.clear()
+                self._vector_key = key
+            missing = [card for card in cards if card.id not in self._vectors]
+        if not missing:
+            return
+        texts = [f"{card.title}\n{' '.join(card.tags)}\n{card.content}" for card in missing]
+        vectors = embed_texts(texts)
+        with self._lock:
+            for card, vector in zip(missing, vectors):
+                self._vectors[card.id] = vector
 
     def retrieve(
         self,
@@ -355,25 +379,38 @@ class MemoryStore:
         """
         self.load()
         query_tokens = _tokens(query)
-        hits: list[MemoryHit] = []
+        weight = max(0.0, min(1.0, get_config().embedding.weight))
+        query_vector: list[float] | None = None
+        if weight > 0 and query.strip():
+            query_vector = embed_texts([query])[0]
 
         with self._lock:
             cards = list(self._cards)
+        if query_vector is not None:
+            self._ensure_vectors(cards)
 
+        hits: list[MemoryHit] = []
         for card in cards:
             if exclude_task and card.task_id == exclude_task:
                 continue
-
-            score = 0.0
-            reasons: list[str] = []
 
             tag_score = max((_overlap(query_tokens, tag) for tag in card.tags), default=0.0)
             title_score = _overlap(query_tokens, card.title)
             body_score = _overlap(query_tokens, card.content)
             text_score = _W_TAG * tag_score + _W_TITLE * title_score + _W_BODY * body_score
+
+            # 关键词分量先归一化到 0..1，再与语义分量按权重线性混合
+            keyword_score = min(1.0, text_score * _W_TEXT_GAIN)
+            vector_sim = 0.0
+            if query_vector is not None:
+                vector_sim = max(0.0, cosine(query_vector, self._vectors.get(card.id, [])))
+            score = keyword_score * (1.0 - weight) + vector_sim * weight
+
+            reasons: list[str] = []
             if text_score > 0:
-                score += text_score * _W_TEXT_GAIN
                 reasons.append("文本相关")
+            if weight > 0 and vector_sim >= _VECTOR_REASON:
+                reasons.append("语义相近")
 
             if brand and card.brand == brand:
                 score += _W_BRAND
@@ -395,6 +432,7 @@ class MemoryStore:
                     reasons=reasons,
                     age_days=age,
                     fresh=age <= FRESH_DAYS,
+                    vector=vector_sim,
                 )
             )
 
@@ -446,6 +484,9 @@ class MemoryStore:
             "oldest_days": max((_age_days(card) for card in cards), default=0),
             "fresh": sum(1 for card in cards if _age_days(card) <= FRESH_DAYS),
             "stale": sum(1 for card in cards if _age_days(card) > STALE_DAYS),
+            # 检索方式：纯关键词（weight=0）还是关键词 + 向量混合
+            "embedding": describe_embedding(),
+            "vector_indexed": len(self._vectors),
         }
 
 

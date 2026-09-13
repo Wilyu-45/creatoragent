@@ -10,6 +10,9 @@
  3. 打印各环节的关键信号（质量分、阻断项、裁决），便于定位回归
  4. 额外覆盖动态渠道（抖音）分支：分镜脚本与标题超限压缩
  5. 跑**真实 A11 智能体本体**验证记忆库 RAG 闭环（写入 → 跨任务召回）
+ 6. 校验混合检索（本地 hashing embedding）的确定性、归一化与相似度排序
+ 7. 校验发布排期的时段解析 / 跨天顺延 / 到期判断（自动投递的时间基础）
+ 8. 校验 ``CREATOR_API_TOKENS`` 的 Token → 租户解析
 
 注意：本脚本默认写入临时数据目录，避免自检污染开发环境的 ``data/``；
 如需指定，可显式设置 ``CREATOR_DATA_DIR``。
@@ -272,16 +275,105 @@ def check_memory_recall(brief: dict, chain: dict) -> bool:
     print(f"    → 任务 2 召回 {len(recalled)} 条历史资产")
     if recalled:
         top = recalled[0]
-        print(f"      示例：{top['title']}（score={top['score']}｜{'、'.join(top['reasons'])}）")
+        print(
+            f"      示例：{top['title']}（score={top['score']}｜"
+            f"语义={top.get('vector_score')}｜{'、'.join(top['reasons'])}）"
+        )
 
     stats = memory_store.stats()
-    print(f"    → 记忆库：{stats['total']} 条卡片，覆盖 {stats['tasks']} 个任务")
+    print(
+        f"    → 记忆库：{stats['total']} 条卡片，覆盖 {stats['tasks']} 个任务｜"
+        f"向量提供方={stats['embedding']['provider']} 权重={stats['embedding']['weight']} "
+        f"已建索引={stats['vector_indexed']}"
+    )
 
     if indexed <= 0:
         print("    ! 任务 1 未向记忆库写入知识，跨任务复用将失效")
     if not recalled:
         print("    ! 任务 2 未召回任务 1 的知识，RAG 闭环未成立")
     return indexed > 0 and len(recalled) > 0
+
+
+def check_embedding() -> bool:
+    """校验混合检索的向量分量：确定性、L2 归一化、相似度排序。
+
+    本地 hashing embedding 不需要模型文件，所以自检可以完全离线跑；
+    重点验证「同文本同向量」与「异话题相似度更低」这两条检索正确性的地基。
+    """
+    from app.knowledge.embedding import cosine, describe, hashing_vector
+
+    print("\n[记忆库向量检索]")
+    info = describe()
+    print(
+        f"    provider={info['provider']} model={info['model']} "
+        f"dim={info['dim']} weight={info['weight']}"
+    )
+    a = hashing_vector("冷萃咖啡 早八通勤 小红书", info["dim"])
+    b = hashing_vector("冷萃咖啡 早八通勤 小红书", info["dim"])
+    c = hashing_vector("工业设备 招投标 白皮书", info["dim"])
+    norm = sum(value * value for value in a) ** 0.5
+    same, diff = cosine(a, b), cosine(a, c)
+    print(
+        f"    确定性={a == b}｜归一化范数={norm:.4f}｜自相似={same:.3f}｜异话题相似={diff:.3f}"
+    )
+    if not (a == b and abs(norm - 1.0) < 1e-6 and same > 0.99 and diff < same):
+        print("    ! 向量分量异常：检索可能退化为噪声")
+        return False
+    return True
+
+
+def check_publisher() -> bool:
+    """校验发布排期的时段解析、跨天顺延与到期判断（自动投递的时间基础）。"""
+    from datetime import datetime, timedelta, timezone
+
+    from app.core.publisher import compute_due_at, is_due, parse_slot_time
+
+    print("\n[发布排期：时段解析与到期判断]")
+    morning = datetime(2026, 9, 13, 6, 0, tzinfo=timezone.utc)
+    night = datetime(2026, 9, 13, 23, 0, tzinfo=timezone.utc)
+
+    ok = True
+    for slot in ("07:30-08:30 通勤时段", "工作日 10:00-11:30", "20：00 晚间", "无固定时段"):
+        parsed, due = parse_slot_time(slot), compute_due_at(slot, morning)
+        print(f"    {slot:<18} → 解析={parsed} 到期={due}")
+        if slot == "无固定时段":
+            ok = ok and parsed is None and due is None
+        else:
+            ok = ok and parsed is not None and due is not None
+
+    rollover = compute_due_at("07:30-08:30", night)
+    print(f"    跨天顺延：23:00 生成 07:30 → {rollover}")
+    ok = ok and bool(rollover) and str(rollover).startswith("2026-09-14")
+
+    not_due = is_due({"due_at": compute_due_at("07:30-08:30", morning)}, morning)
+    due_now = is_due({"due_at": compute_due_at("07:30-08:30", night - timedelta(days=1))}, night)
+    no_time = is_due({"due_at": None}, night)
+    print(f"    未到点={not_due}｜已到点={due_now}｜无可解析时段={no_time}")
+    ok = ok and not not_due and due_now and not no_time
+
+    if not ok:
+        print("    ! 排期时间语义异常：到点自动投递会误触发或永不触发")
+    return ok
+
+
+def check_auth() -> bool:
+    """校验 ``CREATOR_API_TOKENS`` 的 Token → 租户解析（plan.md D17）。"""
+    from app.config import _parse_api_tokens
+
+    print("\n[鉴权：Token → 租户解析]")
+    cases = [
+        ("", {}),
+        ("tok1", {"tok1": "default"}),
+        ("acme:tok1,beta:tok2", {"tok1": "acme", "tok2": "beta"}),
+    ]
+    ok = True
+    for raw, expected in cases:
+        parsed = _parse_api_tokens(raw)
+        print(f"    {raw or '（空）':<22} → {parsed}")
+        ok = ok and parsed == expected
+    if not ok:
+        print("    ! Token 解析异常：鉴权开启后可能出现租户串号")
+    return ok
 
 
 def main() -> int:
@@ -294,6 +386,9 @@ def main() -> int:
     try:
         converged, chain, brief = exercise_mock()
         recalled = check_memory_recall(brief, chain)
+        embedded = check_embedding()
+        scheduled = check_publisher()
+        authed = check_auth()
     except Exception as error:  # noqa: BLE001
         print(f"\n[失败] 自检演练异常：{type(error).__name__}: {error}")
         import traceback
@@ -301,14 +396,34 @@ def main() -> int:
         traceback.print_exc()
         return 1
 
+    checks = {
+        "Mock 引擎收敛": converged,
+        "记忆库 RAG 闭环": recalled,
+        "向量检索": embedded,
+        "发布排期": scheduled,
+        "鉴权租户解析": authed,
+    }
     print()
-    if converged and recalled:
-        print("自检通过：环境可用，Mock 引擎可在返工 1 轮后收敛，记忆库 RAG 闭环成立。")
+    if all(checks.values()):
+        print(
+            "自检通过：环境可用；Mock 引擎可在返工 1 轮后收敛；"
+            "记忆库 RAG（关键词 + 向量混合）闭环成立；发布排期具备自动投递的时间基础；"
+            "鉴权租户解析正确。"
+        )
         return 0
+
+    failed = [name for name, value in checks.items() if not value]
+    print(f"自检未通过：{'、'.join(failed)}")
     if not converged:
-        print("自检警告：返工后仍未通过合规门禁，请检查知识层与 Mock 生成器。")
+        print("  · 返工后仍未通过合规门禁，请检查知识层与 Mock 生成器。")
     if not recalled:
-        print("自检警告：记忆库 RAG 闭环未成立，请检查 app/knowledge/memory.py 与 A11。")
+        print("  · 记忆库 RAG 闭环未成立，请检查 app/knowledge/memory.py 与 A11。")
+    if not embedded:
+        print("  · 向量分量异常，请检查 app/knowledge/embedding.py。")
+    if not scheduled:
+        print("  · 排期时间语义异常，请检查 app/core/publisher.py。")
+    if not authed:
+        print("  · Token 解析异常，请检查 app/config.py 的 _parse_api_tokens。")
     return 1
 
 

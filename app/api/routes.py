@@ -101,6 +101,7 @@ def task_summary(task: TaskRecord) -> dict[str, Any]:
         "turn_used": task.turn_used,
         "intent_conflicts": task.intent_conflicts,
         "published_at": task.published_at,
+        "tenant": task.tenant,
         "scorecard": task.scorecard.model_dump(mode="json") if task.scorecard else None,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
@@ -110,6 +111,30 @@ def task_summary(task: TaskRecord) -> dict[str, Any]:
         "approval": task.approval.model_dump(mode="json"),
         "error": task.error,
     }
+
+
+# ------------------------------------------------------------------ #
+# 租户隔离（plan.md D17）                                             #
+# ------------------------------------------------------------------ #
+
+
+def _tenant_of(request: Request) -> str:
+    """鉴权中间件写入的租户标识；未启用鉴权时统一为 ``default``。"""
+    return str(getattr(request.state, "tenant", "default") or "default")
+
+
+def _require_task(task_id: str, request: Request) -> TaskRecord:
+    """取任务并做租户校验：跨租户一律按 404 处理，避免探测他人任务是否存在。"""
+    task = task_store.get(task_id)
+    if task is None or task.tenant != _tenant_of(request):
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return task
+
+
+def _tenant_tasks(request: Request) -> list[TaskRecord]:
+    """当前租户可见的任务列表。"""
+    tenant = _tenant_of(request)
+    return [task for task in task_store.list() if task.tenant == tenant]
 
 
 def _round1(value: float) -> float:
@@ -255,6 +280,23 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
     if isinstance(body.get("llmCache"), bool):
         patch["llmCache"] = body["llmCache"]
 
+    # 记忆库向量检索（plan.md 2.2.3）与发布投递（plan.md v2.0）
+    for key in ("embeddingProvider", "embeddingBaseUrl", "embeddingApiKey", "embeddingModel"):
+        if isinstance(body.get(key), str):
+            patch[key] = body[key]
+    for key in ("embeddingDim", "embeddingWeight"):
+        value = body.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            patch[key] = value
+    if isinstance(body.get("publishWebhookUrl"), str):
+        patch["publishWebhookUrl"] = body["publishWebhookUrl"]
+    for key in ("publishRetry", "publishTickSeconds"):
+        value = body.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            patch[key] = value
+    if isinstance(body.get("publishAutoDispatch"), bool):
+        patch["publishAutoDispatch"] = body["publishAutoDispatch"]
+
     update_config(patch)
     log.info(
         f"运行时配置已更新：provider={get_config().llm.provider} model={get_config().llm.model}"
@@ -268,12 +310,14 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
 
 
 @router.get("/tasks")
-def list_tasks() -> dict[str, Any]:
-    return {"tasks": [task_summary(task) for task in task_store.list()]}
+def list_tasks(request: Request) -> dict[str, Any]:
+    return {"tasks": [task_summary(task) for task in _tenant_tasks(request)]}
 
 
 @router.post("/tasks", status_code=201)
-def create_task(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+def create_task(
+    request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
     body: dict[str, Any] = payload or {}
     brief_input = body.get("brief")
     if brief_input is None:
@@ -285,16 +329,18 @@ def create_task(payload: dict[str, Any] | None = Body(default=None)) -> dict[str
 
     auto_approve = body.get("autoApprove")
     task = orchestrator.create_task(
-        brief, auto_approve=auto_approve if isinstance(auto_approve, bool) else False
+        brief,
+        auto_approve=auto_approve if isinstance(auto_approve, bool) else False,
+        tenant=_tenant_of(request),
     )
     return {"task": task.model_dump(mode="json")}
 
 
 @router.get("/tasks/{task_id}")
-def get_task(task_id: str) -> dict[str, Any]:
+def get_task(task_id: str, request: Request) -> dict[str, Any]:
+    _require_task(task_id, request)
     task = task_store.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    assert task is not None  # _require_task 已保证存在
     return {
         "task": task.model_dump(mode="json"),
         "events": [event.model_dump(mode="json") for event in event_bus.history(task_id)],
@@ -303,10 +349,8 @@ def get_task(task_id: str) -> dict[str, Any]:
 
 
 @router.delete("/tasks/{task_id}")
-def delete_task(task_id: str) -> dict[str, Any]:
-    task = task_store.get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+def delete_task(task_id: str, request: Request) -> dict[str, Any]:
+    task = _require_task(task_id, request)
     if task.status in ("running", "awaiting_approval"):
         raise HTTPException(status_code=409, detail="任务仍在执行中，无法删除")
 
@@ -319,7 +363,10 @@ def delete_task(task_id: str) -> dict[str, Any]:
 
 
 @router.post("/tasks/{task_id}/decide")
-def decide(task_id: str, payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+def decide(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    _require_task(task_id, request)
     body: dict[str, Any] = payload or {}
     decision = str(body.get("decision") or "")
     if decision not in ("approve", "revise", "reject"):
@@ -335,8 +382,9 @@ def decide(task_id: str, payload: dict[str, Any] | None = Body(default=None)) ->
 
 
 @router.get("/tasks/{task_id}/publish")
-def read_publish_plan(task_id: str) -> dict[str, Any]:
+def read_publish_plan(task_id: str, request: Request) -> dict[str, Any]:
     """读取任务的发布排期（审批通过后由编排层自动生成）。"""
+    _require_task(task_id, request)
     try:
         return orchestrator.publish_schedule(task_id)
     except KeyError as error:
@@ -345,9 +393,10 @@ def read_publish_plan(task_id: str) -> dict[str, Any]:
 
 @router.post("/tasks/{task_id}/publish")
 def mark_task_published(
-    task_id: str, payload: dict[str, Any] | None = Body(default=None)
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
 ) -> dict[str, Any]:
     """登记发布：把某个渠道（不传 ``channel`` 表示全部）标记为已发布。"""
+    _require_task(task_id, request)
     body: dict[str, Any] = payload or {}
     try:
         return orchestrator.mark_published(
@@ -361,13 +410,14 @@ def mark_task_published(
 
 @router.post("/tasks/{task_id}/feedback")
 def submit_feedback(
-    task_id: str, payload: dict[str, Any] | None = Body(default=None)
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
 ) -> dict[str, Any]:
     """回填发布后的真实效果数据，触发 A10 复盘并形成 A/B 结论。
 
     请求体形如 ``{"channel": "小红书", "window": "发布后 72 小时",
     "metrics": {"exposure": 12000, "clicks": 480, "interactions": 260, "conversions": 24}}``。
     """
+    _require_task(task_id, request)
     body: dict[str, Any] = payload or {}
     try:
         outcome = orchestrator.record_feedback(task_id, body)
@@ -385,8 +435,45 @@ def submit_feedback(
     }
 
 
+@router.post("/tasks/{task_id}/publish/dispatch")
+def dispatch_task_publish(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """按排期把内容投递给发布 webhook（plan.md v2.0「自动发布」）。
+
+    未配置 ``PUBLISH_WEBHOOK_URL`` 时退化为「登记发布」，因此离线也可用。
+    请求体可带 ``{"channel": "小红书", "force": true}``；``force=false`` 时只投递已到期的条目。
+    """
+    _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    force = body.get("force")
+    try:
+        return orchestrator.dispatch_publish(
+            task_id,
+            str(body.get("channel") or ""),
+            force=force if isinstance(force, bool) else True,
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.get("/publish/queue")
+def read_publish_queue(request: Request, dueOnly: bool = Query(default=False)) -> dict[str, Any]:
+    """跨任务的待发布队列，按到期时间升序；``dueOnly=true`` 只看已到期条目。"""
+    return orchestrator.publish_queue(due_only=dueOnly, tenant=_tenant_of(request))
+
+
+@router.post("/publish/tick")
+def tick_publish(request: Request) -> dict[str, Any]:
+    """手动驱动一次「到期自动投递」，供外部 cron / 定时器调用。"""
+    return orchestrator.dispatch_due(tenant=_tenant_of(request))
+
+
 @router.get("/tasks/{task_id}/blackboard")
-def get_blackboard(task_id: str) -> dict[str, Any]:
+def get_blackboard(task_id: str, request: Request) -> dict[str, Any]:
+    _require_task(task_id, request)
     return blackboard.snapshot(task_id).model_dump(mode="json")
 
 
@@ -401,6 +488,7 @@ async def task_events(
     request: Request,
     since: int = Query(default=0),
 ) -> StreamingResponse:
+    _require_task(task_id, request)
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=2000)
 
@@ -456,8 +544,8 @@ async def task_events(
 
 
 @router.get("/metrics")
-def metrics() -> dict[str, Any]:
-    tasks = task_store.list()
+def metrics(request: Request) -> dict[str, Any]:
+    tasks = _tenant_tasks(request)
     completed = [t for t in tasks if t.status == "completed"]
 
     gates = [gate for task in tasks for gate in task.gates]

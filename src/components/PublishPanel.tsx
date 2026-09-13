@@ -37,14 +37,22 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 投递回执状态 → 展示文案与色调。 */
+const DISPATCH_META: Record<string, { label: string; tone: string }> = {
+  pending: { label: '待投递', tone: 'tone-idle' },
+  dispatched: { label: '已投递', tone: 'tone-ok' },
+  skipped: { label: '已登记', tone: 'tone-ok' },
+  failed: { label: '投递失败', tone: 'tone-warn' },
+};
+
 /**
  * 发布与效果回填面板。
  *
- * 审批通过后编排层会自动生成 `publish_plan`（渠道 × 时段排期）；本面板让运营：
- * 1. 把实际投放出去的渠道登记为「已发布」（形成效果对齐的基线）；
- * 2. 回填曝光 / 点击 / 互动 / 转化数据，触发 A10 从「发布前预估」切换到「发布后复盘」。
- *
- * 系统不代运营点发布按钮（各平台开放接口差异大且需授权），只负责记录事实与闭环复盘。
+ * 审批通过后编排层会自动生成 `publish_plan`（渠道 × 时段排期）；本面板提供三种操作：
+ * 1. **立即投递**：按排期 POST 到发布 webhook（未配置 webhook 时等价于登记发布），
+ *    由网关去调用各平台开放接口——系统不内置平台私有 SDK；
+ * 2. **登记发布**：人工确认渠道已投出去，形成效果对齐的基线；
+ * 3. **回填效果**：填曝光 / 点击 / 互动 / 转化，触发 A10 从「发布前预估」切到「发布后复盘」。
  */
 export function PublishPanel({
   task,
@@ -108,6 +116,24 @@ export function PublishPanel({
     }
   };
 
+  /** 立即投递：走发布 webhook（未配置 webhook 时后端退化为登记发布）。 */
+  const dispatchPublish = async (channel: string) => {
+    setWorking(`d:${channel || '__all__'}`);
+    try {
+      const result = await api.dispatchPublish(task.id, channel, true);
+      const parts: string[] = [];
+      if (result.dispatched.length) parts.push(`已投递 ${result.dispatched.join('、')}`);
+      if (result.failed.length) parts.push(`失败 ${result.failed.join('、')}`);
+      onToast(parts.length ? `发布投递：${parts.join('｜')}` : '没有需要投递的渠道', result.failed.length > 0);
+      await load();
+      onChanged();
+    } catch (error) {
+      onToast(`投递失败：${errorText(error)}`, true);
+    } finally {
+      setWorking('');
+    }
+  };
+
   const submitFeedback = async () => {
     const metrics: Record<string, number> = {};
     const exposure = toNumber(form.exposure);
@@ -154,35 +180,55 @@ export function PublishPanel({
         </span>
       </div>
 
-      <Table head={['序号', '渠道', '建议时段', '状态', '投放标题', '操作']}>
-        {schedule.map((item, index) => (
-          <tr key={`${item.channel}-${index}`}>
-            <td className="mono">{item.order}</td>
-            <td>
-              <strong>{item.channel}</strong>
-            </td>
-            <td className="mono">{item.slot || '—'}</td>
-            <td>
-              <Chip tone={item.status === 'published' ? 'tone-ok' : 'tone-warn'}>
-                {item.status === 'published' ? '已发布' : '待发布'}
-              </Chip>
-            </td>
-            <td>{item.title || '—'}</td>
-            <td>
-              {item.status === 'published' ? (
-                <span className="muted small">{formatDateTime(item.published_at)}</span>
-              ) : (
-                <button
-                  className="btn btn-sm"
-                  disabled={working !== ''}
-                  onClick={() => void markPublished(item.channel)}
-                >
-                  {working === item.channel ? <Spinner /> : null} 登记发布
-                </button>
-              )}
-            </td>
-          </tr>
-        ))}
+      <Table head={['序号', '渠道', '建议时段', '到期时间', '状态', '投放标题', '操作']}>
+        {schedule.map((item, index) => {
+          const dispatch = DISPATCH_META[item.dispatch_status] ?? {
+            label: item.dispatch_status || '待投递',
+            tone: 'tone-idle',
+          };
+          return (
+            <tr key={`${item.channel}-${index}`}>
+              <td className="mono">{item.order}</td>
+              <td>
+                <strong>{item.channel}</strong>
+              </td>
+              <td className="mono">{item.slot || '—'}</td>
+              <td className="mono small">{item.due_at ? formatDateTime(item.due_at) : '—'}</td>
+              <td>
+                <Chip tone={item.status === 'published' ? 'tone-ok' : 'tone-warn'}>
+                  {item.status === 'published' ? '已发布' : '待发布'}
+                </Chip>{' '}
+                <Chip tone={dispatch.tone} title={item.last_error || undefined}>
+                  {dispatch.label}
+                  {item.attempts > 0 ? ` ×${item.attempts}` : ''}
+                </Chip>
+              </td>
+              <td>{item.title || '—'}</td>
+              <td>
+                {item.status === 'published' ? (
+                  <span className="muted small">{formatDateTime(item.published_at)}</span>
+                ) : (
+                  <span className="row" style={{ gap: 6 }}>
+                    <button
+                      className="btn btn-sm btn-primary"
+                      disabled={working !== ''}
+                      onClick={() => void dispatchPublish(item.channel)}
+                    >
+                      {working === `d:${item.channel}` ? <Spinner /> : null} 投递
+                    </button>
+                    <button
+                      className="btn btn-sm"
+                      disabled={working !== ''}
+                      onClick={() => void markPublished(item.channel)}
+                    >
+                      {working === item.channel ? <Spinner /> : null} 登记
+                    </button>
+                  </span>
+                )}
+              </td>
+            </tr>
+          );
+        })}
       </Table>
 
       <div className="row" style={{ justifyContent: 'space-between', marginTop: 12, alignItems: 'flex-end' }}>
@@ -195,13 +241,22 @@ export function PublishPanel({
             style={{ width: 260, marginLeft: 8 }}
           />
         </span>
-        <button
-          className="btn btn-sm btn-primary"
-          disabled={working !== '' || pending.length === 0}
-          onClick={() => void markPublished('')}
-        >
-          {working === '__all__' ? <Spinner /> : null} 全部登记发布
-        </button>
+        <span className="row" style={{ gap: 8 }}>
+          <button
+            className="btn btn-sm"
+            disabled={working !== '' || pending.length === 0}
+            onClick={() => void markPublished('')}
+          >
+            {working === '__all__' ? <Spinner /> : null} 全部登记发布
+          </button>
+          <button
+            className="btn btn-sm btn-primary"
+            disabled={working !== '' || pending.length === 0}
+            onClick={() => void dispatchPublish('')}
+          >
+            {working === 'd:__all__' ? <Spinner /> : null} 全部投递
+          </button>
+        </span>
       </div>
 
       <div className="section-h" style={{ marginTop: 18 }}>

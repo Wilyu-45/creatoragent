@@ -5,8 +5,9 @@
 * 基础信息：``/api/health``、``/api/agents``、``/api/knowledge``、``/api/settings``
 * 主流程：建任务 → SSE 实时事件 → 挂起等待人工 → ``decide`` → 归档交付
 * 自动审批：``autoApprove`` 走完全程
-* 记忆闭环：``/api/memory``、``/api/memory/search``，以及第二个任务是否真的复用了第一个任务沉淀的知识
-* 发布闭环：``/api/tasks/{id}/publish`` 登记发布、``/api/tasks/{id}/feedback`` 回填效果并触发 A10 复盘
+* 记忆闭环：``/api/memory``、``/api/memory/search``（含向量检索字段），以及第二个任务是否真的复用了第一个任务沉淀的知识
+* 发布闭环：``/api/tasks/{id}/publish`` 登记发布、``/api/tasks/{id}/publish/dispatch`` 自动投递、
+  ``/api/publish/queue`` 待发布队列、``/api/tasks/{id}/feedback`` 回填效果并触发 A10 复盘
 * 聚合视图：``/api/tasks``、``/api/metrics``（含成本 / 缓存 / 黑板租约指标）
 * 错误分支：404 / 400 / 409（重复裁决、删除运行中任务）
 * 持久化：任务 JSON、``checkpoints.sqlite``、``blackboard.json``、``memory.json``
@@ -124,11 +125,27 @@ def main() -> int:
         updated = call(
             "PUT",
             "/api/settings",
-            json={"qualityThreshold": 70, "temperature": 0.3, "model": "gpt-4o-mini"},
+            json={
+                "qualityThreshold": 70,
+                "temperature": 0.3,
+                "model": "gpt-4o-mini",
+                "embeddingProvider": "local",
+                "embeddingWeight": 0.4,
+                "publishWebhookUrl": "https://example.com/hook",
+                "publishAutoDispatch": False,
+            },
         ).json()
         print(f"  threshold {before['qualityThreshold']} → {updated['qualityThreshold']} "
               f"| temperature {updated['llm']['temperature']}")
+        print(f"  向量：{updated['embedding']['provider']} 权重={updated['embedding']['weight']}｜"
+              f"发布 webhook 已配置={updated['publish']['webhookSet']}｜鉴权={updated['authRequired']}")
         ok = ok and updated["qualityThreshold"] == 70 and updated["llm"]["temperature"] == 0.3
+        ok = ok and updated["embedding"]["weight"] == 0.4
+        ok = ok and updated["publish"]["webhookSet"] is True
+        ok = ok and updated["authRequired"] is False
+        # 立刻清空 webhook：下面的「自动投递」要在无 webhook 的离线语义下验证（不真发请求）
+        cleared = call("PUT", "/api/settings", json={"publishWebhookUrl": ""}).json()
+        ok = ok and cleared["publish"]["webhookSet"] is False
 
         print("\n[POST /api/tasks（人工审批 + SSE 实时订阅）]")
         created = call("POST", "/api/tasks", json={"brief": BRIEF}).json()["task"]
@@ -200,16 +217,25 @@ def main() -> int:
         stats = memory_view["stats"]
         print(f"  卡片总数={stats['total']} 覆盖任务={stats['tasks']} 品牌={stats['brands']} "
               f"容量上限={stats['capacity']}")
+        print(f"  新鲜度：新鲜={stats['fresh']} 陈旧={stats['stale']} 最旧={stats['oldest_days']}天 "
+              f"阈值={stats['max_age_days']}天")
+        print(f"  向量检索：{stats['embedding']['provider']} 权重={stats['embedding']['weight']} "
+              f"已建索引={stats['vector_indexed']}")
         ok = ok and stats["total"] > 0
+        ok = ok and stats["embedding"]["provider"] in ("local", "openai")
 
         search = call(
             "POST",
             "/api/memory/search",
             json={"query": "冷萃 咖啡 早八通勤 小红书", "topK": 3},
         ).json()
-        hit_text = "；".join(f"{h['title']}({h['score']})" for h in search["hits"][:3])
+        hit_text = "；".join(f"{h['title']}({h['score']}/语义{h.get('vector_score')})"
+                            for h in search["hits"][:3])
         print(f"  检索命中 {len(search['hits'])} 条" + (f"：{hit_text}" if hit_text else ""))
+        # 混合检索：命中项必须带语义分量，且与向量提供方一致
         ok = ok and bool(search["hits"])
+        ok = ok and all("vector_score" in hit for hit in search["hits"])
+        ok = ok and any(hit["vector_score"] > 0 for hit in search["hits"])
 
         print("\n[POST /api/tasks（自动审批）]")
         auto = call("POST", "/api/tasks", json={"brief": BRIEF, "autoApprove": True}).json()["task"]
@@ -284,6 +310,28 @@ def main() -> int:
               f"可放量={conclusion.get('ready_to_scale')}")
         ok = ok and review is not None and bool(feedback["artifact_id"])
         ok = ok and bool(comparison.get("verdict")) and bool(conclusion.get("note"))
+
+        print("\n[POST /api/tasks/{id}/publish/dispatch（自动投递 → 待发布队列）]")
+        auto_plan = call("GET", f"/api/tasks/{auto['id']}/publish").json()["schedule"]
+        print("  排期含投递字段："
+              + "、".join(f"{s['channel']}[{s['dispatch_status']}@{s.get('due_at')}]"
+                         for s in auto_plan[:3]))
+        ok = ok and all({"due_at", "dispatch_status", "attempts"} <= set(s) for s in auto_plan)
+
+        dispatched = call(
+            "POST", f"/api/tasks/{auto['id']}/publish/dispatch", json={"channel": "", "force": True}
+        ).json()
+        states = sorted({s["dispatch_status"] for s in dispatched["schedule"]})
+        print(f"  投递结果：成功 {dispatched['dispatched']}｜失败 {dispatched['failed']}｜"
+              f"状态 {states}")
+        # 未配置 webhook 时后端退化为「登记发布」，离线也应成功
+        ok = ok and bool(dispatched["dispatched"]) and not dispatched["failed"]
+        ok = ok and all(s["status"] == "published" for s in dispatched["schedule"])
+
+        queue = call("GET", "/api/publish/queue").json()
+        pending_auto = [row for row in queue["items"] if row["task_id"] == auto["id"]]
+        print(f"  队列共 {queue['total']} 条；本任务残留 {len(pending_auto)} 条")
+        ok = ok and isinstance(queue["total"], int) and not pending_auto
 
         print("\n[GET /api/tasks 与 /api/metrics]")
         tasks = call("GET", "/api/tasks").json()["tasks"]

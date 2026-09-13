@@ -33,6 +33,7 @@ MEMORY_FILE = DATA_DIR / "memory.json"
 CHECKPOINT_FILE = DATA_DIR / "checkpoints.sqlite"
 
 LLMProviderName = Literal["mock", "openai"]
+EmbeddingProviderName = Literal["local", "openai"]
 
 
 # ------------------------------------------------------------------ #
@@ -54,6 +55,43 @@ class LLMSettings:
 
 
 @dataclass
+class EmbeddingSettings:
+    """A11 记忆库的向量化设置（plan.md 2.2.3「RAG Server」）。
+
+    默认 ``local``：用确定性 hashing embedding，零依赖、可离线；
+    ``openai`` 时走任意 OpenAI 兼容 ``/embeddings`` 端点，失败自动回退本地向量。
+    """
+
+    provider: EmbeddingProviderName = "local"
+    #: 留空则复用 ``llm.base_url`` / ``llm.api_key``
+    base_url: str = ""
+    api_key: str = ""
+    model: str = "text-embedding-3-small"
+    #: 本地向量维度（hashing trick 的桶数）
+    dim: int = 256
+    #: 混合检索中语义分量权重：0 = 纯关键词（与旧行为一致），越大越依赖向量相似度
+    weight: float = 0.35
+
+
+@dataclass
+class PublishSettings:
+    """多平台自动排期与投递设置（plan.md v2.0「自动发布」）。
+
+    系统不内置各平台私有 SDK：统一用 webhook 把「到点该投什么」推给运营侧
+    的发布网关（或用 n8n/Zapier 转接平台开放接口），本进程只负责排期与回执记账。
+    """
+
+    #: 投递 webhook 地址；为空时 dispatch 只做「登记发布」（离线可用）
+    webhook_url: str = ""
+    #: webhook 失败重试次数
+    retry: int = 2
+    #: 是否由后台定时器自动投递到期排期
+    auto_dispatch: bool = False
+    #: 后台自动投递的检查间隔（秒）
+    tick_seconds: int = 60
+
+
+@dataclass
 class RuntimeConfig:
     """编排与质量门禁的运行时参数。"""
 
@@ -69,6 +107,8 @@ class RuntimeConfig:
     #: 是否启用 LLM 响应缓存（plan.md 4.5）
     llm_cache: bool = True
     llm: LLMSettings = field(default_factory=LLMSettings)
+    embedding: EmbeddingSettings = field(default_factory=EmbeddingSettings)
+    publish: PublishSettings = field(default_factory=PublishSettings)
 
 
 def _num(value: str | None, fallback: float) -> float:
@@ -113,7 +153,26 @@ def _build_config() -> RuntimeConfig:
             max_tokens=_int(os.environ.get("LLM_MAX_TOKENS"), 2048),
             timeout_ms=_int(os.environ.get("LLM_TIMEOUT_MS"), 60_000),
         ),
+        embedding=EmbeddingSettings(
+            provider=_embedding_provider(),
+            base_url=os.environ.get("EMBEDDING_BASE_URL") or "",
+            api_key=os.environ.get("EMBEDDING_API_KEY") or "",
+            model=os.environ.get("EMBEDDING_MODEL") or "text-embedding-3-small",
+            dim=max(16, _int(os.environ.get("EMBEDDING_DIM"), 256)),
+            weight=min(1.0, max(0.0, _num(os.environ.get("EMBEDDING_WEIGHT"), 0.35))),
+        ),
+        publish=PublishSettings(
+            webhook_url=os.environ.get("PUBLISH_WEBHOOK_URL") or "",
+            retry=max(0, _int(os.environ.get("PUBLISH_RETRY"), 2)),
+            auto_dispatch=_bool(os.environ.get("PUBLISH_AUTO_DISPATCH"), False),
+            tick_seconds=max(5, _int(os.environ.get("PUBLISH_TICK_SECONDS"), 60)),
+        ),
     )
+
+
+def _embedding_provider() -> str:
+    raw = (os.environ.get("EMBEDDING_PROVIDER") or "local").strip().lower()
+    return raw if raw in ("local", "openai") else "local"
 
 
 _config: RuntimeConfig = _build_config()
@@ -149,7 +208,46 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
             if attr == "provider" and value not in ("mock", "openai"):
                 continue
             setattr(_config.llm, attr, value)
+    _apply_flat(
+        patch,
+        _config.embedding,
+        {
+            "embeddingProvider": ("provider", ("local", "openai")),
+            "embeddingBaseUrl": ("base_url", None),
+            "embeddingApiKey": ("api_key", None),
+            "embeddingModel": ("model", None),
+            "embeddingDim": ("dim", None),
+            "embeddingWeight": ("weight", None),
+        },
+    )
+    _apply_flat(
+        patch,
+        _config.publish,
+        {
+            "publishWebhookUrl": ("webhook_url", None),
+            "publishRetry": ("retry", None),
+            "publishAutoDispatch": ("auto_dispatch", None),
+            "publishTickSeconds": ("tick_seconds", None),
+        },
+    )
     return _config
+
+
+def _apply_flat(patch: dict[str, Any], target: Any, mapping: dict[str, tuple[str, tuple[str, ...] | None]]) -> None:
+    """把扁平的 camelCase patch 写进目标设置对象，非法值静默跳过。"""
+    for key, (attr, allowed) in mapping.items():
+        value = patch.get(key)
+        if value is None:
+            continue
+        if allowed is not None and value not in allowed:
+            continue
+        if attr == "dim":
+            value = max(16, int(value))
+        elif attr == "weight":
+            value = min(1.0, max(0.0, float(value)))
+        elif attr in ("retry", "tick_seconds"):
+            value = max(1 if attr == "tick_seconds" else 0, int(value))
+        setattr(target, attr, value)
 
 
 _LLM_FIELD_BY_CAMEL = {
@@ -172,6 +270,8 @@ def _mask(secret: str) -> str:
 def public_config() -> dict[str, Any]:
     """对外输出配置，隐藏密钥明文（仅回传掩码与是否已设置）。"""
     llm = _config.llm
+    embedding = _config.embedding
+    publish = _config.publish
     return {
         "port": _config.port,
         "turnBudget": _config.turn_budget,
@@ -181,6 +281,7 @@ def public_config() -> dict[str, Any]:
         "costBudgetUsd": _config.cost_budget_usd,
         "tokenBudget": _config.token_budget,
         "llmCache": _config.llm_cache,
+        "authRequired": auth_enabled(),
         "llm": {
             "provider": llm.provider,
             "baseUrl": llm.base_url,
@@ -192,7 +293,59 @@ def public_config() -> dict[str, Any]:
             "apiKeySet": len(llm.api_key) > 0,
             "apiKeyMasked": _mask(llm.api_key),
         },
+        "embedding": {
+            "provider": embedding.provider,
+            "baseUrl": embedding.base_url,
+            "model": embedding.model,
+            "dim": embedding.dim,
+            "weight": embedding.weight,
+            "apiKey": "",
+            "apiKeySet": len(embedding.api_key) > 0,
+            "apiKeyMasked": _mask(embedding.api_key),
+        },
+        "publish": {
+            "webhookUrl": publish.webhook_url,
+            "retry": publish.retry,
+            "autoDispatch": publish.auto_dispatch,
+            "tickSeconds": publish.tick_seconds,
+            "webhookSet": bool(publish.webhook_url),
+        },
     }
+
+
+# ------------------------------------------------------------------ #
+# API 鉴权（plan.md D17「安全加固」）                                  #
+# ------------------------------------------------------------------ #
+
+
+def _parse_api_tokens(raw: str) -> dict[str, str]:
+    """解析 ``CREATOR_API_TOKENS``，返回 ``token → 租户名`` 映射。
+
+    支持两种写法：``tok1,tok2``（租户均为 ``default``）与
+    ``acme:tok1,beta:tok2``（显式指定租户，用于数据隔离）。
+    """
+    tokens: dict[str, str] = {}
+    for chunk in (raw or "").split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        if ":" in item:
+            tenant, _, token = item.partition(":")
+            tenant, token = tenant.strip(), token.strip()
+        else:
+            tenant, token = "default", item
+        if token:
+            tokens[token] = tenant or "default"
+    return tokens
+
+
+#: API Token → 租户名。为空表示不鉴权（单机默认；见 plan.md D17）
+API_TOKENS: dict[str, str] = _parse_api_tokens(os.environ.get("CREATOR_API_TOKENS") or "")
+
+
+def auth_enabled() -> bool:
+    """是否已通过 ``CREATOR_API_TOKENS`` 开启 API 鉴权。"""
+    return bool(API_TOKENS)
 
 
 def ensure_dirs() -> None:

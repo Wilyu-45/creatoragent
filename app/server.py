@@ -8,15 +8,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.routes import create_api_router
-from .config import ROOT_DIR, ensure_dirs, get_config
+from .config import API_TOKENS, ROOT_DIR, ensure_dirs, get_config
 from .core.blackboard import blackboard
 from .core.orchestrator import orchestrator
 from .core.store import task_store
@@ -51,17 +52,77 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         f"｜Turn Budget {config.turn_budget}"
     )
 
+    # 发布自动投递：仅在显式开启时启动后台巡检，默认关闭以保持进程「零副作用」
+    stop = asyncio.Event()
+    ticker: asyncio.Task[None] | None = None
+    if config.publish.auto_dispatch:
+        interval = max(5, config.publish.tick_seconds)
+
+        async def _publish_loop() -> None:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=interval)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+                try:
+                    result = await asyncio.to_thread(orchestrator.dispatch_due)
+                    if result["dispatched"] or result["failed"]:
+                        log.info(
+                            f"自动投递：成功 {len(result['dispatched'])}｜失败 {len(result['failed'])}"
+                        )
+                except Exception as error:  # noqa: BLE001 - 巡检失败不能拖垮服务
+                    log.warn("自动投递巡检失败", error)
+
+        ticker = asyncio.create_task(_publish_loop())
+        log.info(f"发布自动投递已启用：每 {interval}s 巡检一次到期排期")
+
     try:
         yield
     finally:
+        stop.set()
+        if ticker is not None:
+            ticker.cancel()
         log.info("正在优雅退出…")
         task_store.flush_all()
         blackboard.flush()
         log.info("数据已保存，进程退出")
 
 
+def _install_auth(app: FastAPI) -> None:
+    """按 ``CREATOR_API_TOKENS`` 开启 API 鉴权（plan.md D17「安全加固」）。
+
+    未配置 token 时不挂载中间件，保持单机零配置体验；
+    配置后 ``/api/*``（``/api/health`` 除外）必须携带
+    ``Authorization: Bearer <token>`` 或 ``X-API-Token: <token>``，
+    并把 token 对应的租户写入 ``request.state.tenant`` 供路由做数据隔离。
+    """
+    if not API_TOKENS:
+        return
+
+    @app.middleware("http")
+    async def api_token_guard(request: Request, call_next: Any) -> Any:
+        path = request.url.path
+        if path != "/api/health" and path.startswith("/api/"):
+            header = request.headers.get("authorization") or ""
+            token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+            if not token:
+                token = (request.headers.get("x-api-token") or "").strip()
+            if not token:
+                # SSE（EventSource）无法自定义请求头，允许用 query 参数携带
+                token = (request.query_params.get("token") or "").strip()
+            tenant = API_TOKENS.get(token)
+            if tenant is None:
+                return JSONResponse({"detail": "无效或缺失的 API Token"}, status_code=401)
+            request.state.tenant = tenant
+        return await call_next(request)
+
+    log.info(f"API 鉴权已启用：{len(API_TOKENS)} 个 token（/api/health 免鉴权）")
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Creator Agent Studio", version="0.1.0", lifespan=lifespan)
+    _install_auth(app)
     app.include_router(create_api_router(), prefix="/api")
 
     dist = DIST_DIR

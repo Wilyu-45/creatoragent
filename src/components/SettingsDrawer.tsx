@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { KnowledgeView, PublicConfigView } from '../lib/api.ts';
+import { getApiToken, setApiToken } from '../lib/api.ts';
 import { KnowledgePanel } from './KnowledgePanel.tsx';
 import { MemoryPanel } from './MemoryPanel.tsx';
 import { Chip, Spinner } from './ui.tsx';
@@ -34,6 +35,14 @@ export function SettingsDrawer({
   const [costBudgetUsd, setCostBudgetUsd] = useState(config.costBudgetUsd);
   const [tokenBudget, setTokenBudget] = useState(config.tokenBudget);
   const [llmCache, setLlmCache] = useState(config.llmCache);
+  const [embeddingProvider, setEmbeddingProvider] = useState(config.embedding.provider);
+  const [embeddingModel, setEmbeddingModel] = useState(config.embedding.model);
+  const [embeddingWeight, setEmbeddingWeight] = useState(config.embedding.weight);
+  const [embeddingApiKey, setEmbeddingApiKey] = useState('');
+  const [publishWebhookUrl, setPublishWebhookUrl] = useState(config.publish.webhookUrl);
+  const [publishAutoDispatch, setPublishAutoDispatch] = useState(config.publish.autoDispatch);
+  const [publishRetry, setPublishRetry] = useState(config.publish.retry);
+  const [apiToken, setApiTokenState] = useState(getApiToken());
 
   const save = (): void => {
     const patch: Record<string, unknown> = {
@@ -50,9 +59,22 @@ export function SettingsDrawer({
       costBudgetUsd,
       tokenBudget,
       llmCache,
+      embeddingProvider,
+      embeddingModel,
+      embeddingWeight,
+      publishWebhookUrl,
+      publishAutoDispatch,
+      publishRetry,
     };
     if (apiKey.trim()) patch.apiKey = apiKey.trim();
+    if (embeddingApiKey.trim()) patch.embeddingApiKey = embeddingApiKey.trim();
     onSave(patch);
+  };
+
+  /** Token 只保存在浏览器本地（后端从请求头读取），因此不走配置保存接口。 */
+  const saveToken = (): void => {
+    setApiToken(apiToken.trim());
+    onClose();
   };
 
   return (
@@ -198,6 +220,127 @@ export function SettingsDrawer({
             </label>
             <div className="muted small" style={{ marginTop: 6 }}>
               成本或 token 任一超限即触发熔断：后续步骤自动改用内置离线引擎，保证交付链路不中断。
+            </div>
+
+            <div className="section-h">记忆库向量检索</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>向量提供方</label>
+                <select
+                  value={embeddingProvider}
+                  onChange={(e) =>
+                    setEmbeddingProvider(e.target.value as PublicConfigView['embedding']['provider'])
+                  }
+                >
+                  <option value="local">local（本地 hashing，零依赖可离线）</option>
+                  <option value="openai">openai（兼容 /embeddings 的任意网关）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>Embedding 模型</label>
+                <input value={embeddingModel} onChange={(e) => setEmbeddingModel(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>语义权重（0–1）</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={embeddingWeight}
+                  onChange={(e) => setEmbeddingWeight(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            {embeddingProvider === 'openai' ? (
+              <div className="field" style={{ marginTop: 12 }}>
+                <label>
+                  Embedding API Key{' '}
+                  {config.embedding.apiKeySet ? (
+                    <Chip tone="tone-ok" mono>
+                      已设置 {config.embedding.apiKeyMasked}
+                    </Chip>
+                  ) : (
+                    <Chip tone="tone-warn">留空则复用上面的模型 API Key</Chip>
+                  )}
+                </label>
+                <input
+                  type="password"
+                  value={embeddingApiKey}
+                  placeholder="留空表示不修改"
+                  onChange={(e) => setEmbeddingApiKey(e.target.value)}
+                />
+              </div>
+            ) : null}
+            <div className="muted small" style={{ marginTop: 6 }}>
+              权重 0 = 纯关键词检索（与历史行为一致）；调大后「换个说法也能召回」。远端不可用时自动回退本地向量。
+            </div>
+
+            <div className="section-h">发布投递</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>
+                  发布 Webhook{' '}
+                  {config.publish.webhookSet ? (
+                    <Chip tone="tone-ok">已配置</Chip>
+                  ) : (
+                    <Chip tone="tone-idle">未配置</Chip>
+                  )}
+                </label>
+                <input
+                  value={publishWebhookUrl}
+                  placeholder="https://gateway.example.com/publish"
+                  onChange={(e) => setPublishWebhookUrl(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>失败重试次数</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={publishRetry}
+                  onChange={(e) => setPublishRetry(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <label className="row small" style={{ marginTop: 12, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={publishAutoDispatch}
+                onChange={(e) => setPublishAutoDispatch(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              后台自动投递到期排期（每 {config.publish.tickSeconds}s 巡检一次）
+            </label>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              系统不内置各平台私有 SDK：到点把「该投什么」推给 webhook，由网关去调用平台开放接口。
+              未配置 webhook 时，「投递」等价于「登记发布」，离线同样可用。
+            </div>
+
+            <div className="section-h">访问令牌{config.authRequired ? '（已启用鉴权）' : ''}</div>
+            <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+              <div className="field" style={{ flex: 1 }}>
+                <label>
+                  API Token{' '}
+                  {config.authRequired ? (
+                    <Chip tone="tone-warn">服务端已开启鉴权</Chip>
+                  ) : (
+                    <Chip tone="tone-idle">服务端未开启</Chip>
+                  )}
+                </label>
+                <input
+                  type="password"
+                  value={apiToken}
+                  placeholder="服务端设置 CREATOR_API_TOKENS 后填写"
+                  onChange={(e) => setApiTokenState(e.target.value)}
+                />
+              </div>
+              <button className="btn btn-sm" onClick={saveToken}>
+                保存令牌
+              </button>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              令牌仅保存在本机浏览器，用于请求头 <code>X-API-Token</code>；不同令牌对应不同租户，任务互相不可见。
             </div>
 
             <div className="row" style={{ justifyContent: 'flex-end', marginTop: 18 }}>

@@ -20,6 +20,8 @@ export interface TaskSummary {
   intent_conflicts: number;
   /** 发布排期生效时间 */
   published_at: string | null;
+  /** 归属租户（启用鉴权时按 token 隔离） */
+  tenant: string;
 }
 
 export interface AgentMetaView {
@@ -53,6 +55,8 @@ export interface PublicConfigView {
   tokenBudget: number;
   /** 是否启用 LLM 响应缓存 */
   llmCache: boolean;
+  /** 是否已通过 CREATOR_API_TOKENS 开启 API 鉴权 */
+  authRequired: boolean;
   llm: {
     provider: 'mock' | 'openai';
     baseUrl: string;
@@ -62,6 +66,24 @@ export interface PublicConfigView {
     timeoutMs: number;
     apiKeySet: boolean;
     apiKeyMasked: string;
+  };
+  /** A11 记忆库向量化设置 */
+  embedding: {
+    provider: 'local' | 'openai';
+    baseUrl: string;
+    model: string;
+    dim: number;
+    weight: number;
+    apiKeySet: boolean;
+    apiKeyMasked: string;
+  };
+  /** 多平台发布投递设置 */
+  publish: {
+    webhookUrl: string;
+    retry: number;
+    autoDispatch: boolean;
+    tickSeconds: number;
+    webhookSet: boolean;
   };
 }
 
@@ -158,6 +180,8 @@ export interface MemoryHitView extends MemoryCardView {
   /** 卡片年龄（天）与新鲜度 */
   age_days: number;
   fresh: boolean;
+  /** 语义分量的余弦相似度（0 表示未启用向量检索） */
+  vector_score: number;
 }
 
 export interface MemoryView {
@@ -174,6 +198,9 @@ export interface MemoryView {
     oldest_days: number;
     fresh: number;
     stale: number;
+    /** 向量检索方式与已建索引的卡片数 */
+    embedding: { provider: string; model: string; dim: number; weight: number };
+    vector_indexed: number;
   };
   kinds: { kind: string; label: string }[];
   cards: MemoryCardView[];
@@ -191,6 +218,12 @@ export interface PublishScheduleItem {
   status: string;
   published_at: string | null;
   url: string;
+  /** 由建议时段换算出的到期时间（用于自动投递） */
+  due_at: string | null;
+  /** pending | dispatched | skipped | failed */
+  dispatch_status: string;
+  attempts: number;
+  last_error: string;
 }
 
 export interface PublishScheduleView {
@@ -217,20 +250,83 @@ export interface FeedbackView {
   artifact_id: string | null;
 }
 
+/** 自动投递结果（POST /api/tasks/{id}/publish/dispatch）。 */
+export interface PublishDispatchView {
+  task_id: string;
+  dispatched: string[];
+  failed: string[];
+  skipped: string[];
+  published_at: string | null;
+  artifact_id: string;
+  schedule: PublishScheduleItem[];
+}
+
+/** 跨任务待发布队列中的一条。 */
+export interface PublishQueueItem {
+  task_id: string;
+  brand: string;
+  product: string;
+  channel: string;
+  slot: string;
+  due_at: string | null;
+  dispatch_status: string;
+  attempts: number;
+  last_error: string;
+  title: string;
+  task_status: TaskRecord['status'];
+}
+
+export interface PublishQueueView {
+  total: number;
+  items: PublishQueueItem[];
+}
+
+const TOKEN_KEY = 'creator-api-token';
+
+/** 读取本地保存的 API Token（后端启用 ``CREATOR_API_TOKENS`` 时需要）。 */
+export function getApiToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/** 保存 / 清除 API Token（传空串表示清除）。 */
+export function setApiToken(token: string): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* 隐私模式下 localStorage 不可用，忽略 */
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getApiToken();
+  return token ? { 'X-API-Token': token } : {};
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
     ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+      ...((init?.headers as Record<string, string>) ?? {}),
+    },
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
     let message = `请求失败 (${response.status})`;
     try {
-      const parsed = JSON.parse(detail) as { error?: string };
-      if (parsed.error) message = parsed.error;
+      const parsed = JSON.parse(detail) as { detail?: string; error?: string };
+      const text = parsed.detail ?? parsed.error;
+      if (text) message = text;
     } catch {
       if (detail) message = detail.slice(0, 200);
     }
+    if (response.status === 401) message = 'API Token 无效或缺失，请在「运行时设置」中填写';
     throw new Error(message);
   }
   return (await response.json()) as T;
@@ -276,6 +372,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  dispatchPublish: (id: string, channel = '', force = true) =>
+    request<PublishDispatchView>(`/api/tasks/${id}/publish/dispatch`, {
+      method: 'POST',
+      body: JSON.stringify({ channel, force }),
+    }),
+  publishQueue: (dueOnly = false) =>
+    request<PublishQueueView>(`/api/publish/queue?dueOnly=${dueOnly ? 'true' : 'false'}`),
+  tickPublish: () => request<{ due: number; dispatched: string[]; failed: string[] }>('/api/publish/tick', {
+    method: 'POST',
+  }),
 };
 
 /** 订阅任务实时事件流（SSE），返回取消订阅函数。 */
@@ -285,7 +391,10 @@ export function subscribeTask(
   onEvent: (event: AgentEvent) => void,
   onError?: () => void,
 ): () => void {
-  const source = new EventSource(`/api/tasks/${taskId}/events?since=${since}`);
+  // EventSource 无法自定义请求头，鉴权开启时用 query 参数携带 token
+  const token = getApiToken();
+  const suffix = token ? `&token=${encodeURIComponent(token)}` : '';
+  const source = new EventSource(`/api/tasks/${taskId}/events?since=${since}${suffix}`);
   source.onmessage = (message) => {
     try {
       onEvent(JSON.parse(message.data) as AgentEvent);

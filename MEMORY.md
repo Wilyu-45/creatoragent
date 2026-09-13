@@ -43,6 +43,8 @@ conda run -n multi-agent-creator python -m app.main
 conda run -n multi-agent-creator python scripts/doctor.py
 # 端到端验收（真实 uvicorn + 全部 /api 契约）
 conda run -n multi-agent-creator python scripts/smoke_api.py
+# 压测 / Prompt 调优基线（Mock 校验并发正确性；openai 量真实延迟与成本）
+conda run -n multi-agent-creator python scripts/stress_llm.py -n 12 -c 4
 # 前端（构建后由后端托管）
 npm run build        # → dist/
 npm run dev:web      # 仅前端，/api 代理到 8787
@@ -51,6 +53,9 @@ npm run dev:web      # 仅前端，/api 代理到 8787
 环境变量：
 - `CREATOR_DATA_DIR`：持久化根目录，默认 `<项目根>/data`（测试/多实例部署用，避免互相污染）。
 - `PORT` / LLM 相关配置见 `.env.example`。
+- 本轮新增：`EMBEDDING_PROVIDER/DIM/WEIGHT/BASE_URL/API_KEY/MODEL`（记忆库向量检索）、
+  `PUBLISH_WEBHOOK_URL/PUBLISH_RETRY/PUBLISH_AUTO_DISPATCH/PUBLISH_TICK_SECONDS`（发布投递）、
+  `CREATOR_API_TOKENS`（开启后 `/api/*` 需携带 Token，并映射到租户做数据隔离）。
 
 ---
 
@@ -68,7 +73,8 @@ app/
     blackboard.py        # 共享黑板
     store.py             # 任务持久化（重启把 running 标记为中断）
     gatekeeper.py        # 门禁决策 + 质量记分卡
-    orchestrator.py      # LangGraph 编排图（编译 + 驱动 + 断点续跑）
+    publisher.py         # 发布时段解析 → 到期时间 → webhook 投递（含退避重试）
+    orchestrator.py      # LangGraph 编排图（编译 + 驱动 + 断点续跑 + 投递队列）
     clock.py / util.py
   llm/
     engine.py            # chat() 统一入口：重试 + 降级
@@ -79,15 +85,17 @@ app/
     industry.py          # 渠道规范、SEO 模式、建议发布时段、行业画像
     compliance.py        # 广告法词库扫描、品牌语气检查、自动改写
     visual.py            # 视觉风格库（色彩/构图/光线/Prompt 片段 + 渠道画幅）
-    memory.py            # A11 记忆库：知识卡片持久化 + 打分检索（RAG-lite）
+    memory.py            # A11 记忆库：知识卡片持久化 + 关键词/向量混合检索（RAG）
+    embedding.py         # 文本向量化：本地确定性 hashing embedding + 可选 OpenAI /embeddings
   agents/
     base.py              # 统一上下文/提示词/产物与结果构造
     a1_strategy.py … a11_memory.py
     registry.py          # 已实现 AGENTS（A1-A11）+ PLANNED_AGENTS（仅 A0）
   api/routes.py          # REST + SSE 路由（契约与 TS 版逐字段对齐）
 scripts/
-  doctor.py              # 环境 + 智能体链路自检（含抖音分支、真实 A11 智能体的 RAG 闭环）
-  smoke_api.py           # 端到端验收（REST/SSE/错误分支/持久化/静态托管/新增阶段/记忆召回）
+  doctor.py              # 环境 + 智能体链路自检（含抖音分支、真实 A11 智能体的 RAG 闭环、向量/投递/鉴权）
+  smoke_api.py           # 端到端验收（REST/SSE/错误分支/持久化/静态托管/新增阶段/记忆召回/投递队列）
+  stress_llm.py          # 压测与 Prompt 调优基线（并发正确性 / 延迟分位 / 成本缓存 / 租约残留）
 src/                     # 前端；契约类型自持于 src/lib/types.ts
   components/MemoryPanel.tsx   # 设置抽屉「记忆库」标签页：统计 + 检索召回 + 卡片列表
   components/PublishPanel.tsx  # 发布登记 + 效果回填（触发 A10 复盘）
@@ -159,6 +167,45 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 - **验收同步**：`smoke_api.py` 增加发布排期 → 登记发布 → 效果回填复盘断言，以及
   `/api/metrics` 的 cost/cache/leases 断言（含 `leases['active'] == 0`）。
 
+### 4.1c 后端 · 第四轮：向量检索 + 自动投递 + 鉴权租户（2026-09-13，已完成）
+
+- **记忆库向量检索（补齐「换向量检索」待办，对应 plan.md 2.2.3「RAG Server」）**：
+  - 新增 `app/knowledge/embedding.py`：`tokenize`（与关键词口径一致的中文 2-gram + 英文/数字分词）、
+    `hashing_vector`（blake2b 符号哈希 + L2 归一化，确定性、零依赖）、`cosine`、
+    `embed_texts`（`provider=local` 走本地；`provider=openai` 走 `/embeddings` 并**任何异常回退本地**）、`describe`。
+  - `memory.py` 检索改为**混合打分**：`score = keyword*(1-weight) + vector_sim*weight`，
+    默认 `weight=0.35`（`weight=0` 即退化为旧行为）；`MemoryHit` 新增 `vector`/`vector_score`，
+    命中理由新增「语义相近」；向量按卡片懒计算并缓存，提供方/模型/维度变更时整体失效重算。
+  - `stats()` 新增 `embedding`（提供方/模型/维度/权重）与 `vector_indexed`（已建索引条数）。
+- **发布自动投递（plan.md v2.0「自动发布」的落地形态）**：
+  - 新增 `app/core/publisher.py`：`parse_slot_time`（解析 `07:30-08:30 通勤时段`，兼容全角冒号）、
+    `compute_due_at`（**今天已过则顺延到明天**，避免永远不触发）、`is_due`、
+    `dispatch(url, payload, retry)`（指数退避重试；未配置 webhook 直接返回失败供调用方退化）。
+  - 排期项新增字段：`due_at` / `dispatch_status` / `attempts` / `last_error`（与人工「登记发布」共用状态机）。
+  - 编排新增 `dispatch_publish(task_id, channel, force)`、`publish_queue(due_only, tenant)`、
+    `dispatch_due(tenant)`；未配置 webhook 时状态记为 `skipped` 并**等价比「登记发布」**，保证离线语义完整。
+  - `server.py` lifespan 在 `PUBLISH_AUTO_DISPATCH=true` 时启动后台巡检（`PUBLISH_TICK_SECONDS`，默认 60s），
+    默认关闭以保持进程零副作用。
+- **API 鉴权与租户隔离（plan.md D17「安全加固：API 鉴权、数据隔离」）**：
+  - `config.py` 新增 `_parse_api_tokens` / `API_TOKENS` / `auth_enabled()`，支持 `tok1,tok2`（均归 `default`）
+    与 `acme:tok1,beta:tok2`（显式指定租户）。
+  - `server._install_auth()`：**未配置 token 时不挂载中间件**（保持单机零配置）；配置后 `/api/*`
+    （`/api/health` 免鉴权）必须携带 `Authorization: Bearer <token>` 或 `X-API-Token`，
+    SSE 允许用 `?token=`（EventSource 无法自定义头）；Token 解析出的租户写入 `request.state.tenant`。
+  - `TaskRecord.tenant` 落库；`routes.py` 以 `_tenant_of / _require_task / _tenant_tasks` 统一做
+    列表过滤与详情越权 404，覆盖 tasks/decide/publish/feedback/blackboard/events/metrics 全部接口。
+- **压测 / Prompt 调优基线**：新增 `scripts/stress_llm.py`（`-n 任务数 -c 并发度 --provider`），
+  输出完成率、端到端 p50/p95/p99、返工轮次与首轮通过率、质量分、成本/缓存、**租约冲突与活跃租约残留（应归零）**；
+  Mock 模式可作 CI 并发正确性回归，`openai` 模式量真实延迟与成本。
+- **契约与配置**：`RuntimeConfig` 新增 `embedding` / `publish` 两组设置（camelCase 扁平 patch 写入，
+  非法值静默跳过），`public_config()` 新增 `authRequired`；settings PUT 支持 `embedding*` / `publish*` 字段。
+- **前端同步**：`src/lib/api.ts` 新增 `X-API-Token` 头（401 提示）、SSE 带 `&token=`、
+  `dispatchPublish / publishQueue / tickPublish` 三个调用与 `PublishQueueItem` 等视图类型；
+  `PublishPanel` 增加「到期时间」列、投递/登记双按钮、投递状态 Chip 与「全部投递」；
+  `SettingsDrawer` 新增向量检索、发布投递、访问令牌三组；`MemoryPanel` 增加向量检索 chips 与命中「语义」分。
+- **验收同步**：`doctor.py` 新增 `check_embedding / check_publisher / check_auth`（`main` 汇总五项检查）；
+  `smoke_api.py` 增加 settings（embedding/publish/authRequired）、向量检索字段、dispatch → queue 断言。
+
 ### 4.2 前端（`npm run build` 通过）
 
 - Topbar、侧栏任务列表、流水线看板、共享黑板产物查看器（**14 种类型** + 版本 diff）、
@@ -178,6 +225,13 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
   **新增新鲜度统计（新鲜 / 陈旧 / 最旧天数 / 过期阈值）**；
   内置检索框（走 `POST /api/memory/search`，与智能体召回同源），
   命中项显示分数、命中理由与复用建议，下方列出全部卡片及其来源任务。
+  **本轮再新增向量检索 chips（提供方 / 模型 / 语义权重 / 已建索引条数）与命中项的「语义 {vector_score}」Chip。**
+- **发布面板投递**（`PublishPanel.tsx`）：排期表新增「到期时间」列、投递 / 登记双按钮与投递状态 Chip
+  （`pending / dispatched / skipped / failed`），并支持「全部投递」；投递走 `POST /api/tasks/{id}/publish/dispatch`。
+- **设置抽屉**（`SettingsDrawer.tsx`）：新增「向量检索」（提供方 / 模型 / 语义权重 / API Key）、
+  「发布投递」（webhook / 重试次数 / 自动投递开关）、「访问令牌」（本地保存，随请求带 `X-API-Token`）三组。
+- **API 客户端**（`src/lib/api.ts`）：统一附带鉴权头，401 给出明确文案；SSE URL 追加 `&token=`；
+  新增 `dispatchPublish / publishQueue / tickPublish`。
 
 ---
 
@@ -241,6 +295,21 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 22. **清理检查点要按 `thread_id` 且防御式处理**：LangGraph 的表结构归它自己维护，
     代码里只做「表存在就删、不存在就跳过」，先删 `writes` 再删 `checkpoints`，失败不影响删除接口。
 
+**向量检索与发布投递（第四轮）**
+
+23. **embedding 必须「可失败」**：记忆库检索是创作链路的前置步骤，若 embedding 服务抖动就让检索报错，
+    整个任务都会挂。因此 `embed_texts` 把远端调用的**任何异常**（含返回条数/维度异常）都静默回退到本地向量，
+    调用方无需 try/except。同时 `provider=local` 用确定性 hashing（blake2b + 符号哈希），
+    同一文本永远同一向量，跨进程/重启可复现，测试才敢断言分数。
+24. **混合权重必须能退化**：`weight=0` 时 `score` 就是纯关键词分，与旧行为逐位一致——
+    这让「上向量」成为可回滚的开关，而不是一次性替换；新老行为能用同一套断言对照。
+25. **`due_at` 要顺延而不是「当天已过就作废」**：排期文案是「每天到点」的语义。
+    若按「今天该时刻已过 → 无到期时间」实现，晚上建的任务会在第二天永远不触发。
+    正确做法是 `due <= now` 时 `+1 day`，让后台巡检总能等到下一次投放点。
+26. **未配置 webhook 不等于失败**：离线/单机场景下 `PUBLISH_WEBHOOK_URL` 为空是常态。
+    `dispatch` 返回失败但编排层把 `dispatch_status` 记为 `skipped` 并**等价比「登记发布」**，
+    这样 smoke 测试在无外部依赖时也能覆盖「投递 → 队列清空」的完整分支。
+
 ---
 
 ## 6. 验证结果（端到端实测）
@@ -253,9 +322,13 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
   - 动态渠道（抖音）分支：A8 分镜=5 镜 画幅 9:16；A9 标题 18/18 字（搜索变体 19 字 → 已压缩）
   - **记忆库 RAG 闭环（跑的是真实 A11 智能体，不是生成器）**：
     任务 1 入库 7 条新知识、召回 0 条（`exclude_task` 生效）；
-    任务 2 召回 5 条历史资产，示例命中 `晨野｜小红书 语气与主张基线`（score=0.568，
-    理由=文本相关、同品牌、同渠道、同行业）
+    任务 2 召回 5 条历史资产，示例命中 `晨野｜小红书 语气与主张基线`
+    （score=0.7145｜**语义=0.5865**，理由=文本相关、语义相近、同品牌、同渠道、同行业）
   - 自检默认落在临时 `CREATOR_DATA_DIR`，不污染开发环境数据
+  - **本轮新增三组自检**：`[记忆库向量检索]`（确定性=True / 归一化范数=1.0000 / 自相似=1.000 /
+    异话题相似=0.000）、`[发布排期]`（`07:30-08:30` → `(7,30)`、跨天顺延 23:00→次日 07:30、
+    未到点=False / 已到点=True）、`[鉴权]`（`tok1` → `default`、`acme:tok1,beta:tok2` → `{'tok1':'acme','tok2':'beta'}`）。
+    自检末尾汇总「五项检查全通过」。
 - `scripts/smoke_api.py` → **结果：通过（exit 0）**，覆盖：
   - `/api/health`、`/api/agents`（**11 个已实现 + A0 规划中**）、`/api/knowledge`、`/api/settings`(GET/PUT)
   - `GET /` 静态托管 200（`dist/index.html`）
@@ -275,8 +348,13 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
   - 第三个任务全节点 `A0…A11 均 done`；已完成任务 `DELETE` → 200 且响应含
     `purged_checkpoints: 55`，随后详情 404
   - 持久化：`tasks/*.json`、`checkpoints.sqlite`、`blackboard.json`、`memory.json` 均生成
-- 前端：`npm run build` 通过（`tsc --noEmit` 无错误，46 modules；新增记忆库面板后由 45 → 46）。
-- 并发：多个任务同时执行可各自独立跑完（每单 16 turns）。
+  - **本轮新增断言**：`PUT /api/settings` 的 `embedding`（provider=local / weight=0.4）与
+    `publish`（webhook 已配置）、`authRequired=False`；`GET /api/memory` 的 `vector_indexed`、
+    命中项 `vector_score`（如 `晨野｜小红书 语气与主张基线` 0.2765/语义 0.3012）；
+    `POST /api/tasks/{id}/publish/dispatch` → 排期含 `due_at`（小红书 07:30Z / 抖音 12:00Z / 公众号 20:00Z）、
+    投递状态 `skipped`（未配 webhook 的既定退化）→ `GET /api/publish/queue` 返回 **0 条残留**。
+- 前端：`npm run typecheck` 与 `npm run build` 通过（`tsc --noEmit` 无错误，47 modules）。
+- 并发行正确性：`scripts/stress_llm.py`（Mock，`-n N -c M`）下黑板租约冲突可控、活跃租约归零、成本账本不串味。
 - 关于「验收过程」：上一轮先被两个真实缺陷拦下（详见踩坑 12–14），修复后才拿到通过结果——
   **这说明自检通过并不等于链路可用**；本轮因此把「跑智能体本体」直接写进了 `doctor.py`。
 
@@ -293,10 +371,15 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 - [x] 知识过期下线策略 —— 已完成：`MAX_AGE_DAYS` 自动下线 + `FRESH_DAYS/STALE_DAYS` 新鲜度。
 - [x] 删除旧 `server/`（TypeScript）目录 —— 已完成（`git rm -r server/`）。
 - [x] 用户使用说明文档 —— 已完成：根目录 `USER_GUIDE.md`。
-- [ ] 换向量检索（当前是 2-gram + 元数据加成的 RAG-lite；接口已按 vector-ready 设计）。
-- [ ] 真实模型链路压测与 Prompt 调优。
-- [ ] 多平台真实一键发布（各平台开放接口授权与鉴权差异大，当前为「登记事实 + 复盘」闭环）。
-- [ ] 记忆库的多租户 / 权限。
+- [x] 记忆库向量检索 —— 已完成：本地 hashing embedding + 可选 OpenAI `/embeddings`，
+  关键词/语义按 `EMBEDDING_WEIGHT` 线性混合（`weight=0` 可退化为纯关键词）。
+- [x] 压测与 Prompt 调优基线 —— 已完成：`scripts/stress_llm.py`（延迟分位 / 返工 / 成本缓存 / 租约残留）。
+- [x] API 鉴权与任务级租户隔离 —— 已完成：`CREATOR_API_TOKENS` + Bearer/X-API-Token/`?token=` →
+  `request.state.tenant`，列表/详情/指标按租户过滤。
+- [ ] 真实模型链路压测与 Prompt 调优 —— 脚本已就绪，仍需在真实网关跑一轮并据数据调 Prompt / 预算。
+- [ ] 多平台真实一键发布 —— 已提供平台无关的 webhook 投递通道与到期队列，
+  平台私有授权/限流需由发布网关承接，仍在「登记事实 + 复盘」范围内。
+- [ ] 记忆库的多租户 / 权限 —— 任务已按租户隔离，记忆库卡片目前仍为全局共享（尚未按租户分区）。
 
 ---
 
@@ -386,3 +469,20 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
     设置抽屉成本分组、记忆库新鲜度 chips。
   - 验证：`scripts/doctor.py` 通过；`scripts/smoke_api.py` **通过（exit 0，含发布闭环与 cost/cache/leases 断言）**；
     `npm run typecheck` 与 `npm run build` 通过。
+
+- **2026-09-13（第四轮：向量检索 + 自动投递 + 鉴权租户 + 压测脚本）**
+  - 依据《plan.md》2.2.3「RAG Server」、D17「安全加固」、v2.0「自动发布」与 MEMORY 待办收口：
+    - **向量检索**：新增 `app/knowledge/embedding.py`（本地 hashing embedding + 可选 OpenAI `/embeddings`，
+      远端失败静默回退）；`memory.py` 改为 `keyword*(1-w) + vector*w` 混合打分（默认 `w=0.35`，可退化为纯关键词），
+      `MemoryHit.vector_score`、`stats().embedding/vector_indexed`。
+    - **发布自动投递**：新增 `app/core/publisher.py`（时段解析 → `due_at`（已过顺延到次日）→ webhook 退避重试）；
+      排期项新增 `due_at/dispatch_status/attempts/last_error`；编排新增 `dispatch_publish / publish_queue / dispatch_due`；
+      lifespan 支持 `PUBLISH_AUTO_DISPATCH` 后台巡检（默认关）。
+    - **鉴权与租户隔离**：`CREATOR_API_TOKENS`（`tok` 或 `acme:tok`），`server._install_auth` 中间件，
+      三处取 Token（Bearer / X-API-Token / query），`TaskRecord.tenant` + 路由统一租户过滤（越权 404）。
+    - **压测**：新增 `scripts/stress_llm.py`（延迟分位 / 返工 / 质量 / 成本缓存 / 租约残留）。
+    - **前端**：api 客户端鉴权头与 SSE token、`PublishPanel` 投递列与按钮、`SettingsDrawer` 三组新设置、
+      `MemoryPanel` 向量 chips。
+    - **验收**：`doctor.py` 新增 embedding/publisher/auth 三检；`smoke_api.py` 新增对应断言。
+  - 验证：`scripts/doctor.py` 通过（五项检查全绿）；`scripts/smoke_api.py` **通过（exit 0）**；
+    `npm run typecheck` 与 `npm run build` 通过（47 modules）。

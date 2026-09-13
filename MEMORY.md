@@ -90,7 +90,7 @@ scripts/
   smoke_api.py           # 端到端验收（REST/SSE/错误分支/持久化/静态托管/新增阶段/记忆召回）
 src/                     # 前端；契约类型自持于 src/lib/types.ts
   components/MemoryPanel.tsx   # 设置抽屉「记忆库」标签页：统计 + 检索召回 + 卡片列表
-server/                  # 旧 TypeScript 实现（保留作参照，已不被引用；删除前请先建首次 commit）
+server/                  # 旧 TypeScript 实现（保留作参照，已不被引用；首次提交已建立，可择机删除）
 ```
 
 ---
@@ -319,3 +319,17 @@ server/                  # 旧 TypeScript 实现（保留作参照，已不被�
       跨任务召回（A11 `recalled` 5 条 + A1 evidence 含 `记忆库/…` 2 条）、`memory.json` 持久化、
       删除任务回收检查点（55 行）。
   - 验证：`doctor.py` 通过（含 RAG 闭环）；`smoke_api.py` **通过（exit 0）**；`npm run build` 通过（46 modules）。
+  - **版本管理**：建立首次提交 `476abc0`（101 文件 / 25661 行，分支 `master`）；
+    `.gitignore` 补上 `__pycache__/`、`*.py[cod]`、`.pytest_cache/`（此前会误提交 41 个 `.pyc`）。
+    远端 `origin = https://github.com/Wilyu-45/creatoragent.git` 已存在 `main`（`bd81a13`）。
+    当前环境直连 `github.com:443` 持续超时（无代理、`Direct access`），**推送尚未完成**；
+    恢复网络后按下面顺序执行（远端 `main` 与本提交**历史无关联**，因此必须先 fetch + rebase，禁止强推）：
+
+    ```
+    git fetch origin main
+    git rebase origin/main          # 把 476abc0 接到 bd81a13 之上
+    git branch -M master main       # 本地分支改名以对齐远端默认分支
+    git push -u origin main
+    ```
+
+    若 `rebase` 出现冲突，先 `git ls-tree -r --name-only origin/main` 看清远端已有哪些文件再决定保留策略。

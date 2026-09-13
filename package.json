@@ -1,0 +1,36 @@
+{
+  "name": "creator-agent-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "多智能体协作创作台 —— 编排式多智能体 + 共享黑板 + 阶段门禁",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "python -m app.main",
+    "dev:web": "vite",
+    "start": "npm run build && python -m app.main",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "doctor": "python scripts/doctor.py",
+    "smoke": "python scripts/smoke_api.py"
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.1.0",
+    "concurrently": "^9.2.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.13"
+  }
+}

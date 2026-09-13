@@ -1,0 +1,16 @@
+# Creator Agent Studio —— Python 后端依赖
+# 目标环境：conda env `multi-agent-creator`（Python 3.12）
+#
+# 安装：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# ---- Web 层：FastAPI + SSE（SSE 用 StreamingResponse 自实现，不引额外依赖） ----
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# ---- 编排层：LangGraph 状态图 + 条件边门禁环 + interrupt 人工审批 + checkpoint ----
+langgraph>=0.2.60
+langgraph-checkpoint-sqlite>=2.0.0
+
+# ---- 配置与工具 ----
+python-dotenv>=1.0.0
+httpx>=0.27.0

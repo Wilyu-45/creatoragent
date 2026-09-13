@@ -1,0 +1,391 @@
+"""智能体公共基座（移植自 server/agents/base.ts）。
+
+所有智能体共享同一套：
+  - 系统提示词契约（``SHARED_RULES``）
+  - 结构化调用入口（``call_with_prompts`` → 重试/降级 → JSON 抽取）
+  - 产物与结果构造（``build_artifact`` / ``build_result``）
+  - 真实模型输出的字段漂移兜底（``read_confidence`` 等）
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..core.clock import now_iso
+from ..core.events import new_id
+from ..core.types import (
+    AgentId,
+    AgentMetrics,
+    AgentResult,
+    Artifact,
+    ArtifactType,
+    Brief,
+    Evidence,
+    GateResult,
+    Phase,
+    ReviewItem,
+)
+from ..llm.engine import chat
+from ..llm.json_utils import (
+    as_num,
+    as_obj,
+    as_obj_array,
+    as_str,
+    as_str_array,
+    normalize_confidence,
+    normalize_score,
+)
+from ..llm.types import ChatMessage, LLMRequest
+
+# ------------------------------------------------------------------ #
+# 运行时上下文                                                        #
+# ------------------------------------------------------------------ #
+
+
+@dataclass
+class AgentRunContext:
+    task_id: str
+    brief: Brief
+    phase: str
+    #: 当前返工轮次，0 表示首轮
+    revision: int
+    #: 本轮需要处理的返工意见
+    feedback: list[str]
+    #: 上游产物内容，key 为 up_ 前缀约定名（strategy / creative / plan / draft ...）
+    upstream: dict[str, dict[str, Any]]
+    #: 由编排层注入，保证产物版本号在黑板内单调递增
+    next_version: Callable[[str], int]
+    emit: Callable[..., None]
+    #: 当前任务已写入黑板的产物快照，供 A11 这类收敛型智能体做归档统计
+    artifacts: list[Artifact] = field(default_factory=list)
+    #: A11 记忆库召回的历史资产（RAG），由编排层在创作类智能体执行前注入
+    memory: list[dict[str, Any]] = field(default_factory=list)
+
+    def upstream_of(self, key: str) -> dict[str, Any]:
+        return self.upstream.get(key) or {}
+
+
+@dataclass
+class AgentMeta:
+    id: str
+    name: str
+    #: 对应团队职位
+    role: str
+    kind: str
+    phase: str
+    produces: str
+    description: str
+    #: 是否拥有否决权（A6/A7）
+    veto: bool
+    capabilities: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AgentDefinition:
+    meta: AgentMeta
+    run: Callable[[AgentRunContext], AgentResult]
+
+
+# ------------------------------------------------------------------ #
+# 统一系统提示词：所有智能体共享的输出契约                            #
+# ------------------------------------------------------------------ #
+
+SHARED_RULES = "\n".join(
+    [
+        "你是多智能体创作团队中的一员，只做职责范围内的事，不越权代替其他智能体。",
+        "必须区分「事实」「假设」「创意建议」，不得编造数据、来源或用户证言。",
+        "所有输出必须是合法 JSON，不要输出 Markdown 代码块以外的任何解释性文字。",
+        "每个结论都要能说明依据；不确定时降低 confidence，而不是编造依据。",
+        "涉及价格、功效、收益、数据引用时，必须在 risks 中标注风险。",
+    ]
+)
+
+
+def system_prompt(meta: AgentMeta, body: str) -> str:
+    return f"{SHARED_RULES}\n\n【你的角色】{meta.id} {meta.name}（{meta.role}）\n{body}"
+
+
+# ------------------------------------------------------------------ #
+# 结构化调用                                                          #
+# ------------------------------------------------------------------ #
+
+#: 每百万 token 的美元单价（in / out）
+PRICING: dict[str, tuple[float, float]] = {
+    "gpt-4o-mini": (0.15, 0.6),
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4.1-mini": (0.4, 1.6),
+    "deepseek-chat": (0.27, 1.1),
+    "qwen-plus": (0.4, 1.2),
+    "qwen-max": (1.6, 6.4),
+}
+
+DEFAULT_PRICE = (0.5, 1.5)
+
+
+def price_of(model: str) -> tuple[float, float]:
+    lowered = (model or "").lower()
+    for key, price in PRICING.items():
+        if key in lowered:
+            return price
+    return DEFAULT_PRICE
+
+
+@dataclass
+class StructuredResult:
+    data: dict[str, Any]
+    raw: str
+    metrics: AgentMetrics
+
+
+def call_with_prompts(
+    ctx: AgentRunContext,
+    meta: AgentMeta,
+    system: str,
+    user: str,
+    purpose: str,
+    context: dict[str, Any],
+) -> StructuredResult:
+    """智能体唯一的结构化调用入口。
+
+    ``context`` 同时服务于两条路径：
+      - 真实模型：由 system/user 提示词驱动
+      - 离线引擎：由 context 中的结构化数据驱动
+    两条路径产出同一份 JSON 契约，上层无需感知差异。
+    """
+    from ..llm.json_utils import extract_json
+
+    response = chat(
+        LLMRequest(
+            purpose=purpose,
+            messages=[
+                ChatMessage(role="system", content=system),
+                ChatMessage(role="user", content=user),
+            ],
+            context=context,
+            json=True,
+        )
+    )
+
+    parsed = extract_json(response.content)
+    if not isinstance(parsed, dict):
+        snippet = response.content[:200]
+        raise ValueError(f"{meta.id} 返回内容无法解析为 JSON：{snippet}")
+
+    price_in, price_out = price_of(response.model)
+    usage = response.usage
+    metrics = AgentMetrics(
+        latency_ms=response.latency_ms,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        cost_usd=(usage.prompt_tokens / 1_000_000) * price_in
+        + (usage.completion_tokens / 1_000_000) * price_out,
+        provider=response.provider,
+        model=response.model,
+        simulated=response.simulated,
+    )
+    return StructuredResult(data=parsed, raw=response.content, metrics=metrics)
+
+
+# ------------------------------------------------------------------ #
+# 产物与结果构造                                                      #
+# ------------------------------------------------------------------ #
+
+
+@dataclass
+class ArtifactDraft:
+    type: str
+    title: str
+    content: dict[str, Any]
+    text: str
+    tags: list[str] = field(default_factory=list)
+
+
+def build_artifact(ctx: AgentRunContext, meta: AgentMeta, draft: ArtifactDraft) -> Artifact:
+    return Artifact(
+        id=new_id("art"),
+        task_id=ctx.task_id,
+        agent_id=meta.id,  # type: ignore[arg-type]
+        type=draft.type,  # type: ignore[arg-type]
+        version=ctx.next_version(draft.type),
+        title=draft.title,
+        content=draft.content,
+        text=draft.text,
+        revision=ctx.revision,
+        created_at=now_iso(),
+        tags=draft.tags,
+    )
+
+
+@dataclass
+class ResultDraft:
+    summary: str
+    artifacts: list[Artifact]
+    confidence: float
+    risks: list[str] = field(default_factory=list)
+    evidence: list[Evidence] = field(default_factory=list)
+    needs_human_review: bool = False
+    gate_result: GateResult | None = None
+    revision_requests: list[str] = field(default_factory=list)
+    handoff: dict[str, Any] | None = None
+    status: str = "success"
+
+
+def build_result(
+    ctx: AgentRunContext,
+    meta: AgentMeta,
+    metrics: AgentMetrics,
+    draft: ResultDraft,
+) -> AgentResult:
+    return AgentResult(
+        task_id=ctx.task_id,
+        agent_id=meta.id,  # type: ignore[arg-type]
+        status=draft.status,  # type: ignore[arg-type]
+        summary=draft.summary,
+        artifacts=draft.artifacts,
+        evidence=draft.evidence,
+        confidence=draft.confidence,
+        risks=draft.risks,
+        needs_human_review=draft.needs_human_review,
+        gate_result=draft.gate_result,
+        revision_requests=draft.revision_requests,
+        handoff=draft.handoff,  # type: ignore[arg-type]
+        metrics=metrics,
+        created_at=now_iso(),
+    )
+
+
+# ------------------------------------------------------------------ #
+# 解析辅助：真实模型的字段名常有漂移，统一在此兜底                     #
+# ------------------------------------------------------------------ #
+
+
+def _first_present(*values: Any) -> Any:
+    """等价于 JS 的 ``??`` 链：返回第一个非 None 的值。"""
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def read_confidence(data: dict[str, Any], fallback: float = 0.78) -> float:
+    return normalize_confidence(data.get("confidence"), fallback)
+
+
+def read_risks(data: dict[str, Any]) -> list[str]:
+    return as_str_array(data.get("risks"))
+
+
+def read_evidence(data: dict[str, Any]) -> list[Evidence]:
+    return [
+        Evidence(
+            claim=as_str(item.get("claim")),
+            source=as_str(item.get("source"), "未标注"),
+            reliability=normalize_confidence(item.get("reliability"), 0.6),
+        )
+        for item in as_obj_array(data.get("evidence"))
+    ]
+
+
+def read_gate(data: dict[str, Any], fallback: GateResult) -> GateResult:
+    raw = as_str(_first_present(data.get("verdict"), data.get("gate_result")), "").lower()
+    if raw in ("pass", "revise", "reject"):
+        return raw  # type: ignore[return-value]
+    return fallback
+
+
+_SEVERITY_MAP: dict[str, str] = {
+    "blocker": "blocker",
+    "high": "blocker",
+    "critical": "blocker",
+    "阻断": "blocker",
+    "major": "major",
+    "medium": "major",
+    "重要": "major",
+    "minor": "minor",
+    "low": "minor",
+    "建议": "minor",
+}
+
+
+def read_reviews(data: dict[str, Any], key: str = "issues") -> list[ReviewItem]:
+    items: list[ReviewItem] = []
+    for item in as_obj_array(data.get(key)):
+        raw_severity = as_str(item.get("severity"), "minor").lower()
+        location = as_str(_first_present(item.get("location"), item.get("snippet")))
+        items.append(
+            ReviewItem(
+                severity=_SEVERITY_MAP.get(raw_severity, "info"),  # type: ignore[arg-type]
+                category=as_str(_first_present(item.get("category"), item.get("type")), "一般问题"),
+                detail=as_str(_first_present(item.get("detail"), item.get("description"))),
+                suggestion=as_str(_first_present(item.get("suggestion"), item.get("fix"))),
+                location=location or None,
+            )
+        )
+    return items
+
+
+def memory_block(ctx: AgentRunContext, *, limit: int = 5) -> str:
+    """渲染 A11 记忆库召回片段，供创作类智能体在提示词里复用历史资产。"""
+    from ..knowledge.memory import render_hits
+
+    return render_hits(ctx.memory, limit=limit)
+
+
+def content_to_text(content: dict[str, Any]) -> str:
+    """把结构化产物压平成可读文本，用于版本 diff、关键词检索与全文合规扫描。"""
+    lines: list[str] = []
+
+    def walk(value: Any, path: str, depth: int) -> None:
+        if depth > 5:
+            return
+        if isinstance(value, str):
+            if value.strip():
+                lines.append(f"{path}：{value}" if path else value)
+            return
+        if isinstance(value, bool):
+            lines.append(f"{path}: {'true' if value else 'false'}")
+            return
+        if isinstance(value, (int, float)):
+            lines.append(f"{path}: {value}")
+            return
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index + 1}]" if path else str(index + 1), depth + 1)
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                walk(child, f"{path}.{key}" if path else str(key), depth + 1)
+
+    walk(content, "", 1)
+    return "\n".join(lines)
+
+
+__all__ = [
+    "AgentRunContext",
+    "AgentMeta",
+    "AgentDefinition",
+    "SHARED_RULES",
+    "system_prompt",
+    "call_with_prompts",
+    "StructuredResult",
+    "ArtifactDraft",
+    "build_artifact",
+    "ResultDraft",
+    "build_result",
+    "read_confidence",
+    "read_risks",
+    "read_evidence",
+    "read_gate",
+    "read_reviews",
+    "memory_block",
+    "content_to_text",
+    "as_num",
+    "as_obj",
+    "as_obj_array",
+    "as_str",
+    "as_str_array",
+    "normalize_confidence",
+    "normalize_score",
+]

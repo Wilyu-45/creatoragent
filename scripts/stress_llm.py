@@ -41,13 +41,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.util import make_temp_dir  # noqa: E402 - 需先补好 sys.path
+from app.core.util import force_offline_provider, free_port, make_temp_dir  # noqa: E402
 
 #: 同 smoke_api：数据目录必须真正可写，否则检查点会静默退回内存实现，
 #: 「并发正确性」测的就是一条假路径。
 TMP = make_temp_dir("stress-", base=ROOT / ".doctor-data")
 SERVER_LOG = TMP / "server.log"
-PORT = 8801
+PORT = free_port(8801)
 BASE = f"http://127.0.0.1:{PORT}"
 
 TERMINAL = {"completed", "rejected", "failed"}

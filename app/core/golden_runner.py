@@ -178,6 +178,24 @@ def run_case(case: GoldenBrief, *, timeout: float = CASE_TIMEOUT_SECONDS) -> Cas
 
             # 内容级期望：分数之外的硬约束（品牌名、关键词、阻断用语、标题字数…）
             result.delivered_text = _delivered_text(current)
+            result.artifact_types = sorted({artifact.type for artifact in current.artifacts})
+            script = next(
+                (a for a in reversed(list(current.artifacts)) if a.type == "video_script"), None
+            )
+            if script is not None:
+                content = script.content or {}
+                shots = content.get("shots") if isinstance(content.get("shots"), list) else []
+                result.video_shot_count = len(shots)
+                voiceover = content.get("voiceover")
+                result.video_voiceover_count = (
+                    len(voiceover) if isinstance(voiceover, list) else 0
+                )
+                starts = [
+                    int(item.get("start_second") or 0)
+                    for item in shots
+                    if isinstance(item, dict)
+                ]
+                result.video_timeline_ok = bool(starts) and starts == sorted(starts)
             result.checks = check_expectations(
                 case, result, delivered_text=result.delivered_text
             )

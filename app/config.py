@@ -35,6 +35,8 @@ EVAL_FILE = DATA_DIR / "evaluations.json"
 CHECKPOINT_FILE = DATA_DIR / "checkpoints.sqlite"
 
 LLMProviderName = Literal["mock", "openai"]
+#: 数字人渲染提供方：sample = 内置样例引擎（离线可跑）；http = 通用 HTTP 适配样例
+DigitalHumanProviderName = Literal["sample", "http"]
 EmbeddingProviderName = Literal["local", "openai"]
 JudgeModeName = Literal["off", "advisory", "blocking"]
 JudgeProviderName = Literal["offline", "llm"]
@@ -121,11 +123,36 @@ class JudgeSettings:
 
 
 @dataclass
+class DigitalHumanSettings:
+    """数字人视频渲染接入设置（plan.md v2.0「数字人」开发样例）。
+
+    数字人渲染**不在本系统内实现**：各家服务的授权、形象库与回调协议差异极大，
+    这里只提供接入样例（``app/core/digital_human.py``）：
+
+    * ``sample``（默认）：内置离线样例引擎，确定性模拟「排队 → 渲染 → 完成」，
+      并按视频脚本产出渲染清单 —— 未购买任何服务也能联调 API 与 UI；
+    * ``http``：对接「POST 建任务 → GET 查状态」最小契约的任意网关
+      （自建渲染农场 / n8n 编排的服务均可），按 ``DIGITAL_HUMAN_API_URL`` 启用。
+    """
+
+    provider: DigitalHumanProviderName = "sample"
+    #: http 样例适配器的建任务端点（POST）；为空时 http provider 直接报「未配置」
+    api_url: str = ""
+    #: 调用上述端点的鉴权头（以 ``Bearer `` 前缀拼接）
+    api_key: str = ""
+    #: 数字人形象标识（avatar id），随任务透传给渲染服务
+    avatar: str = ""
+    #: http 样例适配器的单次轮询超时（毫秒）
+    timeout_ms: int = 10_000
+
+
+@dataclass
 class TracingSettings:
     """分布式追踪设置（plan.md 2.4）。
 
     默认 **不导出**：进程内 span 树完全自实现，因此「零外部依赖、离线可跑通」
     的默认体验不受影响。配置 ``OTLP_ENDPOINT`` 后才加载 OTel SDK 并转发。
+    采样只作用于**导出面**（OTLP 与落盘 JSON），进程内轨迹始终完整（UI 排障不受影响）。
     """
 
     #: 如 http://localhost:4318（OTLP/HTTP）；为空则只做进程内追踪
@@ -134,6 +161,12 @@ class TracingSettings:
     service_name: str = "creator-agent-studio"
     #: 形如 ``key1=value1,key2=value2``，供带鉴权的托管 collector 使用
     otlp_headers: str = ""
+    #: 采样器，环境变量名与 OTel 规范对齐（OTEL_TRACES_SAMPLER）：
+    #: parentbased_always_on（默认）/ parentbased_traceidratio /
+    #: always_on / always_off / traceidratio
+    sampler: str = "parentbased_always_on"
+    #: traceidratio 的采样比例（0-1），对应 OTEL_TRACES_SAMPLER_ARG
+    sample_ratio: float = 1.0
 
 
 @dataclass
@@ -155,6 +188,7 @@ class RuntimeConfig:
     embedding: EmbeddingSettings = field(default_factory=EmbeddingSettings)
     publish: PublishSettings = field(default_factory=PublishSettings)
     judge: JudgeSettings = field(default_factory=JudgeSettings)
+    digital_human: DigitalHumanSettings = field(default_factory=DigitalHumanSettings)
     tracing: TracingSettings = field(default_factory=TracingSettings)
 
 
@@ -223,11 +257,20 @@ def _build_config() -> RuntimeConfig:
             ),
             weight=min(1.0, max(0.0, _num(os.environ.get("JUDGE_WEIGHT"), 0.2))),
         ),
+        digital_human=DigitalHumanSettings(
+            provider=_digital_human_provider(),
+            api_url=(os.environ.get("DIGITAL_HUMAN_API_URL") or "").strip(),
+            api_key=(os.environ.get("DIGITAL_HUMAN_API_KEY") or "").strip(),
+            avatar=(os.environ.get("DIGITAL_HUMAN_AVATAR") or "").strip(),
+            timeout_ms=max(1_000, _int(os.environ.get("DIGITAL_HUMAN_TIMEOUT_MS"), 10_000)),
+        ),
         tracing=TracingSettings(
             otlp_endpoint=(os.environ.get("OTLP_ENDPOINT") or "").strip(),
             service_name=(os.environ.get("OTEL_SERVICE_NAME") or "creator-agent-studio").strip()
             or "creator-agent-studio",
             otlp_headers=(os.environ.get("OTLP_HEADERS") or "").strip(),
+            sampler=_sampler(),
+            sample_ratio=min(1.0, max(0.0, _num(os.environ.get("OTEL_TRACES_SAMPLER_ARG"), 1.0))),
         ),
     )
 
@@ -245,6 +288,25 @@ def _judge_provider() -> str:
 def _embedding_provider() -> str:
     raw = (os.environ.get("EMBEDDING_PROVIDER") or "local").strip().lower()
     return raw if raw in ("local", "openai") else "local"
+
+
+def _digital_human_provider() -> str:
+    raw = (os.environ.get("DIGITAL_HUMAN_PROVIDER") or "sample").strip().lower()
+    return raw if raw in ("sample", "http") else "sample"
+
+
+_SAMPLERS = (
+    "parentbased_always_on",
+    "parentbased_traceidratio",
+    "always_on",
+    "always_off",
+    "traceidratio",
+)
+
+
+def _sampler() -> str:
+    raw = (os.environ.get("OTEL_TRACES_SAMPLER") or "parentbased_always_on").strip().lower()
+    return raw if raw in _SAMPLERS else "parentbased_always_on"
 
 
 _config: RuntimeConfig = _build_config()
@@ -313,6 +375,17 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
             "judgeWeight": ("weight", None),
         },
     )
+    _apply_flat(
+        patch,
+        _config.digital_human,
+        {
+            "dhProvider": ("provider", ("sample", "http")),
+            "dhApiUrl": ("api_url", None),
+            "dhApiKey": ("api_key", None),
+            "dhAvatar": ("avatar", None),
+            "dhTimeoutMs": ("timeout_ms", None),
+        },
+    )
     return _config
 
 
@@ -359,6 +432,7 @@ def public_config() -> dict[str, Any]:
     embedding = _config.embedding
     publish = _config.publish
     judge = _config.judge
+    digital_human = _config.digital_human
     tracing = _config.tracing
     return {
         "port": _config.port,
@@ -406,10 +480,21 @@ def public_config() -> dict[str, Any]:
             "weight": judge.weight,
             "rubric": RUBRIC_VERSION,
         },
+        "digitalHuman": {
+            "provider": digital_human.provider,
+            "apiUrl": digital_human.api_url,
+            "avatar": digital_human.avatar,
+            "apiKey": "",
+            "apiKeySet": len(digital_human.api_key) > 0,
+            "apiKeyMasked": _mask(digital_human.api_key),
+            "timeoutMs": digital_human.timeout_ms,
+        },
         "tracing": {
             "otlpEndpoint": tracing.otlp_endpoint,
             "serviceName": tracing.service_name,
             "otlpConfigured": bool(tracing.otlp_endpoint),
+            "sampler": tracing.sampler,
+            "sampleRatio": tracing.sample_ratio,
         },
     }
 

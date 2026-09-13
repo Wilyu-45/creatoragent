@@ -171,6 +171,8 @@ class GoldenExpectation:
     max_title_length: int = 0
     #: 首轮是否应被门禁拦截（强监管用例为 True）
     expect_first_round_blocked: bool | None = None
+    #: 是否必须产出视频脚本（短视频渠道 / 交付物点名要脚本时为 True；None = 不检查）
+    expect_video_script: bool | None = None
     #: 人工写的期望要点，供 LLM-as-Judge 语义比对与人工抽查
     reference_points: list[str] = field(default_factory=list)
 
@@ -185,6 +187,7 @@ class GoldenExpectation:
             "min_tone_hits": self.min_tone_hits,
             "max_title_length": self.max_title_length,
             "expect_first_round_blocked": self.expect_first_round_blocked,
+            "expect_video_script": self.expect_video_script,
             "reference_points": list(self.reference_points),
         }
 
@@ -263,6 +266,11 @@ class CaseResult:
     checks: list[dict[str, Any]] = field(default_factory=list)
     #: 最终交付文本（用于内容级断言与人工抽查；不参与基线分数比较）
     delivered_text: str = ""
+    #: 产物类型集合与视频脚本的结构指标（供「必须产出脚本」类断言使用）
+    artifact_types: list[str] = field(default_factory=list)
+    video_shot_count: int = 0
+    video_voiceover_count: int = 0
+    video_timeline_ok: bool = False
 
     @property
     def failed_checks(self) -> list[dict[str, Any]]:
@@ -288,6 +296,10 @@ class CaseResult:
             "error": self.error,
             "checks": [dict(item) for item in self.checks],
             "checks_failed": len(self.failed_checks),
+            "artifact_types": list(self.artifact_types),
+            "video_shot_count": self.video_shot_count,
+            "video_voiceover_count": self.video_voiceover_count,
+            "video_timeline_ok": self.video_timeline_ok,
         }
         if include_text:
             payload["delivered_text"] = self.delivered_text
@@ -481,6 +493,30 @@ def check_expectations(
             result.first_round_blocked == expect.expect_first_round_blocked,
             f"首轮被拦截={result.first_round_blocked}，期望={expect.expect_first_round_blocked}",
         )
+
+    # 10) 视频脚本：短视频渠道 / 点名要脚本时必须产出**结构化**脚本。
+    #     只检查「有没有」是不够的 —— 分镜缺时长或缺口播的脚本无法开拍。
+    if expect.expect_video_script is not None:
+        has_script = "video_script" in result.artifact_types
+        add(
+            "产出视频脚本",
+            has_script == expect.expect_video_script,
+            f"实际{'有' if has_script else '无'}脚本，期望{'有' if expect.expect_video_script else '无'}",
+        )
+        if expect.expect_video_script and has_script:
+            shots = result.video_shot_count
+            voice = result.video_voiceover_count
+            add(
+                "脚本分镜含时长与口播",
+                shots > 0 and voice > 0,
+                f"分镜 {shots} 镜、口播 {voice} 段",
+            )
+            monotonic = result.video_timeline_ok
+            add(
+                "脚本时间轴单调递增",
+                monotonic,
+                "时间轴有序" if monotonic else "分镜起始时间未按顺序排列",
+            )
 
     return checks
 

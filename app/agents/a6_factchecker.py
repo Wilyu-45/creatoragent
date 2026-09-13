@@ -50,7 +50,11 @@ SYSTEM = system_prompt(
 - 你没有联网能力时，不得假装查证过；无法核实的应标为 unverified 而不是 verified
 - 数值型断言（百分比、倍数、天数、样本量）若无来源，一律视为高风险
 - 情绪化、主观的最高级表述应标记为 exaggerated
-- 只输出 JSON，不输出任何解释性文字""",
+- 只输出 JSON，不输出任何解释性文字
+
+输出体量（控制 token，超量从简）：
+- checks 只列关键主张（数值 / 时间 / 引用 / 案例类），常规修饰语不逐句列
+- required_fixes ≤5 条；safe_rewrites ≤3 组，只覆盖高风险表述""",
 )
 
 SCHEMA = """{
@@ -132,6 +136,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
         user,
         "A6.factcheck",
         {"brief": brief.model_dump(mode="json"), "draft": draft, "revision": ctx.revision},
+        schema=SCHEMA,
     )
 
     content = normalize(result.data)

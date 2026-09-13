@@ -45,8 +45,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 1) 能力自检：环境、智能体链路、租户隔离、检查点后端、评估器、回归判定器
-      - name: doctor.py（八项自检）
+      # 构建前端产物。**这一步是必须的**：`dist/` 被 .gitignore 排除，
+      # 而后端只在 `dist/` 存在时才挂载静态托管与 SPA 回落路由。
+      # 少了它，`GET /` 会 404，smoke 与契约核验里的「静态托管」断言必然失败。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 构建前端（后端静态托管所需）
+        run: |
+          npm ci
+          npm run build
+
+      # 1) 能力自检：环境、智能体链路、租户隔离、检查点后端、评估器、回归判定器、多语言
+      - name: doctor.py（16 项自检）
         run: python scripts/doctor.py
 
       # 2) 黄金数据集回归：分数回退超过容差 / 返工轮次增加 / 监管用例未被拦截 → 失败

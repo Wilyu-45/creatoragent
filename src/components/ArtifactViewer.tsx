@@ -15,6 +15,7 @@ const TYPE_LABEL: Record<ArtifactType, string> = {
   fact_check_report: '事实核查报告',
   compliance_report: '品牌合规报告',
   visual_brief: '视觉美术指导',
+  video_script: '视频脚本',
   channel_adaptation: '渠道适配与发布策略',
   publish_plan: '多平台发布排期',
   effect_report: '效果预估报告',
@@ -1244,12 +1245,137 @@ const RENDERERS: Partial<Record<ArtifactType, (props: { content: Record<string, 
   fact_check_report: FactCheckView,
   compliance_report: ComplianceView,
   visual_brief: VisualBriefView,
+  video_script: VideoScriptView,
   channel_adaptation: ChannelView,
   publish_plan: PublishPlanView,
   effect_report: EffectView,
   knowledge_card: KnowledgeView,
   final_delivery: DeliveryView,
 };
+
+/* ------------------------------------------------------------------ */
+/* 视频脚本                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 视频脚本视图：按**时间轴**呈现分镜，而不是按字段平铺。
+ *
+ * 脚本的可用性取决于「时间轴是否连贯、每镜是否都有画面与口播」，
+ * 因此这里以表格 + 时间轴为主视图，让「哪一镜缺口播」「时长是否超」一眼可见。
+ */
+function VideoScriptView({ content }: { content: Record<string, unknown> }) {
+  const shots = asRecordArray(content.shots);
+  const voiceover = asRecordArray(content.voiceover);
+  const subtitles = asRecordArray(content.subtitles);
+  const productionNotes = asTextArray(content.production_notes);
+  const complianceNotes = asTextArray(content.compliance_notes);
+  const duration = asNumber(content.duration_seconds, 0);
+  const ratio = asText(content.aspect_ratio);
+  const hook = asText(content.hook);
+
+  // 时间轴覆盖率：分镜时长之和 / 目标时长，用来发现「脚本总时长对不上」
+  const covered = shots.reduce((sum, shot) => sum + asNumber(shot.duration_seconds, 0), 0);
+  const coverage = duration ? Math.round((covered / duration) * 100) : 0;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+        <Chip tone="tone-info" mono>
+          {ratio || '9:16'}
+        </Chip>
+        <Chip tone="tone-idle">目标 {duration || '—'} 秒</Chip>
+        <Chip tone="tone-idle">分镜 {shots.length} 镜</Chip>
+        <Chip tone="tone-idle">口播 {voiceover.length} 段</Chip>
+        <Chip tone="tone-idle">字幕 {subtitles.length} 条</Chip>
+        <Chip tone={coverage >= 95 && coverage <= 105 ? 'tone-ok' : 'tone-warn'}>
+          时间轴覆盖 {coverage}%
+        </Chip>
+        {shots.some((shot) => !asText(shot.voiceover)) ? (
+          <Chip tone="tone-warn">存在无口播分镜</Chip>
+        ) : null}
+      </div>
+
+      {hook ? (
+        <div className="card">
+          <div className="muted small">黄金 3 秒钩子</div>
+          <div style={{ marginTop: 4, fontWeight: 600 }}>{hook}</div>
+        </div>
+      ) : null}
+
+      {shots.length > 0 ? (
+        <div>
+          <div className="section-h">分镜时间轴</div>
+          {/* 时间轴条：每镜按占比着色，一眼看出节奏是否头重脚轻 */}
+          <div style={{ display: 'flex', height: 10, borderRadius: 3, overflow: 'hidden', marginTop: 4 }}>
+            {shots.map((shot, index) => (
+              <div
+                key={`bar-${index}`}
+                title={`#${asNumber(shot.shot, index + 1)} ${asText(shot.role)} ${asNumber(shot.duration_seconds, 0)}s`}
+                style={{
+                  flex: Math.max(1, asNumber(shot.duration_seconds, 1)),
+                  background: 'currentColor',
+                  opacity: 0.3 + Math.min(0.6, index * 0.15),
+                }}
+              />
+            ))}
+          </div>
+
+          <Table head={['镜', '作用', '时间', '画面', '口播 / 字幕', '机位']}>
+            {shots.map((shot, index) => (
+              <tr key={`shot-${index}`}>
+                <td>{asNumber(shot.shot, index + 1)}</td>
+                <td>
+                  <Chip tone="tone-idle">{asText(shot.role)}</Chip>
+                </td>
+                <td className="mono small">
+                  {asNumber(shot.start_second, 0)}-{asNumber(shot.end_second, 0)}s
+                  <div className="muted small">{asNumber(shot.duration_seconds, 0)}s</div>
+                </td>
+                <td className="small">
+                  <div>{asText(shot.visual) || '—'}</div>
+                  {asText(shot.intent) ? (
+                    <div className="muted small">意图：{asText(shot.intent)}</div>
+                  ) : null}
+                </td>
+                <td className="small">
+                  <div>{asText(shot.voiceover) || '（无口播）'}</div>
+                  {asText(shot.subtitle) ? (
+                    <div className="muted small">字幕：{asText(shot.subtitle)}</div>
+                  ) : null}
+                </td>
+                <td className="small">{asText(shot.camera) || '—'}</td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+      ) : (
+        <Empty>该脚本没有分镜内容</Empty>
+      )}
+
+      {productionNotes.length > 0 ? (
+        <div>
+          <div className="section-h">拍摄要点</div>
+          <ul className="small" style={{ margin: '4px 0 0 16px', padding: 0 }}>
+            {productionNotes.map((note, index) => (
+              <li key={`pn-${index}`}>{note}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {complianceNotes.length > 0 ? (
+        <div>
+          <div className="section-h">合规注意</div>
+          <ul className="small" style={{ margin: '4px 0 0 16px', padding: 0 }}>
+            {complianceNotes.map((note, index) => (
+              <li key={`cn-${index}`}>{note}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* 主体                                                                */

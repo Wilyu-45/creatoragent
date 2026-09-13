@@ -35,6 +35,8 @@ class CostLedger:
     cost_usd: float = 0.0
     calls: int = 0
     cached: int = 0
+    #: 提供方侧输入缓存命中的 token 数（DeepSeek 等按低价档计费）
+    provider_cached_tokens: int = 0
     cut_off: bool = False
     warned: bool = False
     notes: list[str] = field(default_factory=list)
@@ -52,6 +54,7 @@ class CostLedger:
             "costUsd": round(self.cost_usd, 6),
             "calls": self.calls,
             "cached": self.cached,
+            "providerCachedTokens": self.provider_cached_tokens,
             "budgetUsd": self.budget_usd,
             "tokenBudget": self.token_budget,
             "cutOff": self.cut_off,
@@ -113,6 +116,7 @@ class CostGuard:
         cost_usd: float,
         *,
         cached: bool = False,
+        cached_tokens: int = 0,
     ) -> None:
         """记一笔账；未绑定任务时静默跳过（例如脚本直接调 ``chat``）。"""
         ledger = self.current()
@@ -120,6 +124,9 @@ class CostGuard:
             return
         ledger.prompt_tokens += max(0, prompt_tokens)
         ledger.completion_tokens += max(0, completion_tokens)
+        # 提供方侧的输入缓存命中量单独累计：它与「本地响应缓存」是两件事，
+        # 前者是同一前缀在厂商侧被复用（便宜），后者是本进程直接没有发起调用。
+        ledger.provider_cached_tokens += max(0, min(int(cached_tokens), int(prompt_tokens)))
         ledger.cost_usd = round(ledger.cost_usd + max(0.0, cost_usd), 6)
         ledger.calls += 1
         if cached:

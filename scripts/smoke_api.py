@@ -50,14 +50,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.util import make_temp_dir  # noqa: E402 - 需先补好 sys.path
+from app.core.util import force_offline_provider, free_port, make_temp_dir  # noqa: E402
 
 #: 数据目录必须**可写**：``tempfile.mkdtemp`` 的 ``0o700`` 目录在受限沙箱下
 #: 会拒绝子进程写入，导致记忆库/检查点静默退化（见 app/core/util.make_temp_dir）。
 TMP = make_temp_dir("api-", base=ROOT / ".doctor-data")
 #: 服务端输出重定向到文件，**不要用 subprocess.PIPE**（见模块说明第 2 条）。
 SERVER_LOG = TMP / "server.log"
-PORT = 8799
+PORT = free_port(8799)
 BASE = f"http://127.0.0.1:{PORT}"
 
 BRIEF = {
@@ -101,7 +101,7 @@ def task_of(task_id: str) -> dict[str, Any]:
 # 鉴权 + 租户隔离的独立实例（plan.md D17）                             #
 # ------------------------------------------------------------------ #
 
-TENANT_PORT = 8802
+TENANT_PORT = free_port(8802)
 TENANT_BASE = f"http://127.0.0.1:{TENANT_PORT}"
 #: acme 与 beta 各持一个 token：两者都看不到对方的任务与记忆库
 TOKENS = "acme:tok_acme,beta:tok_beta"
@@ -215,8 +215,13 @@ def check_tenant_isolation() -> bool:
 
 
 def main() -> int:
+    # 端到端验收固定离线：契约断言必须秒级、可复现且不花钱。
+    # 必须在构造 env 之前调用（它写 os.environ，而 env 由 os.environ 展开）。
+    provider = force_offline_provider()
+    print(f"验证提供方：{provider}（真实链路请用 scripts/real_check.py）")
     env = {**os.environ, "CREATOR_DATA_DIR": str(TMP), "PORT": str(PORT)}
     env["PYTHONNOUSERSITE"] = "1"
+    env["LLM_PROVIDER"] = provider
     log_handle = SERVER_LOG.open("w", encoding="utf-8", errors="replace")
     proc = subprocess.Popen(
         [sys.executable, "-m", "app.main"],

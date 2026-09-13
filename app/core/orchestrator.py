@@ -59,7 +59,7 @@ from .gatekeeper import build_scorecard, decide_gate, to_gate_records
 from .judge import JudgeReport, evaluate as judge_evaluate
 from .publisher import compute_due_at, dispatch as dispatch_webhook, is_due
 from .store import task_store
-from .tracing import tracer
+from .tracing import RemoteParent, tracer
 from .types import (
     AgentResult,
     ApprovalState,
@@ -155,6 +155,8 @@ class Orchestrator:
         self._waiters: dict[str, threading.Event] = {}
         self._running: set[str] = set()
         self._auto_approve: set[str] = set()
+        #: task_id → 入站 W3C traceparent 解析结果（跨进程传播，见 tracing.RemoteParent）
+        self._trace_parents: dict[str, RemoteParent] = {}
         #: 检查点后端类型（sqlite / memory）。断点续跑是否真的可用，全看这个字段，
         #: 因此把它暴露出来供 /api/health 与自检断言 —— 「静默退回内存检查点」
         #: 是最容易在几个月后才被发现的那类退化。
@@ -250,7 +252,8 @@ class Orchestrator:
     # ---------------------------------------------------------------- #
 
     def create_task(
-        self, brief: Brief, auto_approve: bool = False, tenant: str = "default"
+        self, brief: Brief, auto_approve: bool = False, tenant: str = "default",
+        trace_parent: RemoteParent | None = None,
     ) -> TaskRecord:
         stamp = now_iso()
         task = TaskRecord(
@@ -286,6 +289,10 @@ class Orchestrator:
 
         if auto_approve:
             self._auto_approve.add(task.id)
+        # 跨进程传播：调用方（编排/网关上游）带的 W3C traceparent 交给后台线程，
+        # 使任务 trace 延续远端 trace_id（in-memory 传递即可：重启后远端上下文本就失效）
+        if trace_parent is not None:
+            self._trace_parents[task.id] = trace_parent
         self._spawn(task)
         return task
 
@@ -333,7 +340,9 @@ class Orchestrator:
         cost_guard.begin(task.id, budget_usd=cfg.cost_budget_usd, token_budget=cfg.token_budget)
         # 追踪：一个任务一个 trace，覆盖整个 Agent session（plan.md 2.4），
         # 而不是只追踪单次模型调用。span 树在终态时落盘为 OTel 形状的 JSON。
-        trace_id = tracer.start_trace(task.id, tenant=task.tenant)
+        # 若创建请求携带了 W3C traceparent，trace 延续调用方的 trace_id（跨进程传播）。
+        parent = self._trace_parents.pop(task.id, None)
+        trace_id = tracer.start_trace(task.id, tenant=task.tenant, parent=parent)
         self._publish(
             task, "log", f"追踪已开启（trace {trace_id[:8]}）", {"level": "debug"}
         )
@@ -1018,10 +1027,34 @@ class Orchestrator:
 
     @staticmethod
     def _with_retry(fn, agent_id: str):
-        """单次重试：真实模型偶发返回非 JSON 时，再给一次机会（plan.md D10 容错）。"""
+        """单次重试（plan.md D10 容错）。
+
+        分成两种情形，处置不同：
+
+        * **输出被 ``max_tokens`` 截断** → 先把输出上限放大再重试。
+          真实网关下这是最常见的失败：提示词没问题，只是结构化输出太长装不下，
+          原样重试必然再截断一次。
+        * 其它异常（偶发非 JSON）→ 原样再给一次机会。
+        """
+        from ..agents.base import TruncatedOutputError
+        from ..llm.engine import boost_max_tokens, reset_max_tokens
+
         try:
-            return fn()
+            result = fn()
+            reset_max_tokens()
+            return result
+        except TruncatedOutputError as error:
+            boosted = boost_max_tokens()
+            log.warn(f"{agent_id} 输出被截断，放大输出上限至 {boosted} tokens 后重试")
+            try:
+                result = fn()
+                reset_max_tokens()
+                return result
+            except Exception:  # noqa: BLE001 - 再失败就走原有失败路径
+                reset_max_tokens()
+                raise
         except Exception as error:  # noqa: BLE001
+            reset_max_tokens()
             log.warn(f"{agent_id} 首次执行失败，重试一次：{error}")
             return fn()
 
@@ -1655,6 +1688,8 @@ class Orchestrator:
                 kind="client",
                 attributes={"publish.channel": name, "publish.due_at": item.get("due_at")},
             ) as span:
+                # W3C 传播：让发布网关把这次投递与任务的调用轨迹对齐
+                traceparent = tracer.current_traceparent()
                 ok, detail = dispatch_webhook(
                     cfg.publish.webhook_url,
                     {
@@ -1670,6 +1705,7 @@ class Orchestrator:
                     },
                     retry=cfg.publish.retry,
                     timeout_ms=cfg.llm.timeout_ms,
+                    headers={"traceparent": traceparent} if traceparent else None,
                 )
                 # 未配置 webhook 时退化为「登记发布」，是既定离线语义而非故障
                 tracer.finish_span(

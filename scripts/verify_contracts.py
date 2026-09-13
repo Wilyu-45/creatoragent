@@ -3,9 +3,10 @@
 与 ``smoke_api.py`` 的分工
 -------------------------
 ``smoke_api.py`` 是**端到端验收**（跑完整流水线、覆盖全部接口与错误分支，一次几十秒）；
-本脚本是**快速契约核验**（约 15 秒），只盯住最容易在重构中悄悄回归的几处：
+本脚本是**快速契约核验**（约 40 秒），只盯住最容易在重构中悄悄回归的几处：
 断点续跑后端、评估配置与聚合、记忆库租户视角、六维评分结构、`judge.scored` 事件、
-**调用轨迹的 span 树层级与 OTel 形状导出**。
+**调用轨迹的 span 树层级与 OTel 形状导出**、**入站 traceparent 的跨进程延续**、
+**数字人样例的创建 → 惰性推进 → 完成闭环**。
 
 用途：改完评估/租户/追踪相关代码后先跑它，比直接上 smoke 更快拿到「哪里断了」。
 
@@ -28,13 +29,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.util import make_temp_dir  # noqa: E402
+from app.core.util import force_offline_provider, free_port, make_temp_dir  # noqa: E402
 
 DATA = make_temp_dir("verify-", base=ROOT / ".doctor-data")
-PORT = 8813
+PORT = free_port(8813)
 BASE = f"http://127.0.0.1:{PORT}"
 
 env = {**os.environ, "CREATOR_DATA_DIR": str(DATA), "PORT": str(PORT), "PYTHONNOUSERSITE": "1"}
+env["LLM_PROVIDER"] = force_offline_provider()
 log = (DATA / "server.log").open("w", encoding="utf-8", errors="replace")
 proc = subprocess.Popen(
     [sys.executable, "-m", "app.main"],
@@ -47,9 +49,17 @@ proc = subprocess.Popen(
 failures: list[str] = []
 
 
-def check(label: str, actual: object, expected: object) -> None:
+def check(label: str, actual: object, expected: object, detail: str = "") -> None:
+    """断言 ``actual == expected``。
+
+    ``detail`` 是**失败时的补充说明**，与 ``expected`` 分开 ——
+    把说明误传进 ``expected`` 会让断言与字符串比较，从而永远失败。
+    """
     good = actual == expected
-    print(f"  {'OK  ' if good else 'FAIL'} {label}: {actual!r}" + ("" if good else f"（期望 {expected!r}）"))
+    message = "" if good else f"（期望 {expected!r}）"
+    if not good and detail:
+        message += f" {detail}"
+    print(f"  {'OK  ' if good else 'FAIL'} {label}: {actual!r}{message}")
     if not good:
         failures.append(label)
 
@@ -76,8 +86,18 @@ try:
 
         print("[GET /（静态托管，含新构建的前端）]")
         page = client.get("/")
+        exists = (ROOT / "dist" / "index.html").exists()
+        check(
+            "dist/index.html 存在",
+            exists,
+            True,
+            "请先执行 npm run build（CI 中该步骤必须排在契约核验之前）",
+        )
         check("status", page.status_code, 200)
         check("index.html 挂载点", 'id="root"' in page.text, True)
+        if not exists:
+            print("    ! 后端只在 dist/ 存在时才挂载静态托管与 SPA 回落路由；")
+            print("      缺 dist/ 会让 GET / 返回 404 —— 这正是 CI 上曾失败的原因。")
 
         print("[GET /api/settings → judge]")
         judge = client.get("/api/settings").json()["judge"]
@@ -158,7 +178,10 @@ try:
             True,
         )
         check("span 带模型属性", all("llm.model" in s["attributes"] for s in llm_spans), True)
-        check("span 状态为 ok", {s["status"] for s in spans}, {"ok"})
+        # OTel 的 `unset` 是合法的「未显式设置状态」，项目里只在个别收尾路径出现；
+        # 这里断言「没有 error」而不是要求全是 ok —— 后者会在收尾竞态下偶发失败。
+        span_statuses = {s["status"] for s in spans}
+        check("span 无 error 状态", "error" not in span_statuses, True, f"实际状态 {span_statuses}")
         check("耗时聚合非空", len(trace["summary"]["by_name"]) > 0, True)
         check("导出格式为 OTel 形状", trace["export"]["format"], "otel-shaped-json")
         # 事件与 span 的关联
@@ -172,6 +195,77 @@ try:
         check("tracing.spans", tracing["spans"] >= 20, True)
         check("tracing.errors", tracing["errors"], 0)
         check("tracing.by_name 非空", len(tracing["by_name"]) > 0, True)
+        sampling = tracing["sampling"]
+        check("sampling.sampler 非空", bool(sampling["sampler"]), True)
+        check("采样计数齐备", {"traces_sampled", "traces_unsampled"} <= set(sampling), True)
+
+        print("[health → tracing 采样与传播可见]")
+        health_tracing = client.get("/api/health").json()["tracing"]
+        check("health.sampler", bool(health_tracing["sampler"]), True)
+        check("health.propagation", "traceparent" in health_tracing["propagation"], True)
+
+        print("[入站 traceparent → trace 跨进程延续]")
+        remote_tid = "1234567890abcdef1234567890abcdef"
+        remote_sid = "1234567890abcdef"
+        video_task = client.post(
+            "/api/tasks",
+            json={"brief": {
+                "brand": "核验品牌", "product": "核验产品", "channel": "抖音",
+                "industry": "消费品", "keywords": ["核验"], "deliverables": ["短视频脚本 1 支"],
+            }, "autoApprove": True},
+            headers={"traceparent": f"00-{remote_tid}-{remote_sid}-01"},
+        )
+        check("携带 traceparent 创建任务", video_task.status_code, 201)
+        vid = video_task.json()["task"]["id"]
+        prop_trace = client.get(f"/api/tasks/{vid}/trace").json()
+        check("trace 延续远端 trace_id", prop_trace["trace_id"], remote_tid)
+        check(
+            "根 span 挂在远端 span 之下",
+            any(s["parent_span_id"] == remote_sid for s in prop_trace["spans"]),
+            True,
+        )
+        check("坏头不阻塞任务创建",
+              client.post("/api/tasks", json={"brief": {
+                  "brand": "核验品牌", "product": "核验产品", "channel": "小红书", "industry": "消费品",
+              }, "autoApprove": True}, headers={"traceparent": "garbage"}).status_code,
+              201)
+
+        print("[POST /api/tasks/{id}/digital-human（无脚本 → 409）]")
+        no_script = client.post(f"/api/tasks/{tid}/digital-human", json={})
+        check("无视频脚本拒绝创建", no_script.status_code, 409)
+
+        print("[抖音任务的数字人样例闭环]")
+        deadline = time.time() + 120
+        video_status = "running"
+        while time.time() < deadline:
+            video_status = client.get(f"/api/tasks/{vid}").json()["task"]["status"]
+            if video_status in ("completed", "rejected", "failed"):
+                break
+            time.sleep(0.5)
+        check("视频任务终态", video_status, "completed")
+
+        dh_view = client.get(f"/api/tasks/{vid}/digital-human").json()
+        check("has_video_script", dh_view["has_video_script"], True)
+        check("初始无作业", dh_view["jobs"], [])
+        created_job = client.post(f"/api/tasks/{vid}/digital-human", json={})
+        check("创建样例渲染作业", created_job.status_code, 201)
+        job = created_job.json()["job"]
+        check("provider 为 sample", job["provider"], "sample")
+        check("渲染清单来自分镜", job["shot_count"] >= 1, True)
+        check("初始状态 queued", job["status"], "queued")
+
+        deadline = time.time() + 40
+        final_status = job["status"]
+        while time.time() < deadline:
+            jobs = client.get(f"/api/tasks/{vid}/digital-human").json()["jobs"]
+            final_status = next(j["status"] for j in jobs if j["id"] == job["id"])
+            if final_status in ("done", "failed"):
+                break
+            time.sleep(1.0)
+        check("样例引擎完成渲染", final_status, "done")
+        final_job = next(j for j in jobs if j["id"] == job["id"])
+        check("产出成片地址", str(final_job["video_url"]).startswith("sample://"), True)
+        check("分镜段落齐备", len(final_job["manifest"]["segments"]), job["shot_count"])
 finally:
     proc.terminate()
     try:

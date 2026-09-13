@@ -20,6 +20,9 @@ from ..agents.registry import PLANNED_AGENTS, all_agent_meta
 from ..config import RUBRIC_VERSION, get_config, public_config, update_config
 from ..core.blackboard import blackboard
 from ..core.clock import now_iso
+from ..core.digital_human import drop_task as drop_digital_human_jobs
+from ..core.digital_human import list_jobs as list_digital_human_jobs
+from ..core.digital_human import create_job as create_digital_human_job
 from ..core.evaluations import build_record, evaluation_store
 from ..core.events import event_bus
 from ..core.golden import DEFAULT_TOLERANCE, compare, coverage, load_baseline, load_dataset
@@ -28,7 +31,7 @@ from ..core.golden_runner import start_background_run, state as golden_state
 from ..core.judge import evaluate as judge_evaluate
 from ..core.orchestrator import orchestrator
 from ..core.store import task_store
-from ..core.tracing import EXPORT_DIR, tracer
+from ..core.tracing import EXPORT_DIR, parse_traceparent, tracer
 from ..core import otel
 from ..core.types import PHASE_LABEL, PHASE_ORDER, Brief, TaskRecord, create_empty_brief
 from ..knowledge.compliance import INDUSTRY_RULES, LEXICON_GROUPS
@@ -192,6 +195,12 @@ def health() -> dict[str, Any]:
         },
         # OTLP 导出状态：未配置时进程内追踪仍完整可用
         "otlp": {**otel.stats(), "endpoint": get_config().tracing.otlp_endpoint},
+        # 采样与跨进程传播：采样只作用于导出面，进程内轨迹始终完整
+        "tracing": {
+            "sampler": get_config().tracing.sampler,
+            "sampleRatio": get_config().tracing.sample_ratio,
+            "propagation": "W3C traceparent（入站 POST /api/tasks / 出站 webhook）",
+        },
     }
 
 
@@ -511,6 +520,8 @@ def create_task(
         brief,
         auto_approve=auto_approve if isinstance(auto_approve, bool) else False,
         tenant=_tenant_of(request),
+        # W3C 跨进程传播：上游编排系统带来的 trace 上下文在服务端延续
+        trace_parent=parse_traceparent(request.headers.get("traceparent")),
     )
     return {"task": task.model_dump(mode="json")}
 
@@ -536,10 +547,16 @@ def delete_task(task_id: str, request: Request) -> dict[str, Any]:
     task_store.delete(task_id)
     event_bus.drop(task_id)
     tracer.drop(task_id)
-    # 顺带回收该任务的断点续跑检查点，避免 checkpoints.sqlite 只增不减
+    # 顺带回收该任务的断点续跑检查点与数字人渲染作业，避免持久文件只增不减
     purged = orchestrator.purge_checkpoints(task_id)
+    purged_jobs = drop_digital_human_jobs(task_id)
     blackboard.flush()
-    return {"ok": True, "id": task_id, "purged_checkpoints": purged}
+    return {
+        "ok": True,
+        "id": task_id,
+        "purged_checkpoints": purged,
+        "purged_digital_human_jobs": purged_jobs,
+    }
 
 
 @router.post("/tasks/{task_id}/decide")
@@ -649,6 +666,49 @@ def read_publish_queue(request: Request, dueOnly: bool = Query(default=False)) -
 def tick_publish(request: Request) -> dict[str, Any]:
     """手动驱动一次「到期自动投递」，供外部 cron / 定时器调用。"""
     return orchestrator.dispatch_due(tenant=_tenant_of(request))
+
+
+# ------------------------------------------------------------------ #
+# 数字人渲染（开发样例，plan.md v2.0「数字人」）                       #
+# ------------------------------------------------------------------ #
+
+
+@router.post("/tasks/{task_id}/digital-human", status_code=201)
+def create_digital_human(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """为任务创建一个数字人渲染作业（**开发样例**）。
+
+    任务必须已产出 ``video_script``。样例引擎（默认）离线模拟
+    「排队 → 渲染 → 完成」并生成渲染清单；配置 ``DIGITAL_HUMAN_API_URL``
+    后走 http 适配样例对接自建渲染网关。请求体可带
+    ``{"avatar": "形象ID", "provider": "sample|http"}``。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    avatar = body.get("avatar")
+    provider = body.get("provider")
+    try:
+        job = create_digital_human_job(
+            task,
+            avatar=avatar if isinstance(avatar, str) else "",
+            provider=provider if isinstance(provider, str) else "",
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"task_id": task.id, "job": job}
+
+
+@router.get("/tasks/{task_id}/digital-human")
+def list_digital_human(task_id: str, request: Request) -> dict[str, Any]:
+    """读取任务的数字人渲染作业列表（读取时惰性推进样例状态机）。"""
+    task = _require_task(task_id, request)
+    jobs = list_digital_human_jobs(task_id=task.id, tenant=task.tenant)
+    return {
+        "task_id": task.id,
+        "has_video_script": any(a.type == "video_script" for a in task.artifacts),
+        "jobs": jobs,
+    }
 
 
 @router.get("/tasks/{task_id}/blackboard")

@@ -396,6 +396,13 @@ export function SettingsDrawer({
               <Chip tone="tone-idle" mono>
                 service {config.tracing.serviceName}
               </Chip>
+              <Chip tone="tone-idle" mono title="采样只作用于导出面（OTLP + 落盘），进程内轨迹始终完整">
+                采样 {config.tracing.sampler}
+                {config.tracing.sampler.includes('traceidratio') ? ` @ ${config.tracing.sampleRatio}` : ''}
+              </Chip>
+              <Chip tone="tone-idle" mono title="W3C traceparent：入站 POST /api/tasks 解析，出站 webhook 携带">
+                传播 W3C traceparent
+              </Chip>
               {config.tracing.otlpEndpoint ? (
                 <Chip tone="tone-info" mono>
                   {config.tracing.otlpEndpoint}
@@ -404,11 +411,33 @@ export function SettingsDrawer({
             </div>
             <div className="muted small" style={{ marginTop: 6 }}>
               OTLP 端点通过环境变量 <code>OTLP_ENDPOINT</code> 配置（如
-              <code> http://localhost:4318</code>），因此不在此处热改。
+              <code> http://localhost:4318</code>），采样器与比例对应{' '}
+              <code>OTEL_TRACES_SAMPLER</code> / <code>OTEL_TRACES_SAMPLER_ARG</code>，均不在此处热改。
               <strong>不配置也完整可用</strong>：进程内 span 树与
               <code> data/traces/*.json </code>不依赖任何外部服务；配置后会把同一份 span
               （相同的 trace_id / span_id）转发给 collector，可在 Jaeger 里直接查。
               本地一键起 Jaeger：<code>docker compose up -d</code>。
+            </div>
+
+            <div className="section-h">数字人渲染（开发样例）</div>
+            <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+              <Chip tone={config.digitalHuman.provider === 'http' ? 'tone-info' : 'tone-idle'}>
+                {config.digitalHuman.provider === 'http' ? 'http 适配网关' : 'sample 内置样例引擎'}
+              </Chip>
+              {config.digitalHuman.apiUrl ? (
+                <Chip tone="tone-info" mono>
+                  {config.digitalHuman.apiUrl}
+                </Chip>
+              ) : (
+                <Chip tone="tone-idle">未配置远端网关（用内置引擎）</Chip>
+              )}
+              {config.digitalHuman.avatar ? <Chip tone="tone-idle">形象 {config.digitalHuman.avatar}</Chip> : null}
+              {config.digitalHuman.apiKeySet ? <Chip tone="tone-ok">网关密钥已配置</Chip> : null}
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              数字人渲染<strong>不在本系统内实现</strong>：HeyGen / D-ID / 腾讯智影等服务的协议差异由你在自己的网关层消化。
+              任务产出视频脚本后，「数字人渲染」面板会出现创建入口；环境变量 <code>DIGITAL_HUMAN_API_URL</code>（可选{' '}
+              <code>DIGITAL_HUMAN_API_KEY</code> / <code>DIGITAL_HUMAN_AVATAR</code>）切换到对接自建渲染网关。
             </div>
 
             <div className="section-h">访问令牌{config.authRequired ? '（已启用鉴权）' : ''}</div>

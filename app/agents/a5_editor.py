@@ -52,7 +52,11 @@ SYSTEM = system_prompt(
 - 修订不得改变事实主张、不得新增未经验证的数据
 - 每个问题必须给出可执行的修改建议，不要只说「建议优化」
 - 只做编辑职责内的事，不做合规与事实判定
-- 只输出 JSON，不输出任何解释性文字""",
+- 只输出 JSON，不输出任何解释性文字
+
+输出体量（控制 token，超量从简）：
+- change_log ≤8 条，只记实质性修改，标点级修正合并为一条
+- issues ≤6 条，按严重度排序；revised 只含修改后的成稿""",
 )
 
 SCHEMA = """{
@@ -135,6 +139,7 @@ CTA：{as_str(target.get('cta'))}
         user,
         "A5.edit",
         {"brief": brief.model_dump(mode="json"), "draft": draft, "revision": ctx.revision},
+        schema=SCHEMA,
     )
 
     content = normalize(result.data)

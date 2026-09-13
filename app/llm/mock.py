@@ -36,6 +36,7 @@ from ..knowledge.industry import (
 from ..knowledge.language import normalize_language
 from ..knowledge.memory import evidence_from_hits
 from ..knowledge.visual import channel_visual_spec, visual_styles_for
+from ..knowledge.video import script_skeleton, video_spec
 from .json_utils import (
     as_num,
     as_obj,
@@ -2143,6 +2144,114 @@ def generate_judge(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def generate_video_script(ctx: dict[str, Any]) -> dict[str, Any]:
+    """视频脚本（plan.md v2.0「视频脚本」）。
+
+    产出结构化脚本：钩子 / 分镜（含时长与口播）/ 字幕 / 行动号召 / 拍摄要点。
+    结构由知识层 ``app/knowledge/video.py`` 的骨架决定，内容由本次 Brief 与上游产物填充。
+    """
+    brief = as_brief(ctx)
+    strategy = rec(ctx.get("strategy"))
+    creative = rec(ctx.get("creative"))
+    plan = rec(ctx.get("plan"))
+    edit = rec(ctx.get("edit"))
+    audience = rec(strategy.get("audience_profile"))
+    house = rec(strategy.get("message_house"))
+
+    spec = video_spec(brief.channel)
+    skeleton = script_skeleton(brief.channel)
+
+    pain = (as_str_array(audience.get("pain_points")) or ["选择成本太高"])[0]
+    scenario = (as_str_array(audience.get("scenarios")) or ["日常使用"])[0]
+    benefits = as_str_array(house.get("benefits")) or ["更省心"]
+    proposition = as_str(house.get("proposition")) or f"{brief.brand} 的核心主张"
+    big_idea = as_str(rec(creative.get("big_idea")).get("title"))
+    revised = rec(edit.get("revised"))
+    body = as_str(revised.get("body")) or as_str(plan.get("outline"))
+    keyword = brief.keywords[0] if brief.keywords else brief.product
+
+    # 钩子：3 秒内制造冲突或悬念（规则来自渠道规范）
+    hook = f"{pain}？我用 {brief.product} 试了 7 天"
+
+    voiceover: list[dict[str, Any]] = []
+    subtitles: list[dict[str, Any]] = []
+    shots: list[dict[str, Any]] = []
+
+    shot_lines = {
+        "钩子": hook,
+        "痛点": f"每天{scenario}的时候，最烦的就是{pain}",
+        "方案": f"{brief.brand} 的做法是：{benefits[0]}",
+        "佐证": f"我连续用了 7 天，{keyword} 这件事上确实省心了",
+        "转化": "想试的话，评论区我放了入口",
+    }
+    shot_visuals = {
+        "钩子": f"手持 {brief.product} 怼脸特写，背景是通勤场景，字幕直接甩出问题",
+        "痛点": "生活化快切：翻找 / 犹豫 / 皱眉，节奏 0.5 秒一刀",
+        "方案": "产品使用过程实拍，标注关键细节，画面稳、节奏放缓",
+        "佐证": "屏幕录制或实拍对比，参数与来源以角标形式出现",
+        "转化": "产品 + 行动指令同框，字幕停留 2 秒以上便于点击",
+    }
+
+    for item in skeleton:
+        role = str(item["role"])
+        line = shot_lines.get(role, "")
+        shots.append(
+            {
+                **item,
+                "visual": shot_visuals.get(role, "按脚本意图补拍画面"),
+                "voiceover": line,
+                "subtitle": line,
+                "camera": "手持稳定器" if item["shot"] % 2 else "固定机位",
+            }
+        )
+        voiceover.append(
+            {"shot": item["shot"], "start_second": item["start_second"], "line": line}
+        )
+        subtitles.append(
+            {
+                "shot": item["shot"],
+                "start_second": item["start_second"],
+                "end_second": item["end_second"],
+                "text": line,
+            }
+        )
+
+    return {
+        "format": "short_video_script",
+        "channel": brief.channel,
+        "aspect_ratio": spec.aspect_ratio,
+        "duration_seconds": spec.duration_seconds,
+        "shot_count": len(shots),
+        "hook": hook,
+        "big_idea": big_idea,
+        "proposition": proposition,
+        "shots": shots,
+        "voiceover": voiceover,
+        "subtitles": subtitles,
+        "cta": "评论区入口 / 主页链接",
+        "production_notes": [
+            f"画幅 {spec.aspect_ratio}，总时长控制在 {spec.duration_seconds} 秒",
+            "前 3 秒必须出现钩子，不要放 logo 片头",
+            "口播语速控制在每秒 4-5 字，字幕与口播逐句对齐",
+            "所有参数与数据需在画面上标注来源",
+        ],
+        "compliance_notes": [
+            "不得使用绝对化用语与效果承诺",
+            "不得诱导点赞关注",
+            "价格表述需与实际一致",
+        ],
+        "confidence": 0.82,
+        "risks": ["脚本中的参数与效果数据需在拍摄前由品牌方确认"],
+        "evidence": [
+            {
+                "claim": f"分镜骨架按渠道规范生成，共 {len(shots)} 镜",
+                "source": f"{brief.channel} 渠道形态规范",
+                "reliability": 0.85,
+            }
+        ],
+    }
+
+
 # ------------------------------------------------------------------ #
 # 生成器注册表                                                        #
 # ------------------------------------------------------------------ #
@@ -2156,6 +2265,7 @@ GENERATORS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "A6.factcheck": generate_fact_check,
     "A7.compliance": generate_compliance,
     "A8.visual": generate_visual,
+    "A8.video_script": generate_video_script,
     "A9.channel": generate_channel,
     "A10.analyze": generate_analysis,
     "A10.review": generate_analysis_review,

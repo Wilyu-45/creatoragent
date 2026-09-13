@@ -47,9 +47,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.util import make_temp_dir  # noqa: E402 - 需先补好 sys.path
+from app.core.util import force_offline_provider, free_port, make_temp_dir  # noqa: E402
 
-PORT = 8811
+#: 端口交给系统挑（Windows 会保留成片端口区间，写死会在个别机器上 bind 失败）
+PORT = free_port(8811)
 BASE = f"http://127.0.0.1:{PORT}"
 
 VERDICT_LABEL = {
@@ -66,7 +67,8 @@ _CASE_FIELDS = {
     "id", "status", "quality_score", "judge_total", "judge_final_total", "axis_scores",
     "revision_round", "artifact_count", "fact_accuracy", "brand_consistency",
     "compliance_verdicts", "first_round_blocked", "predicted_ctr", "duration_ms",
-    "task_id", "error", "checks", "delivered_text",
+    "task_id", "error", "checks", "delivered_text", "artifact_types",
+    "video_shot_count", "video_voiceover_count", "video_timeline_ok",
 }
 
 
@@ -179,6 +181,10 @@ def main() -> int:
     BASE = f"http://127.0.0.1:{args.port}"
 
     data_dir = make_temp_dir("golden-", base=ROOT / ".doctor-data")
+    # ⚠️ 必须在构造 env 之前调用：它写的是 os.environ，
+    # 而下面的 env 是从 os.environ 展开出来的 —— 顺序反了就白设了。
+    provider = force_offline_provider()
+    print(f"验证提供方：{provider}（真实链路请用 scripts/real_check.py）")
     env = {
         **os.environ,
         "CREATOR_DATA_DIR": str(data_dir),
@@ -186,6 +192,7 @@ def main() -> int:
         # 跳过人工裁决：黄金回归关注的是自动链路的质量，不是审批交互
         "AUTO_APPROVE": "true",
         "PYTHONNOUSERSITE": "1",
+        "LLM_PROVIDER": provider,
     }
     log_handle = (data_dir / "server.log").open("w", encoding="utf-8", errors="replace")
     proc = subprocess.Popen(

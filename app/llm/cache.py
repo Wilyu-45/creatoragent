@@ -48,13 +48,20 @@ class ResponseCache:
 
     @staticmethod
     def key(provider: str, model: str, request: LLMRequest) -> str:
-        """请求指纹。含 temperature / max_tokens，避免不同采样参数互相污染。"""
+        """请求指纹。含 temperature / max_tokens，避免不同采样参数互相污染。
+
+        ``max_tokens`` 为 None 时用**当前生效的上限**（含截断重试的放大值）参与指纹 ——
+        否则「放大后重试」会命中放大前的缓存，重试拿回同一份被截断的输出。
+        这里延迟 import 以避免 ``cache -> engine -> cache`` 的循环依赖。
+        """
+        from .engine import effective_max_tokens
+
         payload = json.dumps(
             {
                 "provider": provider,
                 "model": model,
                 "temperature": request.temperature,
-                "max_tokens": request.max_tokens,
+                "max_tokens": request.max_tokens or effective_max_tokens(),
                 "json": request.json,
                 "messages": [[m.role, m.content] for m in request.messages],
             },

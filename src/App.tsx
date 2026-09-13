@@ -3,6 +3,7 @@ import type { AgentEvent, Brief } from './lib/types.ts';
 import { ApprovalPanel } from './components/ApprovalPanel.tsx';
 import { ArtifactViewer } from './components/ArtifactViewer.tsx';
 import { BriefForm } from './components/BriefForm.tsx';
+import { DigitalHumanPanel } from './components/DigitalHumanPanel.tsx';
 import { JudgePanel } from './components/JudgePanel.tsx';
 import { MetricsPanel } from './components/MetricsPanel.tsx';
 import { Pipeline } from './components/Pipeline.tsx';
@@ -338,6 +339,8 @@ export function App() {
               <ApprovalPanel task={detail.task} busy={deciding} onDecide={handleDecide} />
 
               <PublishPanel task={detail.task} onChanged={handlePublishChanged} onToast={showToast} />
+
+              <DigitalHumanPanel task={detail.task} onToast={showToast} />
 
               <div className="tabs" style={{ marginTop: 16 }}>
                 {TABS.map((item) => (

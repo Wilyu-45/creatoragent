@@ -94,13 +94,13 @@ app/
     registry.py          # 已实现 AGENTS（A1-A11）+ PLANNED_AGENTS（仅 A0）
   api/routes.py          # REST + SSE 路由（契约与 TS 版逐字段对齐）
 scripts/
-  doctor.py              # 环境 + 能力自检（12 项：含租户隔离、检查点后端、评估器、回归判定器）
-  golden_eval.py         # 黄金数据集回归（固定 10 条用例 vs 基线；--update-baseline / --coverage）
+  doctor.py              # 环境 + 能力自检（16 项：含租户隔离、检查点后端、评估器、回归判定器、传播/采样、数字人样例）
+  golden_eval.py         # 黄金数据集回归（固定 11 条用例 vs 基线；--update-baseline / --coverage）
   smoke_api.py           # 端到端验收（REST/SSE/错误分支/持久化/评估/独立实例的鉴权与租户隔离）
-  verify_contracts.py    # 快速契约核验（约 10s：检查点后端 / 评估 / 租户视角 / 新事件）
+  verify_contracts.py    # 快速契约核验（约 20s：检查点后端 / 评估 / 租户视角 / 追踪 / 传播采样 / 数字人样例）
   stress_llm.py          # 压测与 Prompt 调优基线（并发正确性 / 延迟分位 / 成本缓存 / 租约残留）
 golden/                  # 黄金数据集（随代码版本化的测试资产，不在 data/ 下）
-  briefs/*.json          # 10 条固定用例，覆盖全部 7 个渠道
+  briefs/*.json          # 11 条固定用例，覆盖全部 7 个渠道
   baseline.json          # 基线分数 + 生成时的 rubric / engine
 .github/workflows/ci.yml # CI：自检 / 质量回归 / 契约 / 端到端 / 并发 / 前端 / 文档一致性
 .doctor-data/            # 自检与冒烟脚本的临时数据目录（已 gitignore，可安全删除）
@@ -122,7 +122,7 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 
 | 文件 | 职责 |
 | --- | --- |
-| `golden/briefs/*.json` | **10 条固定用例**，覆盖全部 7 个渠道 × 9 个行业 + 两个边界用例 |
+| `golden/briefs/*.json` | **11 条固定用例**，覆盖全部 7 个渠道 × 9 个行业 + 边界用例 |
 | `golden/baseline.json` | 基线分数（含生成时的 `rubric` / `engine`），随代码版本化 |
 | `app/core/golden.py` | 数据集加载、覆盖矩阵、基线读写、`compare()` 回归判定 |
 | `app/core/golden_runner.py` | 执行器：驱动真实流水线 → 压缩为标量 → 后台任务状态机 |
@@ -728,6 +728,68 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
     渠道适配、效果报告、知识卡片）仍是中文模板，只有**交付物**（标题/正文/CTA/标签）
     与最终交付件是完整的目标语言。
 
+**CI 与视频脚本（第十轮）**
+
+69. **⚠️ `.gitignore` 掉的构建产物，CI 必须先构建**（用户报障的 CI 失败）：
+    `dist/` 被 gitignore，后端**只在 `dist/` 存在时**才挂载静态托管与 SPA 回落路由，
+    而 backend job 只装了 Python 依赖 → `GET /` 返回 404 →
+    契约核验里「status」与「index.html 挂载点」两项失败。
+    这类问题的特征是：**本地永远不复现**（开发机有 dist/），只在干净 checkout 上出现。
+    修法是让 CI 显式构建，并在核验脚本里给出可操作提示（而不是只报 404）。
+    排查手法值得记下来：`mv dist dist_backup` 后在本地跑同一条命令，
+    得到与 CI **逐字相同**的失败，就把「环境差异」这个变量消掉了。
+70. **自己新加的检查，必须先看到它「通过」和「失败」两种表现**：我给契约核验加的
+    `dist/index.html 存在` 断言，把「失败提示文案」传进了 `expected` 参数，
+    于是断言变成 `True == '请先执行 npm run build'` —— 恒失败。
+    加一个 `detail` 参数分开「说明」与「期望值」后正常。
+    **断言工具的参数顺序本身就是一类 bug 来源，加检查时要正反都跑一遍。**
+71. **任务终态 ≠ 编排线程收尾完成**：自检读到任务 `completed` 就去检查 trace，
+    但编排线程可能还在 `finally` 里（`finish_trace` 才计算总耗时与 self-time），
+    于是偶发 `duration=0ms` 与 `unset` 状态的 span。
+    修法是**等待收尾条件**（duration > 0）并在断言里接受 OTel 合法的 `unset`，
+    而不是要求全 `ok` —— 后者会在收尾边界上偶发失败（flaky 测试比没有测试更糟）。
+72. **「是否产出某产物」要由知识层判断，不能一律产出**：视频脚本若对所有渠道都出，
+    图文任务会被塞入一份无关脚本，既制造噪声又让「交付物是否符合 Brief」失去可判断性。
+    判断口径（渠道 / 交付物 / 渠道形态）与命中原因一并记录在产物里，便于解释。
+73. **新产物类型要同时改「契约 + 产出方 + 前端 + 断言」四处**：加 `video_script` 时
+    实际动了后端 `ArtifactType`、A8 产出、前端联合类型与专用视图、
+    黄金断言、自检 —— 少任何一处都会留下不一致（前端 typecheck 会立刻报错，
+    这一点上 TypeScript 帮了大忙）。
+
+**真实网关与 Docker（第十一轮）**
+
+74. **⚠️ 真实模型的第一课：结构化输出会被 `max_tokens` 截断**。
+    离线引擎的输出「刚好够用」，因此这个问题在 mock 下**永远暴露不出来**；
+    接上真实网关的第一个任务就死在 A3：JSON 未闭合 → `_find_matching_end` 返回 -1
+    → `extract_json` 放弃 → 智能体报「无法解析为 JSON」，而内容其实已产出大半。
+    三件事都要做：**修复截断的 JSON**、**透传 `finish_reason` 区分「截断」与「胡说」**、
+    **针对性放大上限后重试**（原样重试必然再被截断一次）。
+75. **⚠️ 按单一输入单价计费会高估成本数倍**：DeepSeek 的输入侧缓存命中比未命中
+    便宜约 50 倍。忽略这一维 → 成本被高估 3.8 倍（实测）→ **过早熔断** →
+    本该走真实模型的任务被降级到离线引擎，而使用者只会看到「质量莫名其妙变差」。
+    计费模型必须覆盖提供方的真实计费维度。模型名匹配还要**长名优先**：
+    `v4-pro` 与 `v4-flash` 价差 3 倍，前缀规则会抢错。
+76. **⚠️ 验证脚本必须强制离线，否则会被 `.env` 带跑偏**：本机 `.env` 指向真实网关后，
+    `doctor.py` 与 `golden_eval.py` 跟着走真实模型 —— 一条任务 5 分钟、自检超时、
+    11 条黄金用例跑不完、每次验证都花钱，而且真实模型输出发散会让
+    **同一条断言今天过明天不过**。验证脚本断言的是契约与逻辑，必须秒级、可复现、零成本；
+    量真实链路的入口应当是单独的 `real_check.py`。
+    配套的顺序坑：`force_offline_provider()` 写 `os.environ`，
+    而 `env` dict 由 `os.environ` 展开 —— **先调用、后构造**，反了就白设。
+77. **换个底座就换了一套隐含环境**（受限网络构建镜像时连踩三个）：
+    ① 底座把 venv 放在 PATH 前，而那个 venv 里**没有 pip**；
+    ② 底座预设 `NODE_ENV=production`，npm 于是**跳过 devDependencies**，
+    而 vite/typescript 全在里面 —— 报错只有 `vite: not found`，极易误判成缓存或网络问题；
+    ③ 底座自带 `ENTRYPOINT` 会去启动它自己的服务（`gunicorn: not found`），**CMD 根本不生效**。
+    **教训：用非官方底座时，显式检查 PATH、关键环境变量、ENTRYPOINT 三项。**
+78. **Docker Hub 不通 ≠ 没法构建镜像**：PyPI 往往仍然可达。
+    用本地已有镜像做底座 + 从镜像源装 Python 依赖，就能在受限网络下产出**可用**镜像。
+    这是可行方案而非更优方案（底座更大），要如实标注并保留标准 Dockerfile。
+79. **端口别写死**：Windows/Hyper-V 保留成片端口区间，写死端口会直接
+    `WinError 10013 / [Errno 13] bind`（实测 `free_port(8811)` 返回 10012，
+    说明 8811 确在排除区内）。测试脚本一律动态取端口，
+    否则会出现「CI 通过、本机失败」这类环境相关假故障。
+
 ---
 
 ## 6. 验证结果（端到端实测）
@@ -917,6 +979,65 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 
 ---
 
+### 6.7 第十一轮实测（2026-09-13）
+
+- **真实网关（DeepSeek `deepseek-flash`）首个基线**：
+
+  | 指标 | 实测值 |
+  |---|---|
+  | 单任务墙钟 | 314.8s（11 次模型调用，单次 17.6–40.0s） |
+  | token | prompt 9,607 / completion 70,112（合计 79,719） |
+  | 成本 | $0.040328 |
+  | 质量分 | 62 |
+  | 门禁结论 | A6 reject（无来源主张 8 项）、A7 revise（重要 1 项） |
+  | 产物 | 14 |
+
+  说明：A6 否决是**门禁按设计生效** —— 真实模型会写出无来源的具体数据，
+  离线 mock 里这些数据是预置可核对的，因此真实链路下门禁更容易触发。
+- **截断修复验证**：5 种截断形态（数组未闭合 / 字符串截断 / 嵌套未闭合 /
+  悬空值 / 数组内元素截断）全部能被 `repair_truncated_json` 救回；
+  完整 JSON 不受影响。
+- **成本口径验证**：10 万输入（9 万命中）+ 5 千输出 →
+  计入缓存命中 $0.00447、忽略则 $0.0168（**高估 3.8 倍**）。
+- **Docker 实机验证**：
+
+  | 环节 | 结果 |
+  |---|---|
+  | 镜像构建（`Dockerfile.offline`） | ✅ 成功（受限网络，未访问 Docker Hub） |
+  | 容器状态 | ✅ `Up (healthy)` |
+  | `/api/health` | ✅ ok=True、checkpointer=sqlite |
+  | `/`（前端静态托管） | ✅ 200、含 `<div id="root">` |
+  | 完整任务 | ✅ completed / ARCHIVED / 质量分 94 / 18 产物 |
+  | `/data` 卷（容器删除重建后） | ✅ 任务、记忆库 7 张、评估历史、trace 全部保留 |
+  | compose 校验（两种 dockerfile） | ✅ `docker compose config` 通过 |
+
+- **全部门禁**：`doctor` / `golden`（11 用例 151 断言）/ `verify_contracts` /
+  `check_deploy` / `smoke_api` / `stress_llm` / `typecheck` 均 **exit 0**。
+
+### 6.6 第十轮实测（2026-09-13）
+
+- **CI 失败复现与修复**：
+  | 场景 | `GET /` | 契约核验 |
+  |---|---|---|
+  | 无 `dist/`（原 CI） | 404 | FAIL：status、index.html 挂载点 |
+  | 有 `dist/`（修复后） | 200 | **exit 0** |
+
+  本地复现命令：`mv dist dist_backup && python scripts/verify_contracts.py`
+  —— 得到与 GitHub 逐字相同的失败信息。
+- `scripts/doctor.py` → **17 项检查全通过**（新增「视频脚本」）。视频脚本实测：
+
+  | 项 | 结果 |
+  |---|---|
+  | 判断口径（5 例） | 抖音 / TikTok / 「小红书+点名要脚本」→ 需要；小红书图文 / 公众号长图文 → 不需要 |
+  | 抖音规格 | 45s、9:16、5 镜 |
+  | 分镜骨架 | 钩子 0-3s → 痛点 3-9s → 方案 9-28s → 佐证 28-39s → 转化 39-45s |
+  | 时间轴有序 | ✅｜时长覆盖 45s（与目标一致） |
+- `scripts/golden_eval.py` → **11 条用例 / 151 项断言，0 失败**。
+  `douyin_short_video` 产物数由 18 → **19**（新增 `video_script`）。
+- **竞态修复验证**：`doctor.py` 与 `verify_contracts.py` 连跑 2 轮均 exit 0
+  （修复前偶发 `duration=0ms` + `unset` 状态导致失败）。
+- 其余关卡（`check_deploy.py` / `smoke_api.py` / `stress_llm.py` / `typecheck` / `build`）→ 均 **exit 0**。
+
 ### 6.5 第九轮实测（2026-09-13）
 
 - `scripts/doctor.py` → **16 项检查全通过**（新增「多语言本地化」）。该检查实测输出：
@@ -961,9 +1082,6 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 - [x] 压测与 Prompt 调优基线 —— 已完成：`scripts/stress_llm.py`（延迟分位 / 返工 / 成本缓存 / 租约残留）。
 - [x] API 鉴权与任务级租户隔离 —— 已完成：`CREATOR_API_TOKENS` + Bearer/X-API-Token/`?token=` →
   `request.state.tenant`，列表/详情/指标按租户过滤。
-- [ ] 真实模型链路压测与 Prompt 调优 —— 脚本已就绪，仍需在真实网关跑一轮并据数据调 Prompt / 预算。
-- [ ] 多平台真实一键发布 —— 已提供平台无关的 webhook 投递通道与到期队列，
-  平台私有授权/限流需由发布网关承接，仍在「登记事实 + 复盘」范围内。
 - [x] 记忆库的多租户 / 权限 —— **已完成**：卡片带 `tenant` 归属，写入/召回/列表/统计/容量全部按租户分区，
   跨租户既不召回也不可见（`doctor.py` 与 `smoke_api.py` 双重断言）。
 - [x] LLM-as-a-Judge 评估流水线 —— **已完成**：六维评分、离线/模型双评估器（失败回退）、
@@ -973,26 +1091,44 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
   `docker compose up` 自带 Jaeger；未配置时进程内追踪完全自建、零外部依赖。
 - [x] 黄金数据集的期望输出 —— **已完成**：每条用例带 `expect` 块（品牌名 / 关键词覆盖率 /
   禁用表述 / 标题字数上限 / 质量与评估门槛 / 返工预算 / 首轮门禁行为 / `reference_points`），
-  共 136 项内容级断言，并已据其发现三个真实缺陷。
+  共 151 项内容级断言，并已据其发现三个真实缺陷。
 - [x] 容器化与生产部署（Docker / K8s）—— **已完成**：多阶段镜像 + compose（含 Jaeger）+
   k8s 清单 + 无需 daemon 的清单核验脚本。
 - [x] 多语言本地化（plan.md v2.0）—— **已完成**：中/英/日/韩/西语言画像、
   原生创作、按语言口径校字数、记忆库按语言分区、非中文合规如实告知。
 - [x] README 门面文档与人工协助清单 —— **已完成**：`README.md`。
-- [ ] **镜像构建未实机验证** —— Docker daemon 未运行，只做了 `docker compose config` 校验。
-  恢复 daemon 后应执行 `docker build -t creator-agent-studio:latest .` 与
-  `docker compose up -d` 实测一次，确认镜像内 `dist/` 与 `/data` 卷工作正常。
-- [ ] **mock 支撑类产物的本地化** —— 交付物（标题/正文/CTA/标签/最终交付件）已是完整目标语言，
-  但创意概念、内容策划、视觉指导、渠道适配、效果报告、知识卡片仍是中文模板。
-  真实模型模式下由本地化指令驱动，不受此限；若要在离线模式全链路演示多语言，需补齐这些生成器。
+- [x] 视频脚本独立交付物（v2.0）—— **已完成**：`video_script` 产物 +
+  知识层判断 + 渠道时间轴 + 前端脚本视图 + 黄金断言 + 自检。
+- [x] CI 静态托管失败 —— **已修复**：CI 显式构建前端（`dist/` 被 gitignore）。
+- [x] 镜像构建实机验证 —— **已完成**：`Dockerfile.offline` 在受限网络下构建成功，
+  容器 healthy、前端可访问、跑通完整任务、`/data` 卷跨容器重建持久化。
+- [x] 真实网关接入与首版基线 —— **已完成**：DeepSeek `deepseek-flash` 跑通，
+  量到 315s / $0.04 / 79.7k token / 质量分 62，见 §6.7。
+- [ ] **真实链路的 Prompt 调优** —— 已有首版基线；代码侧本轮已完成：
+  ① 压缩 A3/A5/A6/A11 的输出结构（增加输出体量硬约束，离线回归全绿）；
+  ② A4 提示词收紧「无来源数据一律不写」，减少 A6 否决。
+  **待做**：③ 用真实网关复测（`python scripts/real_check.py`），按结果继续调；
+  ④ 用真实数据校准 `COST_BUDGET_USD` / `TOKEN_BUDGET`（当前 1.0 / 200000 为保守值）。
+- [ ] **吊销并更换本次联调用的 DeepSeek API Key** —— 该 Key 已在对话中明文出现，
+  应视为已泄露（P0 人工事项）。
 - [ ] **非中文市场的法规词库** —— 目前只有中文广告法词库；英文/日文/韩文/西语的合规红线
   仅写入提示词，未经法规校验（P0 人工事项）。
-- [ ] **视频脚本独立交付物类型（v2.0）** —— 抖音分镜/口播/字幕已实现，
-  但没有独立的 `video_script` artifact 类型；需先确定产品形态。
-- [ ] **数字人（v2.0）** —— 需第三方数字人视频生成服务，属产品形态决策。
-- [ ] 跨进程 trace 上下文传播与采样 —— 当前一个任务一个 trace_id、span 全在进程内、全量采集。
+- [ ] **mock 支撑类产物的本地化** —— 交付物（标题/正文/CTA/标签/最终交付件）已是完整目标语言，
+  但创意概念、内容策划、视觉指导、渠道适配、效果报告、知识卡片仍是中文模板。
+  真实模型模式下由本地化指令驱动，不受此限。
+- [x] **数字人渲染（v2.0）开发样例** —— **已完成**：`app/core/digital_human.py` 提供
+  `sample` 内置引擎（离线确定性模拟「排队 → 渲染 → 完成」+ 按 `video_script` 生成渲染清单，
+  无口播/时长偏差显式告警）与 `http` 适配样例（「POST 建任务 → GET 查状态」最小契约，
+  未配置 API URL 时**显式失败**）；生命周期读取时惰性推进、按租户隔离、任务删除一并回收；
+  API `POST/GET /api/tasks/{id}/digital-human`（无脚本 409）+ 前端「数字人渲染」面板 +
+  doctor / verify_contracts 断言。**正式接入哪家第三方服务属产品形态决策，由使用者决定（P2）**。
+- [x] 跨进程 trace 上下文传播与采样 —— **已完成**：W3C `traceparent` 解析/生成
+  （`parse_traceparent` / `format_traceparent`），入站 `POST /api/tasks` 延续远端 trace_id
+  并把首个根 span 挂到远端之下；出站 webhook（发布投递 / 数字人网关）自动携带当前 span 的
+  traceparent；`OTEL_TRACES_SAMPLER` / `_ARG` 采样**只作用于导出面**（OTLP + 落盘），
+  进程内轨迹始终完整，入站采样标记优先于本地比例，计数在 health/metrics 可见；
+  坏头一律忽略，绝不影响业务请求。
 - [ ] 横向扩展（多副本）—— 需先把共享黑板与检查点换成 PostgreSQL + Redis。
-- [ ] 真实模型链路压测与 Prompt 调优 —— 脚本已就绪，仍需在真实网关跑一轮并据数据调 Prompt / 预算。
 - [ ] 多平台真实一键发布 —— 已提供平台无关的 webhook 投递通道与到期队列，
   平台私有授权/限流需由发布网关承接，仍在「登记事实 + 复盘」范围内。
 
@@ -1240,3 +1376,133 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
   P0 四项（镜像实机验证、生产令牌、真实网关定基线、非中文合规人工审核）、
   P1 四项（品牌资产、发布网关、行业用例、行业词库）、P2 四项（视频脚本/数字人形态、
   横向扩展方案、Jaeger 生产实例、人工抽检机制）。
+
+### 4.1i 后端 · 第十轮：CI 修复 + 视频脚本 + 竞态修复（2026-09-13，已完成）
+
+- **修复 CI 失败（用户报障）**：GitHub 上 `verify_contracts.py` 报
+  `status` 与 `index.html 挂载点` 两项失败。根因是 **`dist/` 被 .gitignore 排除，
+  而 CI 的 backend job 只装了 Python 依赖、从没构建前端** →
+  后端只在 `dist/` 存在时才挂载静态托管与 SPA 回落路由 → `GET /` 返回 404。
+  本地复现：`mv dist dist_backup` 后跑契约核验，得到逐字相同的失败。
+  修法：CI backend job 增加 `actions/setup-node` + `npm ci && npm run build`
+  （排在契约核验之前）；核验脚本里补一条前置断言与可操作提示。
+- **视频脚本（plan.md v2.0 的最后一项功能）**：
+  - 新增 `app/knowledge/video.py`：`needs_video_script()`（短视频渠道 / 交付物点名 /
+    渠道形态含视频特征，任一命中才产出）、`video_spec()`（各渠道时长/画幅/镜头数）、
+    `script_skeleton()`（按时间占比生成分镜骨架）、`required_sections()`。
+  - 契约新增 `ArtifactType = "video_script"` + 标签；前端类型同步。
+  - A8 在产出 `visual_brief` 的同时追加 `video_script` 产物（同一智能体两项产物，
+    **不新增智能体**）：钩子 / 分镜（时长·画面·口播·字幕·机位）/ 口播表 / 字幕表 /
+    CTA / 拍摄要点 / 合规注意。
+  - `normalize_video_script()` 规整结构并保证时间轴单调、每镜时长 ≥ 1s。
+  - mock 新增 `A8.video_script` 生成器。
+  - 前端新增 `VideoScriptView`：以**时间轴**为主视图（比例条 + 分镜表 + 覆盖率 +
+    「存在无口播分镜」告警），而不是按字段平铺 —— 脚本可用性取决于时间轴连贯性。
+  - 黄金数据集：`douyin_short_video` 断言 `expect_video_script: true`
+    （并检查分镜/口播数量与时间轴有序），`xiaohongshu_food` 断言 `false`
+    （图文渠道不该被塞入无关脚本）。
+  - `doctor.py` 新增第 17 项「视频脚本」（判断口径 5 例 + 骨架时间轴 + 时长覆盖）。
+- **修复一个真实竞态**：自检与契约核验读取 trace 时，任务虽已是终态，
+  但编排线程可能仍在 `finally` 里收尾（`finish_trace` 才计算总耗时与 self-time）——
+  于是偶发看到 `duration=0ms` 与未收尾的 `unset` span 状态。
+  修法：自检**等待 trace 收尾**（duration > 0，上限 15s）；
+  同时把「span 状态必须全是 ok」放宽为「**不得有 error**」——
+  OTel 里 `unset` 是合法的「未显式设置状态」，要求全 ok 会在收尾边界上偶发失败。
+  连跑两轮确认不再抖动。
+- **修复一个自检脚本自身的缺陷**：`verify_contracts.check()` 只有
+  `(label, actual, expected)` 三个参数，我把「失败提示文案」传进了 `expected`，
+  于是断言变成「`True == '请先执行 npm run build'`」，必然失败 ——
+  即我新加的检查自己写错了。修法是给 `check()` 增加独立的 `detail` 参数。
+  **教训：给测试加检查时，检查本身也要先看到它「通过」与「失败」两种表现。**
+
+### 4.1j 后端 · 第十一轮：真实网关接入 + Docker 实机验证（2026-09-13，已完成）
+
+- **真实网关（DeepSeek）接入并跑通**：`.env`（已 gitignore）指向 `api.deepseek.com/v1`，
+  模型 `deepseek-flash`。首个真实任务**立即暴露一个致命缺陷**：
+  A3 的结构化输出被 `max_tokens` 截断，JSON 未闭合，`extract_json` 直接放弃解析，
+  整个智能体以「无法解析为 JSON」失败 —— 而内容其实已产出大半。
+  修法四件套：
+  1. `repair_truncated_json()`：按未闭合容器补全、丢弃不完整元素、截断字符串补引号；
+  2. `LLMResponse.finish_reason` 透传，**区分「被截断」与「模型胡说」**；
+  3. 新增 `TruncatedOutputError`，编排层**针对性地放大输出上限后重试**
+     （`boost_max_tokens`，thread-local，对智能体透明）；
+  4. 输出上限默认 4096 → 8192。
+- **成本口径修正（关键）**：DeepSeek 输入侧「缓存命中」比未命中便宜约 50 倍
+  （2026-09-10 定价：空闲时段命中 ¥0.02/M、未命中 ¥1/M、输出 ¥4/M）。
+  原先只按单一输入单价计费，会**高估成本 3.8 倍**（实测数字），
+  进而过早触发熔断、把本该走真实模型的任务降级到离线引擎。
+  现在 `price_of()` 返回 `(未命中, 命中, 输出)` 三档，`LLMUsage.cached_tokens`
+  从 `prompt_tokens_details.cached_tokens` 透传，账本新增 `providerCachedTokens`。
+  模型匹配改为**长名优先**，避免 `deepseek-v4-pro` 被前缀规则抢占（价差 3 倍）。
+- **输出膨胀治理**：实测单任务 completion 达 6.5–7 万 token，其中相当部分是
+  模型附送的 `reasoning` / `notes` 等**无人消费的字段**。
+  新增 `strip_unknown_keys()`：按各智能体的 SCHEMA 裁掉顶层多余字段
+  （`ALWAYS_KEEP_KEYS` 保证 `confidence` / `risks` / `evidence` 等契约字段永不被裁）。
+- **验证脚本必须强制离线**（本轮踩到的真实坑）：本机 `.env` 指向真实网关后，
+  `doctor.py` 与 `golden_eval.py` 跟着走真实模型 →
+  一条任务 5 分钟，自检超时失败；11 条黄金用例跑不完。**验证脚本断言的是契约与逻辑，
+  必须秒级、可复现、不花钱**。新增 `force_offline_provider()`，
+  在 doctor / golden / smoke / verify_contracts 里默认固定 `mock`
+  （`real_check.py` 才是量真实链路的入口）。
+  另外两个顺序错误也一并修掉：`force_offline_provider()` 写的是 `os.environ`，
+  而 env dict 由 `os.environ` 展开 —— **必须先调用再构造 env**，否则白设。
+- **Docker 实机验证（原 P0 事项，已完成）**：
+  - 标准 `Dockerfile` 走不通：`registry-1.docker.io` 不可达（连认证 token 都取不到）。
+  - 新增 `Dockerfile.offline`：只用**本地已有镜像**作底座
+    （dify-api 提供 Debian+Python3.12+pip，dify-web 提供 Node 22），
+    Python 依赖从**镜像源**装（实测容器内 PyPI 可达，只是 Docker Hub 不通）。
+  - 一路踩掉三个坑（都记在踩坑 74–76）：底座走 venv 的 python 没 pip、
+    底座预设 `NODE_ENV=production` 导致 npm 跳过 devDependencies（vite 找不到）、
+    底座自带 ENTRYPOINT 去启动 gunicorn。
+  - 实测通过：镜像构建成功 → 容器 `healthy` → `/` 返回前端（含 `<div id="root">`）
+    → 完整任务跑通（18 产物 / 质量分 94）→ **`/data` 卷跨容器删除重建后任务、
+    记忆库、评估历史、trace 全部保留** → compose（标准与离线两种 dockerfile）校验通过。
+- **动态端口**：Windows 保留成片端口区间，写死端口会 `WinError 10013`
+  （`free_port(8811)` 实测返回 10012，说明 8811 确实在排除区内）。
+  新增 `free_port()`，四个起服务的脚本改为动态取端口。
+- **新增 `scripts/real_check.py`**：真实链路核验（延迟 / token / 成本 /
+  提供方缓存命中率 / 门禁结论 / 交付文本预览），是量真实账的入口。
+
+### 4.1k 后端 · 第十二轮：数字人样例 + trace 传播/采样 + Prompt 收紧（2026-09-13，已完成）
+
+- **数字人渲染（开发样例，`app/core/digital_human.py`）**：
+  - **定位**：渲染本身**不在本系统内实现** —— HeyGen / D-ID / 腾讯智影等的授权、形象库、
+    计费与回调协议差异极大，「接哪家、要不要接」是产品形态决策。系统提供**可回归的接入样例**，
+    让 API / UI / 下游流程的联调在买任何服务之前就能发生。
+  - `sample` 内置引擎（默认，零依赖）：离线确定性模拟「排队 → 渲染 → 完成」，
+    并按 `video_script` 生成**渲染清单** `build_manifest()`（每镜台词 / 字幕 / 机位 /
+    起止时间 / 是否有口播；无口播分镜与总时长偏差**显式告警**，不假装没问题）。
+  - `http` 适配样例：对接「POST 建任务 → GET 查状态」最小契约的任意网关
+    （自建渲染农场、n8n 均可）；`DIGITAL_HUMAN_API_URL` 未配置时**显式失败，绝不假装成功**；
+    失败在作业上记账（`attempts` / `error`），不向上抛。
+  - **生命周期惰性推进**：状态在读取时按流逝时间（sample）或远端状态（http）计算，
+    不靠后台线程 —— 服务空转时零任务；按租户隔离；任务删除时作业一并回收（`drop_task`）。
+  - 接缝：`POST/GET /api/tasks/{id}/digital-human`（无 `video_script` → 409）；
+    事件与 `digitalhuman.render` span 随任务轨迹对齐；前端 `DigitalHumanPanel.tsx`
+    在脚本产出后出现（创建作业 / 进度条 / 渲染清单分镜表 / 成片地址）。
+- **W3C traceparent 跨进程传播（`app/core/tracing.py`）**：
+  - `parse_traceparent()` / `format_traceparent()` / `RemoteParent`：严格校验版本与全零 id，
+    **坏头一律忽略**，绝不影响业务请求。
+  - 入站 `POST /api/tasks` 解析 `traceparent` → 本地 trace **沿用远端 trace_id**，
+    首个根 span 挂到远端 span 之下（Jaeger 里拼成完整一棵树）。
+  - 出站 webhook（发布投递 / 数字人网关）自动携带当前 span 的 `traceparent` ——
+    下游服务可以接着传播，形成端到端链路。
+- **导出面采样（OTel 语义对齐）**：`decide_sampling()` 支持 `parentbased_always_on/off`、
+  `parentbased_traceidratio`、`always_on/off`、`traceidratio`；入站 `traceparent` 的采样标记
+  优先于本地比例。**采样只作用于导出面**（OTLP + 落盘）：未采样的 trace 不转发、不落盘，
+  但**进程内轨迹始终完整** —— Jaeger 里查不到它是预期行为。计数在 `/api/metrics` 与
+  `/api/health` 可见。关键取舍：采样决策在 trace 创建时一次性做出（trace 级），
+  而不是每个 span 各自决定 —— 同一棵树要么全导出要么全不导出，不会出现「半棵树」。
+- **Prompt 收紧（真实网关复测前的代码侧准备，离线回归全绿）**：
+  - A4：新增「**无来源数据一律不写**」硬规则（针对真实链路实测的 8/11 无来源主张被 A6 否决）；
+  - A3 / A5 / A6 / A11：增加输出体量约束（topics 恰好 3 条、标题备选 5 条、每项一句话等），
+    压 completion token（此前实测单任务 completion 达 7 万）。
+- **`.env.example` 新增**：`DIGITAL_HUMAN_PROVIDER / _API_URL / _API_KEY / _AVATAR / _TIMEOUT_MS`、
+  `OTEL_TRACES_SAMPLER / _ARG`。
+- **自检扩展**：`doctor.py` 新增 `check_trace_propagation()`（坏头 / 全零 id / 未采样标记 /
+  沿用远端 trace_id / 出站携带）与 `check_digital_human()`（清单告警、惰性推进、租户隔离、
+  http 失败路径与回收），共 **16 项**；`verify_contracts.py` 增加数字人样例与传播采样闭环（实测约 20s）。
+- **验证结果（本轮实测）**：`doctor.py` **16 项全绿**；`verify_contracts.py` 通过（~20s）；
+  `golden_eval.py` **11 用例 11/11 持平，151 项内容级断言 0 失败**。
+- **五份文档同步**：README / plan / creator / USER_GUIDE / MEMORY 全部对齐当前状态
+  （数字人样例定位、传播与采样、doctor 16 项、黄金 11/151 计数、P0/P2 清单一致化）。

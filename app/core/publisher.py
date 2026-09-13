@@ -85,11 +85,14 @@ def dispatch(
     *,
     retry: int = 2,
     timeout_ms: int = 15_000,
+    headers: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     """把一次投递推给 webhook。
 
     返回 ``(是否成功, 摘要)``：成功时摘要是响应体前 200 字，失败时是最后一次错误。
     ``url`` 为空直接失败（调用方据此退化为「登记发布」）。
+    ``headers`` 可携带 W3C ``traceparent``（见 ``core/tracing.py``），让发布网关
+    把这次投递与任务的调用轨迹对齐。
     """
     if not url:
         return False, "未配置 PUBLISH_WEBHOOK_URL（已退化为登记发布）"
@@ -98,7 +101,12 @@ def dispatch(
     attempts = max(1, retry + 1)
     for attempt in range(attempts):
         try:
-            response = httpx.post(url, json=payload, timeout=max(1.0, timeout_ms / 1000.0))
+            response = httpx.post(
+                url,
+                json=payload,
+                headers=headers or None,
+                timeout=max(1.0, timeout_ms / 1000.0),
+            )
             if response.status_code < 400:
                 log.info(f"发布投递成功 HTTP {response.status_code}", {"channel": payload.get("channel")})
                 return True, (response.text or "")[:200]

@@ -13,6 +13,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.types import AgentResult
+from ..knowledge.industry import channel_rule
+from ..knowledge.video import needs_video_script
 from ..knowledge.visual import DEFAULT_STYLE, channel_visual_spec
 from .base import (
     AgentDefinition,
@@ -20,6 +22,7 @@ from .base import (
     AgentRunContext,
     ArtifactDraft,
     ResultDraft,
+    as_num,
     as_obj,
     as_obj_array,
     as_str,
@@ -150,6 +153,61 @@ def normalize(data: dict[str, Any], channel: str) -> dict[str, Any]:
     }
 
 
+VIDEO_SCHEMA = """{
+  "format": "short_video_script",
+  "aspect_ratio": "9:16",
+  "duration_seconds": 45,
+  "hook": "",
+  "shots": [{"shot": 1, "role": "钩子|痛点|方案|佐证|转化",
+             "start_second": 0, "end_second": 3, "duration_seconds": 3,
+             "visual": "", "voiceover": "", "subtitle": "", "camera": "", "intent": ""}],
+  "voiceover": [{"shot": 1, "start_second": 0, "line": ""}],
+  "subtitles": [{"shot": 1, "start_second": 0, "end_second": 3, "text": ""}],
+  "cta": "",
+  "production_notes": [""],
+  "compliance_notes": [""],
+  "confidence": 0.0,
+  "risks": [""],
+  "evidence": [{"claim": "", "source": "", "reliability": 0.0}]
+}"""
+
+
+def normalize_video_script(data: dict[str, Any]) -> dict[str, Any]:
+    """规整视频脚本：保证分镜/口播/字幕三段结构齐备且时间轴单调。"""
+    shots: list[dict[str, Any]] = []
+    for index, item in enumerate(as_obj_array(data.get("shots")), start=1):
+        start = as_num(item.get("start_second"), 0)
+        end = as_num(item.get("end_second"), start + 1)
+        shots.append(
+            {
+                "shot": int(as_num(item.get("shot"), index)),
+                "role": as_str(item.get("role"), "方案"),
+                "start_second": int(start),
+                "end_second": int(max(end, start + 1)),
+                "duration_seconds": int(max(1, end - start)),
+                "visual": as_str(item.get("visual")),
+                "voiceover": as_str(item.get("voiceover")),
+                "subtitle": as_str(item.get("subtitle")),
+                "camera": as_str(item.get("camera")),
+                "intent": as_str(item.get("intent")),
+            }
+        )
+
+    return {
+        "format": as_str(data.get("format"), "short_video_script"),
+        "aspect_ratio": as_str(data.get("aspect_ratio"), "9:16"),
+        "duration_seconds": int(as_num(data.get("duration_seconds"), 45)),
+        "shot_count": len(shots),
+        "hook": as_str(data.get("hook")),
+        "shots": shots,
+        "voiceover": as_obj_array(data.get("voiceover")),
+        "subtitles": as_obj_array(data.get("subtitles")),
+        "cta": as_str(data.get("cta")),
+        "production_notes": as_str_array(data.get("production_notes")),
+        "compliance_notes": as_str_array(data.get("compliance_notes")),
+    }
+
+
 def run(ctx: AgentRunContext) -> AgentResult:
     brief = ctx.brief
     creative = ctx.upstream_of("creative")
@@ -213,6 +271,57 @@ def run(ctx: AgentRunContext) -> AgentResult:
         ),
     )
 
+    # 视频脚本：只在需要时产出（短视频渠道 / 交付物点名要脚本 / 渠道形态含视频特征）。
+    # **刻意不做「一律产出」**：图文渠道硬塞脚本只会制造噪声，
+    # 也会让「交付物是否符合 Brief」失去可判断性。
+    artifacts = [artifact]
+    needs_script, script_reasons = needs_video_script(
+        channel=brief.channel,
+        deliverables=brief.deliverables,
+        channel_format=channel_rule(brief.channel).format,
+    )
+    if needs_script:
+        ctx.emit("识别为视频形态，追加输出结构化视频脚本", {"reasons": script_reasons})
+        script_result = call_with_prompts(
+            ctx,
+            META,
+            SYSTEM,
+            f"""【渠道】{brief.channel}｜【产品】{brief.brand} {brief.product}
+【主推文案标题】{as_str(target.get('title'))}
+【主推文案正文】
+{as_str(target.get('body'))[:600]}
+
+请输出**可直接开拍的短视频脚本**，包含钩子、分镜（每镜含时长/画面/口播/字幕）、
+行动号召与拍摄要点，严格要求 JSON 结构如下：
+{VIDEO_SCHEMA}""",
+            "A8.video_script",
+            {
+                "brief": brief.model_dump(mode="json"),
+                "strategy": ctx.upstream_of("strategy"),
+                "creative": creative,
+                "plan": ctx.upstream_of("plan"),
+                "draft": draft,
+                "edit": ctx.upstream_of("edit"),
+                "revision": ctx.revision,
+            },
+            schema=VIDEO_SCHEMA,
+        )
+        script_content = normalize_video_script(script_result.data)
+        # 结构化脚本作为独立产物落黑板：A9 需要按平台时长二次裁剪，
+        # 前端需要按结构渲染，黄金数据集需要断言「短视频 Brief 必须出带时长与口播的脚本」。
+        script_artifact = build_artifact(
+            ctx,
+            META,
+            ArtifactDraft(
+                type="video_script",
+                title="视频脚本",
+                content=script_content,
+                text=content_to_text(script_content),
+                tags=["视频", "脚本", brief.channel],
+            ),
+        )
+        artifacts.append(script_artifact)
+
     conflicts = check["conflicts"]
     risks = read_risks(result.data)
     if conflicts:
@@ -227,9 +336,14 @@ def run(ctx: AgentRunContext) -> AgentResult:
                 f"输出「{content['visual_direction']['style']}」视觉方向、"
                 f"{len(prompts)} 条配图 Prompt"
                 + (f"与 {len(storyboard)} 镜分镜" if storyboard else "")
+                + (
+                    f"；附带 {len(script_content.get('shots') or [])} 镜视频脚本"
+                    if needs_script
+                    else ""
+                )
                 + ("；图文一致性校验通过" if check["aligned"] else f"；{len(conflicts)} 项图文冲突待确认")
             ),
-            artifacts=[artifact],
+            artifacts=artifacts,
             confidence=read_confidence(result.data, 0.74),
             risks=risks,
             evidence=read_evidence(result.data),

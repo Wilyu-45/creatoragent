@@ -50,7 +50,12 @@ SYSTEM = system_prompt(
 - 大纲必须与选定创意方向一致，不得另起炉灶
 - 标题不得使用绝对化用语、不得承诺效果
 - 排期建议只描述动作与节奏，不承诺流量结果
-- 只输出 JSON，不输出任何解释性文字""",
+- 只输出 JSON，不输出任何解释性文字
+
+输出体量（控制 token，超量从简）：
+- topics 恰好 3 条，每条 outline ≤6 项、每项一句话
+- headline_candidates 恰好 5 条；structure ≤5 段
+- channel_adaptation 只覆盖 brief 渠道一行；publishing_rhythm ≤3 条""",
 )
 
 SCHEMA = """{
@@ -129,6 +134,7 @@ Big Idea：{as_str(big_idea.get('title'))} —— {as_str(big_idea.get('statemen
         user,
         "A3.plan",
         {"brief": brief.model_dump(mode="json"), "strategy": strategy, "creative": creative},
+        schema=SCHEMA,
     )
     content = normalize(result.data)
     topics = as_obj_array(content["topics"])

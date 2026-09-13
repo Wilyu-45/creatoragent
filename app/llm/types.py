@@ -36,6 +36,10 @@ class LLMRequest:
 class LLMUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    #: prompt_tokens 中**命中提供方前缀缓存**的部分。
+    #: DeepSeek 等厂商的缓存命中输入价仅约为未命中的 1/50；
+    #: 不区分会让成本严重高估（进而过早熔断），见 ``llm/pricing.py``。
+    cached_tokens: int = 0
 
 
 @dataclass
@@ -49,6 +53,9 @@ class LLMResponse:
     simulated: bool = False
     #: True 表示命中响应缓存（未真正产生一次模型调用）
     cached: bool = False
+    #: 提供方的结束原因。``length`` 表示**被 max_tokens 截断** ——
+    #: 真实网关下这是最常见的失败原因，必须能识别出来才能给出可操作的提示。
+    finish_reason: str = ""
     #: 降级说明（例如真实模型不可用、成本熔断）
     degraded_reason: str | None = None
 

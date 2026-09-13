@@ -22,6 +22,12 @@
     llm span 正确嵌套在智能体之下、属性齐全，且能按 OTel 形状导出
 14. 校验 **OTLP 导出链路**（用内存导出器，无需 collector）：本地与导出的
     trace_id/span_id 完全一致、父子关系与智能体归属保留、默认不加载 OTel
+15. 校验 **W3C traceparent 传播与采样**：头的解析/构造容错、跨进程 trace 延续
+    （本地根 span 挂到远端父 span 之下）、采样决策矩阵（parentbased_* / ratio）
+    以及「未采样 trace 不导出、进程内轨迹仍完整」的导出面语义
+16. 校验 **数字人渲染样例**：渲染清单（分镜透传 / 无口播告警 / 时长偏差）、
+    样例引擎按流逝时间的惰性推进（排队 → 渲染 → 完成）、租户隔离、
+    http 适配样例在未配置网关时的显式失败路径与任务删除时的作业回收
 
 注意：本脚本默认写入**项目内**的 ``.doctor-data/`` 临时目录，避免自检污染开发环境的
 ``data/``；如需指定，可显式设置 ``CREATOR_DATA_DIR``。刻意不用系统 temp 目录 ——
@@ -43,6 +49,28 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.util import make_temp_dir  # noqa: E402 - 需先补好 sys.path
+
+
+def force_offline_provider() -> str:
+    """把自检固定到内置离线引擎。
+
+    自检断言的是**契约与逻辑**（span 树层级、黄金判定器、租户隔离…），
+    这些必须在秒级、可复现、无外部依赖的条件下成立。
+    本机 ``.env`` 指向真实网关时，若自检跟着走真实模型，会同时踩三个坑：
+
+    * 一条任务要 5 分钟，远超自检的等待上限（实测真实网关下 doctor 会超时）；
+    * 真实模型输出发散，同一个断言可能今天过明天不过；
+    * 每次自检都真的花钱。
+
+    因此默认强制离线；需要验证真实链路时用 ``scripts/real_check.py``，
+    或显式设 ``CREATOR_DOCTOR_PROVIDER=openai``。
+    """
+    override = (os.environ.get("CREATOR_DOCTOR_PROVIDER") or "").strip().lower()
+    if override in ("openai", "mock"):
+        os.environ["LLM_PROVIDER"] = override
+    else:
+        os.environ["LLM_PROVIDER"] = "mock"
+    return os.environ["LLM_PROVIDER"]
 
 
 def isolate_data_dir() -> str:
@@ -671,6 +699,14 @@ def check_tracing(brief: dict, chain: dict) -> bool:
         _time.sleep(0.3)
 
     trace = tracer.trace(task.id)
+    # 任务状态已经是终态，但编排线程可能还在 `finally` 里收尾（结账、释放租约、
+    # finish_trace）。finish_trace 才计算总耗时与 self-time 占比，
+    # 所以这里必须等它完成，否则会看到 duration=0 与未收尾的 span 状态 —— 那是竞态，不是缺陷。
+    wait_deadline = _time.time() + 15
+    while _time.time() < wait_deadline and trace is not None and trace.duration_ms == 0:
+        _time.sleep(0.1)
+        trace = tracer.trace(task.id)
+
     if trace is None:
         print("    ! 任务结束后没有 trace（追踪未开启）")
         return False
@@ -692,13 +728,16 @@ def check_tracing(brief: dict, chain: dict) -> bool:
 
     kinds = {span.kind for span in trace.spans}
     statuses = {span.status for span in trace.spans}
+    # OTel 里 `unset` 是合法的「未显式设置状态」，本项目只在极少数收尾路径上出现，
+    # 因此只断言「没有 error」，而不是要求全部 ok。
+    no_errors = "error" not in statuses
     with_attrs = sum(1 for span in llm_spans if "llm.model" in span.attributes)
 
     print(f"    任务终态={status}｜trace={trace.trace_id[:8]}｜span={len(trace.spans)}"
           f"｜根={len(roots)}｜总耗时={trace.duration_ms}ms")
     print(f"    智能体 span={len(agent_spans)}｜门禁 span={len(gate_spans)}"
           f"｜llm span={len(llm_spans)}（带模型属性 {with_attrs}）")
-    print(f"    span 类型={sorted(kinds)}｜状态={sorted(statuses)}")
+    print(f"    span 类型={sorted(kinds)}｜状态={sorted(statuses)}｜无 error={no_errors}")
     print(f"    层级成型={hierarchy_ok}｜llm 嵌套正确={nested_ok}")
 
     # 事件与 span 的关联：排查时不必靠时间戳猜「这条事件属于哪个 span」
@@ -732,7 +771,9 @@ def check_tracing(brief: dict, chain: dict) -> bool:
         and with_attrs == len(llm_spans)
         and same_trace
         and len(with_span) > 0
+        and no_errors
         and otel_ok
+        and trace.duration_ms > 0
     )
     if not ok:
         print("    ! 追踪异常：span 树可能退化、层级错挂或导出形状不符")
@@ -860,6 +901,253 @@ def check_otel(brief: dict) -> bool:
     return ok
 
 
+def check_trace_propagation() -> bool:
+    """校验 W3C traceparent 传播与采样：头容错、跨进程延续、采样矩阵与导出面过滤。
+
+    两个方向都必须守住：坏头绝不能打坏任务创建（传播是尽力而为的观测能力），
+    而采样只作用于导出面 —— 未采样的 trace 在 Jaeger 里查不到是预期行为，
+    但进程内轨迹必须完整，否则「采样」就变成了「丢数据」。
+    """
+    from app.config import get_config
+    from app.core.tracing import (
+        EXPORT_DIR,
+        decide_sampling,
+        format_traceparent,
+        parse_traceparent,
+        tracer,
+    )
+
+    print("\n[W3C 传播与采样]")
+
+    # 1) 入站头解析：合法 / 未采样标记 / 各种坏输入
+    good = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    unsampled = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
+    parse_cases = [
+        (good, True),
+        (unsampled, False),
+        ("  00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01  ", True),  # 大小写与空白容忍
+        (None, None),
+        ("", None),
+        ("garbage", None),
+        ("00-zzz-zzz-01", None),  # 非十六进制
+        ("00-00000000000000000000000000000000-00f067aa0ba902b7-01", None),  # 全零 trace_id
+        ("ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", None),  # 版本 ff
+    ]
+    parse_ok = True
+    for raw, expect_sampled in parse_cases:
+        parsed = parse_traceparent(raw)
+        if expect_sampled is None:
+            ok = parsed is None
+        else:
+            ok = parsed is not None and parsed.sampled == expect_sampled
+        parse_ok = parse_ok and ok
+        if not ok:
+            print(f"    ! 解析异常：{str(raw)[:44]!r} → {parsed}")
+    print(f"    入站解析：{len(parse_cases)} 例 {'全部正确' if parse_ok else '存在错误'}")
+
+    # 2) 出站构造与解析回环
+    roundtrip = parse_traceparent(format_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"))
+    build_ok = (
+        roundtrip is not None and roundtrip.sampled is True
+        and parse_traceparent(format_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", sampled=False)) is not None
+        and format_traceparent("0" * 32, "00f067aa0ba902b7") == ""  # 非法入参 → 空串
+    )
+    print(f"    出站构造与回环：{'正确' if build_ok else '异常'}")
+
+    # 3) 采样决策矩阵（与 OTel 采样器语义对齐）
+    tid = "4bf92f3577b34da6a3ce929d0e0e4736"
+    matrix = [
+        ("always_on", 1.0, None, True),
+        ("always_off", 1.0, None, False),
+        ("traceidratio", 0.0, None, False),
+        ("traceidratio", 1.0, None, True),
+        ("parentbased_always_on", 1.0, True, True),
+        ("parentbased_always_on", 1.0, False, False),
+        ("parentbased_always_on", 1.0, None, True),
+        ("parentbased_always_off", 1.0, None, False),
+        ("parentbased_traceidratio", 0.5, False, False),  # 父方未采样 → 直接丢弃
+        ("some_future_sampler", 1.0, None, True),  # 未知采样器宁可多留
+    ]
+    matrix_ok = all(
+        decide_sampling(sampler, ratio, tid, parent) == expected
+        for sampler, ratio, parent, expected in matrix
+    )
+    deterministic = decide_sampling("traceidratio", 0.3, tid, None) == decide_sampling(
+        "traceidratio", 0.3, tid, None
+    )
+    print(
+        f"    采样矩阵：{'正确' if matrix_ok else '异常'}｜同 trace 结论可复现={deterministic}"
+    )
+
+    # 4) 跨进程延续：本 trace 延续远端 trace_id，第一个根 span 挂到远端 span 之下
+    parent = parse_traceparent(good)
+    assert parent is not None
+    trace_id = tracer.start_trace("doctor-prop-task", parent=parent)
+    with tracer.span("doctor.propagation.root", kind="server") as root:
+        outbound = tracer.current_traceparent()
+    continuation_ok = (
+        trace_id == parent.trace_id
+        and root is not None and root.parent_span_id == parent.span_id
+        and outbound.startswith(f"00-{parent.trace_id}-")
+    )
+    finished = tracer.finish_trace("doctor-prop-task")
+    exported = (EXPORT_DIR / "doctor-prop-task.json").exists()
+    tracer.drop("doctor-prop-task")
+    print(
+        f"    跨进程延续：trace_id 沿用={trace_id == parent.trace_id}"
+        f"｜根 span 挂远端={continuation_ok}｜出站头={outbound[:24]}…"
+        f"｜导出={exported}"
+    )
+
+    # 5) 未采样 trace：不导出（不落盘），但进程内轨迹完整
+    cfg = get_config()
+    original_sampler, original_ratio = cfg.tracing.sampler, cfg.tracing.sample_ratio
+    try:
+        cfg.tracing.sampler = "always_off"
+        unsampled_id = tracer.start_trace("doctor-unsampled-task")
+        with tracer.span("doctor.unsampled.probe"):
+            pass
+        unsampled_trace = tracer.finish_trace("doctor-unsampled-task")
+        kept = unsampled_trace is not None and len(unsampled_trace.spans) == 1
+        not_exported = not (EXPORT_DIR / "doctor-unsampled-task.json").exists()
+    finally:
+        cfg.tracing.sampler = original_sampler
+        cfg.tracing.sample_ratio = original_ratio
+    tracer.drop("doctor-unsampled-task")
+    print(
+        f"    导出面过滤：未采样 trace 仍有进程内 span={kept}"
+        f"｜未落盘={not_exported}（Jaeger 查不到属预期）"
+    )
+
+    ok = (
+        parse_ok and build_ok and matrix_ok and deterministic
+        and continuation_ok and exported and kept and not_exported
+    )
+    if not ok:
+        print("    ! 传播/采样异常：坏头会打坏任务创建，或采样把进程内轨迹也丢了")
+    return ok
+
+
+def check_digital_human() -> bool:
+    """校验数字人渲染样例：清单、惰性推进、租户隔离、http 失败路径与回收。
+
+    样例引擎必须「零依赖可回归」：不联网、不花钱，用流逝时间推进状态机；
+    http 适配样例在未配置网关时必须**显式失败**而不是假装成功。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.core.digital_human import (
+        build_manifest,
+        create_job,
+        drop_task,
+        get_job,
+        list_jobs,
+    )
+    from app.core.types import Artifact, TaskRecord
+
+    print("\n[数字人渲染样例]")
+
+    # 1) 渲染清单：分镜透传、无口播告警、时长偏差告警
+    script = {
+        "channel": "抖音",
+        "aspect_ratio": "9:16",
+        "duration_seconds": 30,
+        "hook": "开头 3 秒钩子",
+        "cta": "点击下单",
+        "shots": [
+            {
+                "shot": 1, "role": "钩子", "start_second": 0, "duration_seconds": 5,
+                "voiceover": "还在喝速溶咖啡？", "subtitle": "还在喝速溶咖啡？",
+                "visual": "手持咖啡杯特写", "camera": "近景",
+            },
+            {
+                "shot": 2, "role": "卖点", "start_second": 5, "duration_seconds": 20,
+                "voiceover": "", "visual": "产品陈列",
+            },
+        ],
+    }
+    manifest = build_manifest(script)
+    manifest_ok = (
+        manifest["shot_count"] == 2
+        and manifest["segments"][0]["spoken"] is True
+        and manifest["segments"][1]["spoken"] is False
+        and len(manifest["warnings"]) == 2  # 无口播 + 时长偏差各一条
+        and manifest["duration_seconds"] == 30
+    )
+    print(
+        f"    渲染清单：{manifest['shot_count']} 镜｜口播 {sum(1 for s in manifest['segments'] if s['spoken'])}"
+        f"｜告警 {len(manifest['warnings'])} 条｜{'正确' if manifest_ok else '异常'}"
+    )
+
+    # 2) 样例引擎惰性推进：排队 → 渲染 → 完成（用未来时间戳模拟流逝）
+    task = TaskRecord(
+        id="doctor-dh-1",
+        tenant="default",
+        artifacts=[
+            Artifact(id="doctor-dh-1-script", task_id="doctor-dh-1", type="video_script", content=script)
+        ],
+    )
+    job = create_job(task, provider="sample")
+    base = datetime.now(timezone.utc)
+    queued = job["status"] == "queued" and job["render_seconds"] >= 6
+
+    mid = list_jobs(task_id=task.id, now=base + timedelta(seconds=3))
+    rendering = len(mid) == 1 and mid[0]["status"] == "rendering" and 0 < mid[0]["progress"] < 100
+
+    final = list_jobs(task_id=task.id, now=base + timedelta(seconds=40))
+    done = (
+        len(final) == 1
+        and final[0]["status"] == "done"
+        and final[0]["progress"] == 100
+        and final[0]["video_url"].startswith("sample://")
+        and len(final[0]["history"]) >= 3  # 受理 → 渲染中 → 完成
+    )
+    lifecycle_ok = queued and rendering and done
+    print(
+        f"    样例引擎：{queued and '排队 OK' or '排队异常'} → "
+        f"{rendering and '渲染中 OK' or '渲染中异常'} → "
+        f"{done and '完成 OK' or '完成异常'}（video_url={final[0]['video_url'] if final else '—'}）"
+    )
+
+    # 3) 租户隔离：别的租户看不到这个作业
+    visible = get_job(job["id"], tenant="default") is not None
+    leaked = get_job(job["id"], tenant="acme") is not None or bool(list_jobs(tenant="acme"))
+    tenant_ok = visible and not leaked
+    print(f"    租户隔离：本租户可见={visible}｜跨租户泄漏={leaked}")
+
+    # 4) http 适配样例：未配置网关时显式失败（绝不假装成功）
+    #    该路径在发起任何远端尝试之前就失败，因此 attempts == 0 是正确语义
+    task2 = TaskRecord(
+        id="doctor-dh-2",
+        tenant="acme",
+        artifacts=[
+            Artifact(id="doctor-dh-2-script", task_id="doctor-dh-2", type="video_script", content=script)
+        ],
+    )
+    job2 = create_job(task2, provider="http")
+    http_ok = job2["status"] == "failed" and "未配置" in str(job2["error"])
+    print(f"    http 样例（未配网关）：status={job2['status']}｜error={str(job2['error'])[:40]}…")
+
+    # 5) 任务删除时回收作业
+    recovered = drop_task(task.id) == 1 and drop_task(task2.id) == 1
+    gone = not list_jobs(task_id=task.id) and not list_jobs(task_id=task2.id)
+    cleanup_ok = recovered and gone
+    print(f"    作业回收：recovered={recovered}｜清单已清空={gone}")
+
+    no_script = None
+    try:
+        create_job(TaskRecord(id="doctor-dh-3", tenant="default"), provider="sample")
+    except ValueError:
+        no_script = "raised"
+    script_guard_ok = no_script == "raised"
+    print(f"    无脚本防护：拒绝创建={script_guard_ok}")
+
+    ok = manifest_ok and lifecycle_ok and tenant_ok and http_ok and cleanup_ok and script_guard_ok
+    if not ok:
+        print("    ! 数字人样例异常：请检查 app/core/digital_human.py 的状态机与存储。")
+    return ok
+
+
 def check_multilingual() -> bool:
     """校验多语言本地化：语言识别、字数口径、原生创作、合规如实告知。
 
@@ -964,10 +1252,56 @@ def check_multilingual() -> bool:
     return ok
 
 
+def check_video() -> bool:
+    """校验视频脚本：需要判断、结构化产出、时间轴。
+
+    两个容易做假的点：① 图文渠道也硬塞一份脚本（噪声）；② 脚本只有标题没有分镜/口播
+    （无法开拍）。因此断言既检查「该出的出、不该出的不出」，也检查结构完整性。
+    """
+    from app.knowledge.video import needs_video_script, required_sections, script_skeleton, video_spec
+
+    print("\n[视频脚本]")
+
+    cases = [
+        ("抖音", ["短视频脚本 1 支"], "短视频脚本（黄金 3 秒钩子 + 分镜 + 口播 + 字幕）", True),
+        ("TikTok", ["1 video script"], "short vertical video", True),
+        ("小红书", ["图文笔记 1 篇"], "图文笔记（封面 + 6-9 张图 + 正文）", False),
+        ("公众号", ["长图文 1 篇"], "长图文", False),
+        ("小红书", ["短视频脚本 1 支"], "图文笔记", True),
+    ]
+    decide_ok = True
+    for channel, deliverables, fmt, expected in cases:
+        need, _ = needs_video_script(channel=channel, deliverables=deliverables, channel_format=fmt)
+        mark = "✓" if need == expected else "✗"
+        if need != expected:
+            decide_ok = False
+        print(f"    {mark} {channel:<8}{str(deliverables[0])[:14]:<16}→ 需要脚本={need}（期望 {expected}）")
+
+    spec = video_spec("抖音")
+    shots = script_skeleton("抖音")
+    timeline_ok = bool(shots) and [s["start_second"] for s in shots] == sorted(
+        s["start_second"] for s in shots
+    )
+    covered = sum(int(s["duration_seconds"]) for s in shots)
+    coverage_ok = abs(covered - spec.duration_seconds) <= 2
+    print(f"    抖音规格：{spec.duration_seconds}s {spec.aspect_ratio} {spec.shot_count} 镜"
+          f"｜骨架 {len(shots)} 镜｜时间轴有序={timeline_ok}｜时长覆盖={covered}s")
+    print(f"    必备段落：{'、'.join(required_sections())}")
+
+    if not decide_ok:
+        print("    ! 需要判断异常：图文渠道会被塞入无关脚本，或短视频渠道漏出脚本")
+    if not (timeline_ok and coverage_ok):
+        print("    ! 分镜骨架异常：时间轴无序或时长与目标不匹配")
+    return decide_ok and timeline_ok and coverage_ok
+
+
 def main() -> int:
     data_dir = isolate_data_dir()
+    # 必须在导入 app.* 之前固定提供方：config 在 import 时读取环境变量
+    provider = force_offline_provider()
     check_python()
     print(f"data dir    : {data_dir}")
+    print(f"LLM 提供方  : {provider}（自检固定离线，保证秒级可复现；真实链路用 scripts/real_check.py）")
     print()
     check_deps()
 
@@ -983,8 +1317,11 @@ def main() -> int:
         golden = check_golden()
         negation = check_negation()
         multilingual = check_multilingual()
+        video = check_video()
         traced = check_tracing(brief, chain)
         otlp = check_otel(brief)
+        propagated = check_trace_propagation()
+        dhuman = check_digital_human()
     except Exception as error:  # noqa: BLE001
         print(f"\n[失败] 自检演练异常：{type(error).__name__}: {error}")
         import traceback
@@ -1004,8 +1341,11 @@ def main() -> int:
         "黄金数据集判定器": golden,
         "否定语境判定": negation,
         "多语言本地化": multilingual,
+        "视频脚本": video,
         "调用轨迹追踪": traced,
         "OTLP 导出链路": otlp,
+        "W3C 传播与采样": propagated,
+        "数字人渲染样例": dhuman,
     }
     print()
     if all(checks.values()):
@@ -1015,7 +1355,9 @@ def main() -> int:
             "鉴权租户解析正确；SQLite 检查点可用（断点续跑有效）；离线评估器可复现且对合规风险敏感；"
             "黄金数据集回归判定器能正确识别回退、失败与门禁强度下降；"
             "调用轨迹 span 树成型、层级正确且可按 OTel 形状导出；"
-            "OTLP 导出链路 id 一致、层级与智能体归属保留。"
+            "OTLP 导出链路 id 一致、层级与智能体归属保留；"
+            "W3C traceparent 可跨进程延续、采样只作用于导出面；"
+            "数字人渲染样例的清单、惰性推进、租户隔离与失败路径均符合预期。"
         )
         return 0
 
@@ -1043,10 +1385,16 @@ def main() -> int:
         print("  · 否定语境判定异常，请检查 app/core/golden.py 的 _is_negated。")
     if not multilingual:
         print("  · 多语言异常，请检查 app/knowledge/language.py 与 mock 的本地化分支。")
+    if not video:
+        print("  · 视频脚本异常，请检查 app/knowledge/video.py 的判断与分镜骨架。")
     if not traced:
         print("  · 追踪异常，请检查 app/core/tracing.py 与编排层的 span 埋点。")
     if not otlp:
         print("  · OTLP 导出异常，请检查 app/core/otel.py（或先 pip install -r requirements.txt）。")
+    if not propagated:
+        print("  · 传播/采样异常，请检查 app/core/tracing.py 的 parse_traceparent / decide_sampling。")
+    if not dhuman:
+        print("  · 数字人样例异常，请检查 app/core/digital_human.py 的清单构建与状态机。")
     return 1
 
 

@@ -233,6 +233,19 @@ export function MetricsPanel({ metrics }: { metrics: MetricsView | null }) {
                   落盘失败 {tracing.exportFailures}
                 </Chip>
               ) : null}
+              {tracing.sampling ? (
+                <Chip
+                  tone="tone-idle"
+                  mono
+                  title="采样只作用于导出面（OTLP + 落盘）；未采样的 trace 在 Jaeger 查不到是预期行为"
+                >
+                  {tracing.sampling.sampler}
+                  {tracing.sampling.sampler.includes('traceidratio')
+                    ? ` @ ${tracing.sampling.sampleRatio}`
+                    : ''}{' '}
+                  · 导出 {tracing.sampling.traces_sampled} / 未导出 {tracing.sampling.traces_unsampled}
+                </Chip>
+              ) : null}
             </>
           ) : null}
           <Chip tone="tone-idle">

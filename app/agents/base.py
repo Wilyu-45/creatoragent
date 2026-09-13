@@ -126,6 +126,18 @@ class StructuredResult:
     metrics: AgentMetrics
 
 
+class TruncatedOutputError(Exception):
+    """模型输出被 ``max_tokens`` 截断，JSON 未闭合。
+
+    单独成型是为了让编排层能**针对性地重试**（调大 max_tokens 再试一次），
+    而不是把它当成普通的「模型胡说」直接失败。
+    """
+
+
+def request_max_tokens(response: Any) -> int:
+    return int(getattr(response, "max_tokens", 0) or 0)
+
+
 def call_with_prompts(
     ctx: AgentRunContext,
     meta: AgentMeta,
@@ -133,6 +145,8 @@ def call_with_prompts(
     user: str,
     purpose: str,
     context: dict[str, Any],
+    *,
+    schema: str = "",
 ) -> StructuredResult:
     """智能体唯一的结构化调用入口。
 
@@ -140,8 +154,18 @@ def call_with_prompts(
       - 真实模型：由 system/user 提示词驱动
       - 离线引擎：由 context 中的结构化数据驱动
     两条路径产出同一份 JSON 契约，上层无需感知差异。
+
+    ``schema`` 传入该智能体的输出结构（JSON 文本）。它带来两个真实收益：
+
+    1. **丢弃模式外的字段**：真实模型常额外附送 ``reasoning`` / ``notes`` /
+       逐条解释，白烧输出 token（实测某任务 completion 达 6.5 万 token）。
+    2. **提示词里显式要求精简**：在 schema 之后追加一条「不要附加解释字段」的约束。
+       这两点合起来把输出预算压回可控范围。
     """
-    from ..llm.json_utils import extract_json
+    from ..llm.json_utils import extract_json, strip_unknown_keys
+
+    if schema:
+        user = f"{user}\n\n【输出要求】只输出上述 JSON，不要附加任何未列出的字段或解释性文字。"
 
     response = chat(
         LLMRequest(
@@ -156,7 +180,16 @@ def call_with_prompts(
     )
 
     parsed = extract_json(response.content)
+    if isinstance(parsed, dict) and schema:
+        parsed = strip_unknown_keys(parsed, schema)
     if not isinstance(parsed, dict):
+        # 区分「模型胡说」与「被 max_tokens 截断」——两者的处置完全不同：
+        # 截断要调大 max_tokens，胡说要看提示词。含糊地报「无法解析」会让人查错方向。
+        if response.finish_reason == "length":
+            raise TruncatedOutputError(
+                f"{meta.id} 输出被 max_tokens 截断（completion={response.usage.completion_tokens}），"
+                f"JSON 未闭合：请调大 LLM_MAX_TOKENS 或精简该智能体的输出结构"
+            )
         snippet = response.content[:200]
         raise ValueError(f"{meta.id} 返回内容无法解析为 JSON：{snippet}")
 
@@ -165,7 +198,12 @@ def call_with_prompts(
         latency_ms=response.latency_ms,
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
-        cost_usd=cost_of(response.model, usage.prompt_tokens, usage.completion_tokens),
+        cost_usd=cost_of(
+            response.model,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            cached_tokens=usage.cached_tokens,
+        ),
         provider=response.provider,
         model=response.model,
         simulated=response.simulated,
@@ -367,6 +405,7 @@ __all__ = [
     "system_prompt",
     "call_with_prompts",
     "StructuredResult",
+    "TruncatedOutputError",
     "ArtifactDraft",
     "build_artifact",
     "ResultDraft",

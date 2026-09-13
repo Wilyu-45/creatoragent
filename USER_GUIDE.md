@@ -113,12 +113,13 @@ Vite 开发服务器在 `http://127.0.0.1:5273`，并把 `/api` 反向代理到 
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ 顶栏：服务状态 · 任务计数 · 新建任务 · 运行时设置                │
+│ 顶栏：服务状态 · 任务计数 · OTLP 状态 · 新建任务 · 运行时设置    │
 ├───────────────┬──────────────────────────────────────────────┤
 │ 任务列表       │ 任务详情                                      │
 │ （3s 轮询）    │  ├ 基本信息 + 质量评分卡                      │
 │               │  ├ 人工审批横幅（待审批时出现）                 │
 │               │  ├ 发布与效果回填面板（已排期后出现）            │
+│               │  ├ 数字人渲染面板（产出视频脚本后出现，开发样例） │
 │               │  └ 标签页：流水线看板 / 共享黑板产物 / 评估报告 / 调用轨迹 / 事件时间线 / 运行指标 │
 └───────────────┴──────────────────────────────────────────────┘
 ```
@@ -131,6 +132,8 @@ Vite 开发服务器在 `http://127.0.0.1:5273`，并把 `/api` 反向代理到 
 - **事件时间线**：SSE 实时推送，含事实与评审计数；事件带 `trace_id` / `span_id` 可回溯到 span。
 - **运行指标**：系统聚合、成本/缓存/租约/评估/**追踪**、逐智能体运行指标。
 - **发布与效果回填面板**：审批后出现，含「到期时间」列、投递 / 登记双按钮、投递状态 Chip 与「全部投递」。
+- **数字人渲染面板**：任务产出视频脚本后出现（**开发样例**，见 [13.6](#136-数字人渲染开发样例)）——
+  创建作业、进度条、渲染清单分镜表、成片地址；接哪家第三方服务由你决定。
 - **运行时设置**：模型 / 编排与门禁 / 成本与缓存 / **向量检索** / **发布投递** / **质量评估** / **访问令牌** / 知识库 / 记忆库。
 - **顶栏告警**：`checkpointer` 退化为内存实现时会显示「断点续跑不可用」——出现它说明进程重启后中断任务将无法续跑。
 
@@ -273,6 +276,10 @@ Vite 开发服务器在 `http://127.0.0.1:5273`，并把 `/api` 反向代理到 
 | `PUBLISH_RETRY` | `2` | 投递失败重试次数（指数退避） |
 | `PUBLISH_AUTO_DISPATCH` | `false` | 是否由后台定时器自动投递到期排期 |
 | `PUBLISH_TICK_SECONDS` | `60` | 后台自动投递的检查间隔（秒，最小 5） |
+| `DIGITAL_HUMAN_PROVIDER` | `sample` | 数字人样例通道：`sample`（内置样例引擎，离线模拟）/ `http`（对接自建渲染网关的适配样例） |
+| `DIGITAL_HUMAN_API_URL` / `_API_KEY` | 空 | http 样例的网关地址与 Bearer 鉴权；URL 留空时 http 通道**显式失败**，绝不假装成功 |
+| `DIGITAL_HUMAN_AVATAR` / `_TIMEOUT_MS` | 空 / `10000` | 默认形象 ID（创建作业时可被请求体覆盖）/ 单次 HTTP 超时（毫秒） |
+| `OTEL_TRACES_SAMPLER` / `_ARG` | `parentbased_always_on` / `1.0` | 导出面采样器与比例（OTel 语义；**进程内轨迹始终完整**，详见 [10.4](#104-与-opentelemetry-的关系请如实理解)） |
 | `JUDGE_MODE` | `advisory` | 评估介入方式：`off` / `advisory`（只打分）/ `blocking`（低分参与返工） |
 | `JUDGE_PROVIDER` | `offline` | 评估器：`offline`（规则，可复现）/ `llm`（走网关，失败自动回退） |
 | `JUDGE_MODEL` | 空 | `llm` 评估器的模型名；留空用当前 LLM 配置的模型 |
@@ -280,6 +287,12 @@ Vite 开发服务器在 `http://127.0.0.1:5273`，并把 `/api` 反向代理到 
 | `JUDGE_WEIGHT` | `0.2` | 评估分在综合质量分中的权重（0 = 完全不影响，可回滚） |
 | `CREATOR_API_TOKENS` | 空 | API 访问令牌；为空不鉴权。支持 `tok1,tok2` 或 `acme:tok1,beta:tok2` |
 | `CREATOR_DATA_DIR` | `<项目根>/data` | 持久化目录（测试/多实例隔离用） |
+| `CREATOR_VERIFY_PROVIDER` | 空 | 置 `openai` 可让验证脚本走真实网关（**默认强制 mock**，见下） |
+
+> **验证脚本默认强制离线**：`doctor.py` / `golden_eval.py` / `smoke_api.py` /
+> `verify_contracts.py` 断言的是契约与逻辑，必须秒级、可复现、不花钱。
+> 即使 `.env` 指向真实网关，它们也会强制 `mock`；
+> 需要量真实链路时用 `python scripts/real_check.py`，或设 `CREATOR_VERIFY_PROVIDER=openai`。
 
 ### 5.3 访问令牌与租户隔离
 
@@ -421,7 +434,7 @@ A11 把每次任务的最佳实践沉淀为跨任务知识卡片，供后续任�
 
 ### 9.1 数据集长什么样
 
-`golden/briefs/*.json` 是 **10 条固定用例**，覆盖**全部 7 个渠道**与 9 个行业：
+`golden/briefs/*.json` 是 **11 条固定用例**，覆盖**全部 7 个渠道**与 9 个行业：
 
 | 用例 | 渠道 | 行业 | 为什么选它 |
 | --- | --- | --- | --- |
@@ -485,7 +498,7 @@ A11 把每次任务的最佳实践沉淀为跨任务知识卡片，供后续任�
 
 「运行时设置 → **回归测试**」：
 
-- **跑全量回归**：依次执行 10 条用例（约一分钟，服务端后台任务，带进度条）；
+- **跑全量回归**：依次执行 11 条用例（约一分钟，服务端后台任务，带进度条）；
 - **快速跑 3 条**：改动中间态自查；
 - **基线对比表**：逐用例显示结论（持平/提升/回退/新增/缺失/失败）、质量分与增量、
   评估分、返工轮次（被拦截的用例带「拦」标记）、产物数与原因；
@@ -577,7 +590,8 @@ OTLP_ENDPOINT=http://localhost:4318 python -m app.main
 | span 结构 | ✅ kind / parent / attributes / status / 嵌套，与 OTel span 同构 |
 | 本地导出 | ✅ `data/traces/<task_id>.json`，含 `otel[]` 段 |
 | **OTLP 导出到 Jaeger** | ✅ 配置 `OTLP_ENDPOINT` 后启用，**id 与本地一致** |
-| 采样 / 跨进程上下文传播 | ⬜ 未实现（一个任务一个 trace，span 全在进程内） |
+| **采样（只作用于导出面）** | ✅ `OTEL_TRACES_SAMPLER` / `_ARG`，与 OTel 采样语义对齐（`parentbased_always_on` 默认 / `parentbased_traceidratio` / `always_off`…）；未采样的 trace 不转发、不落盘，但**进程内轨迹始终完整**——Jaeger 里查不到它是预期行为；入站 `traceparent` 的采样标记优先于本地比例，采样计数在 `/api/metrics` 与 `/api/health` 可见 |
+| **跨进程上下文传播** | ✅ W3C `traceparent`：入站 `POST /api/tasks` 解析该头，本地 trace **沿用远端 trace_id**、首个根 span 挂到远端 span 之下（Jaeger 里拼成完整一棵树）；出站 webhook（发布投递 / 数字人网关）自动携带当前 span 的 `traceparent`；坏头一律忽略，绝不影响业务请求 |
 
 一个实现细节值得说明：本项目的 span 是**自采集**的，转发时**手工构造 OTel 的
 `ReadableSpan`**，而不是用 OTel 的 API 重新创建 —— 否则 SDK 会生成新的 span_id，
@@ -610,6 +624,9 @@ docker compose up -d --build
 #   应用   http://127.0.0.1:8787
 #   Jaeger http://127.0.0.1:16686
 
+# Docker Hub 不可达时（受限网络 / 内网）：改用离线变体底座
+#   DOCKERFILE=Dockerfile.offline docker compose up -d --build
+
 # 只要应用、不接 Jaeger
 docker compose up -d --build app
 
@@ -619,6 +636,14 @@ docker compose down          # 加 -v 会连数据卷一起删
 ```
 
 数据落在命名卷 `creator-data`（容器内 `/data`）。**不挂卷则容器重建即丢任务与记忆库。**
+
+> **受限网络说明**：标准 `Dockerfile` 需从 Docker Hub 拉基础镜像。
+> 若 `registry-1.docker.io` 不可达，改用 `Dockerfile.offline` —— 它只用本地已有的
+> 基础镜像，并从镜像源安装 Python 依赖（通常只有 Docker Hub 被限制，PyPI 是通的）。
+> 该变体底座更大，属**可行方案而非更优方案**，网络恢复后请用标准 Dockerfile。
+>
+> **实测记录**：容器 `healthy`、`/` 返回前端、跑通完整任务（18 产物 / 质量分 94）、
+> `/data` 卷在容器删除重建后任务与记忆库全部保留。
 
 ### 11.2 单容器
 
@@ -748,7 +773,43 @@ INIT → STRATEGY → CREATIVE → PLANNING → DRAFTING → REVIEW → EDITING
 英文资产不会被中文任务当作「品牌调性基线」复用，反之亦然 ——
 复用一份**语言不对**的资产比不复用更糟（会被模型当成本次任务的语气参照）。
 
-### 13.5 已知边界
+### 13.5 视频脚本
+
+短视频形态的任务会产出**独立的「视频脚本」产物**（在「共享黑板产物」里按类型筛选即可看到）：
+
+| 内容 | 说明 |
+| --- | --- |
+| 钩子 | 黄金 3 秒，制造冲突或悬念 |
+| 分镜表 | 每镜含**时长 / 画面 / 口播 / 字幕 / 机位 / 意图** |
+| 口播表 | 按镜头对齐的逐句口播 |
+| 字幕表 | 含起止时间 |
+| 行动号召 / 拍摄要点 / 合规注意 | 可直接交给拍摄与运营 |
+
+形态参数按渠道给（抖音 45s/9:16/5 镜、视频号 60s、B 站 120s/16:9、TikTok 30s…），
+时间轴由知识层骨架生成，**保证单调且总时长与目标一致**。
+
+**只在需要时产出**：短视频渠道、交付物点名要脚本、或渠道形态含视频特征 —— 任一命中。
+图文渠道**不会**被塞入无关脚本（黄金数据集对这一点做了双向断言）。
+
+界面里以**时间轴**呈现：比例条 + 分镜表 + 时间轴覆盖率，并对「存在无口播分镜」直接告警。
+
+### 13.6 数字人渲染（开发样例）
+
+> **定位**：数字人渲染**不在本系统内实现** —— HeyGen / D-ID / 腾讯智影等服务的授权、
+> 形象库、计费与回调协议差异极大，**接哪家、要不要接属产品形态决策，由你决定**。
+> 系统提供的是一份可回归的接入样例（`app/core/digital_human.py`），让联调在买任何服务之前就能发生。
+
+- **前置条件**：任务已产出 `video_script` 产物（短视频形态会自动产出）；没有脚本时创建接口返回 409。
+- **两条样例通道**（创建作业时可用 `provider` 覆盖默认值）：
+  - `sample`（默认，零依赖）：离线确定性模拟「排队 → 渲染 → 完成」，并按脚本生成**渲染清单**
+    （每镜台词 / 字幕 / 机位 / 起止时间 / 是否有口播）；
+  - `http`：配置 `DIGITAL_HUMAN_API_URL` 后对接「POST 建任务 → GET 查状态」最小契约的自建网关；
+    未配置时**显式失败，绝不假装成功**。
+- **界面**：任务详情出现「数字人渲染」面板 —— 创建作业（形象 ID / 通道）、进度条、
+  渲染清单分镜表、成片地址（样例引擎为模拟地址）。
+- **生命周期**：状态在读取时惰性推进（不靠后台线程）；任务删除时渲染作业一并回收；按租户隔离。
+
+### 13.7 已知边界
 
 - **离线 Mock 引擎**：交付物（标题 / 正文 / CTA / 标签 / 最终交付件）是完整的目标语言
   （实测英文链路中文字符数为 0）；但**支撑类产物**（创意概念、内容策划、视觉指导、
@@ -843,11 +904,16 @@ INIT → STRATEGY → CREATIVE → PLANNING → DRAFTING → REVIEW → EDITING
 | POST | `/api/tasks/{id}/decide` | 人工裁决 |
 | GET | `/api/tasks/{id}/blackboard` | 共享黑板快照 |
 | GET | `/api/tasks/{id}/events?since=` | SSE 实时事件流 |
+| POST | `/api/tasks/{id}/digital-human` | 创建数字人渲染作业（**开发样例**；无视频脚本 409） |
+| GET | `/api/tasks/{id}/digital-human` | 查询渲染作业列表（读取时惰性推进样例状态机） |
 
 ```jsonc
 // POST /api/tasks
 { "brief": { "brand": "晨野", "product": "冷萃即饮咖啡", "channel": "小红书", "industry": "食品饮料" },
   "autoApprove": false }
+
+// POST /api/tasks/{id}/digital-human          （开发样例，两个字段均可省略）
+{ "avatar": "brand-avatar-01", "provider": "sample" }
 
 // POST /api/tasks/{id}/decide
 { "decision": "approve", "comment": "可以发布" }
@@ -897,6 +963,7 @@ INIT → STRATEGY → CREATIVE → PLANNING → DRAFTING → REVIEW → EDITING
 | `data/memory.json` | A11 记忆库卡片（含租户归属） |
 | `data/evaluations.json` | LLM-as-a-Judge 评估历史（单任务最多 20 条、全局 500 条） |
 | `data/traces/<task_id>.json` | 调用轨迹（span 树 + OTel 形状的 `otel[]` 段）；删除任务时一并回收 |
+| `data/digital_human.json` | 数字人渲染作业（**开发样例**）；删除任务时一并回收 |
 | `data/checkpoints.sqlite` | LangGraph 检查点（断点续跑） |
 | `data/settings.json` | 运行时配置 |
 
@@ -916,8 +983,9 @@ INIT → STRATEGY → CREATIVE → PLANNING → DRAFTING → REVIEW → EDITING
 ## 16. 自检与验收
 
 ```bash
-# 环境与能力自检（15 项：RAG 闭环 / 向量检索 / 租户隔离 / 检查点后端 / 评估器 /
-#   回归判定器 / 否定语境判定 / 追踪层级 / OTLP 导出）
+# 环境与能力自检（16 项：RAG 闭环 / 向量检索 / 租户隔离 / 检查点后端 / 评估器 /
+#   回归判定器 / 否定语境判定 / 多语言 / 视频脚本 / 追踪层级 / OTLP 导出 /
+#   W3C 传播与采样 / 数字人渲染样例）
 python scripts/doctor.py
 
 # 黄金数据集回归：与基线逐项对比 + 内容级硬约束，退出码 0 表示无回归
@@ -927,11 +995,15 @@ python scripts/golden_eval.py --coverage         # 只看渠道覆盖矩阵
 # 端到端验收：拉起真实服务，逐条核对 /api/* 与 SSE 契约（退出码 0 即通过）
 python scripts/smoke_api.py
 
-# 快速契约核验（约 15 秒）：只盯检查点后端 / 评估 / 租户视角 / 追踪，改完相关代码先跑它
+# 快速契约核验（约 20 秒）：评估 / 租户视角 / 追踪 / 传播采样 / 数字人样例闭环，
+# 改完相关代码先跑它
 python scripts/verify_contracts.py
 
 # 容器化清单核验（不需要 Docker daemon）
 python scripts/check_deploy.py
+
+# 真实网关链路核验（延迟 / token / 成本 / 缓存命中 / 门禁结论）
+python scripts/real_check.py --tasks 1
 
 # 压测 / Prompt 调优基线（Mock 校验并发正确性；openai 量真实延迟与成本）
 python scripts/stress_llm.py -n 12 -c 4
@@ -942,11 +1014,13 @@ npm run typecheck
 npm run build
 ```
 
-`doctor.py` 覆盖 15 项：Mock 引擎收敛、记忆库 RAG 闭环、向量检索、发布排期、
+`doctor.py` 覆盖 16 项：Mock 引擎收敛、记忆库 RAG 闭环、向量检索、发布排期、
 鉴权租户解析、**记忆库租户隔离**、**断点续跑检查点后端**、**LLM-as-a-Judge 评估器**、
 **黄金数据集回归判定器**（9 个子断言证明它会判回归）、**否定语境判定**（10 个用例）、
 **调用轨迹追踪**（断言 span 树不是平铺列表、llm span 正确嵌套）、
-**OTLP 导出链路**（id 一致、层级与智能体归属保留、默认不加载 OTel）。
+**OTLP 导出链路**（id 一致、层级与智能体归属保留、默认不加载 OTel）、
+**W3C 传播与采样**（traceparent 解析/生成、坏头忽略、采样只影响导出面）、
+**数字人渲染样例**（渲染清单、惰性推进、租户隔离、http 失败路径与回收）。
 
 `smoke_api.py` 覆盖：主流程（建任务 → SSE → 挂起 → 裁决 → 归档）、自动审批、记忆闭环、
 **发布闭环（登记发布 → 回填 → A10 复盘）**、**自动投递 → 待发布队列**、
@@ -955,7 +1029,7 @@ npm run build
 错误分支（404/400/409）、持久化核对，
 以及**另起一个带鉴权的实例验证任务与记忆库的租户隔离**。
 
-### 13.1 持续集成
+### 16.1 持续集成
 
 `.github/workflows/ci.yml` 已把上述关卡全部接成自动化门禁，**无需任何模型密钥**
 （默认走内置离线引擎）：
@@ -982,10 +1056,11 @@ npm run build
 
 | # | 事项 | 为什么需要人 | 建议做法 |
 | --- | --- | --- | --- |
-| 1 | **验证 Docker 镜像构建与运行** | 开发机上 Docker daemon 未运行，镜像**未实机验证**；`check_deploy.py` 只能做静态核验 | 在装了 Docker 的机器执行 `docker build -t creator-agent-studio:latest .` 与 `docker compose up -d`，确认 `/data` 卷可写、Jaeger 能收到 trace |
+| 1 | ~~验证 Docker 镜像构建与运行~~ **已完成** ✅ | — | 已实测：`Dockerfile.offline` 构建成功（受限网络下绕开 Docker Hub），容器 `healthy`、前端可访问、跑通完整任务、`/data` 卷跨容器重建持久化 |
 | 2 | **设置生产访问令牌** | `CREATOR_API_TOKENS` 决定租户隔离边界；为空则完全不鉴权 | 生成强随机令牌，按 `acme:tok,beta:tok` 形式配置，放入 Secret 而非 ConfigMap |
-| 3 | **真实模型网关跑通并定基线** | Mock 的延迟与成本不代表真实链路；`COST_BUDGET_USD` 需要真实数据校准 | `LLM_PROVIDER=openai ... python scripts/stress_llm.py -n 6 -c 2`，据结果调 Prompt 与预算 |
-| 4 | **人工审核非中文市场的合规表述** | 系统只有中文广告法词库；其它语言的合规红线已写入提示词但**未经法规校验** | 由目标市场法务复核首批产出，必要时补当地词库 |
+| 3 | **用真实网关数据复测 Prompt 与预算** | 已跑通真实链路（DeepSeek）并量到首个基线：单任务约 **315s / 7.9 万 token / $0.04 / 质量分 62**；瓶颈是模型输出冗长与 A4 生成无来源主张导致 A6 否决 | 代码侧已完成：A4 提示词收紧「无来源数据一律不写」，A3/A5/A6/A11 增加输出体量控制（离线回归全绿）；**下一步是真实网关复测**（`python scripts/real_check.py`），按复测结果继续调 |
+| 4 | **人工审核非中文市场的合规表述** | 系统只有中文广告法词库；英文/日文/韩文/西语的合规红线已写入提示词但**未经法规校验** | 由目标市场法务复核首批产出，必要时补当地词库 |
+| 5 | **吊销并更换本次联调用的 API Key** | 该 DeepSeek Key 已在对话中明文出现，应视为已泄露 | 在 DeepSeek 控制台吊销并新建；新 Key 只写进 `.env`（已 gitignore），不要提交 |
 
 ### P1 — 影响可用性
 
@@ -1000,7 +1075,7 @@ npm run build
 
 | # | 事项 | 为什么需要人 |
 | --- | --- | --- |
-| 9 | **确定是否需要视频脚本交付物与数字人** | 两者需要明确产品形态；数字人还需选定第三方视频生成服务并接入 |
+| 9 | **选定数字人服务商并决定是否正式接入** | 系统提供的是接入样例（[13.6](#136-数字人渲染开发样例)：内置引擎 + http 适配）；正式接入需明确产品形态并选型服务商，网关契约见 `DIGITAL_HUMAN_API_URL` 说明 |
 | 10 | **决定横向扩展方案** | 多副本需先把共享黑板与检查点换成 PostgreSQL + Redis，属架构决策 |
 | 11 | **接入 OTel Collector / Jaeger 生产实例** | 本地用 compose 里的 all-in-one 即可；生产需要持久化存储与采样策略 |
 | 12 | **建立人工抽检机制** | 评估与门禁能拦住大部分问题，但品牌调性与创意质量最终仍需人判断 |
@@ -1160,7 +1235,7 @@ creator/
 │                        # smoke_api.py（端到端验收）、verify_contracts.py（快速契约核验）、
 │                        # check_deploy.py（容器化清单核验）、stress_llm.py（压测）
 ├── golden/              # 黄金数据集（随代码版本化的测试资产）
-│   ├── briefs/*.json    # 10 条固定用例（含内容级 expect 断言），覆盖全部 7 个渠道
+│   ├── briefs/*.json    # 11 条固定用例（含内容级 expect 断言），覆盖全部 7 个渠道
 │   └── baseline.json    # 基线分数 + 生成时的 rubric / engine
 ├── deploy/k8s.yaml      # Kubernetes 清单（ConfigMap/Secret/PVC/Deployment/Service/Ingress）
 ├── Dockerfile           # 多阶段镜像（Node 构建前端 → Python 运行时）

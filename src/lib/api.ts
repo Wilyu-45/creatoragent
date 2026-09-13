@@ -94,11 +94,24 @@ export interface PublicConfigView {
     weight: number;
     rubric: string;
   };
+  /** 数字人渲染接入样例设置（sample 内置引擎 / http 适配网关） */
+  digitalHuman: {
+    provider: string;
+    apiUrl: string;
+    avatar: string;
+    apiKeySet: boolean;
+    apiKeyMasked: string;
+    timeoutMs: number;
+  };
   /** 分布式追踪设置（OTLP 导出为只读配置，来自环境变量） */
   tracing: {
     otlpEndpoint: string;
     serviceName: string;
     otlpConfigured: boolean;
+    /** 采样器：parentbased_always_on / parentbased_traceidratio / … */
+    sampler: string;
+    /** traceidratio 的采样比例（0-1） */
+    sampleRatio: number;
   };
 }
 
@@ -410,6 +423,13 @@ export interface TracingMetricsView {
   exportPath: string;
   exportFormat: string;
   exportFailures: number;
+  /** 采样只作用于导出面（OTLP + 落盘），进程内轨迹始终完整 */
+  sampling: {
+    sampler: string;
+    sampleRatio: number;
+    traces_sampled: number;
+    traces_unsampled: number;
+  };
 }
 
 /** A11 记忆库的一条知识卡片（跨任务存活）。 */
@@ -546,6 +566,68 @@ export interface PublishQueueView {
   items: PublishQueueItem[];
 }
 
+/* ------------------------------------------------------------------ */
+/* 数字人渲染（开发样例）                                               */
+/* ------------------------------------------------------------------ */
+
+/** 渲染清单中的一段（由 video_script 分镜透传而来）。 */
+export interface DigitalHumanSegment {
+  shot: number;
+  role: string;
+  start_second: number;
+  end_second: number;
+  duration_seconds: number;
+  voiceover: string;
+  subtitle: string;
+  visual: string;
+  camera: string;
+  /** 是否有口播台词（无口播分镜数字人仅作画面演出） */
+  spoken: boolean;
+}
+
+/** 数字人渲染作业（sample 内置引擎按流逝时间惰性推进；http 走远端网关）。 */
+export interface DigitalHumanJobView {
+  id: string;
+  task_id: string;
+  tenant: string;
+  /** sample | http */
+  provider: string;
+  avatar: string;
+  /** queued | rendering | done | failed */
+  status: string;
+  progress: number;
+  script_artifact_id: string;
+  channel: string;
+  duration_seconds: number;
+  shot_count: number;
+  render_seconds: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+  video_url: string;
+  error: string;
+  attempts: number;
+  remote_id: string;
+  manifest: {
+    channel: string;
+    aspect_ratio: string;
+    duration_seconds: number;
+    shot_count: number;
+    hook: string;
+    cta: string;
+    segments: DigitalHumanSegment[];
+    warnings: string[];
+  };
+  history: { ts: string; from: string; to: string; note: string }[];
+}
+
+export interface DigitalHumanView {
+  task_id: string;
+  has_video_script: boolean;
+  jobs: DigitalHumanJobView[];
+}
+
 const TOKEN_KEY = 'creator-api-token';
 
 /** 读取本地保存的 API Token（后端启用 ``CREATOR_API_TOKENS`` 时需要）。 */
@@ -665,6 +747,12 @@ export const api = {
   tickPublish: () => request<{ due: number; dispatched: string[]; failed: string[] }>('/api/publish/tick', {
     method: 'POST',
   }),
+  digitalHuman: (id: string) => request<DigitalHumanView>(`/api/tasks/${id}/digital-human`),
+  createDigitalHuman: (id: string, payload: { avatar?: string; provider?: string } = {}) =>
+    request<{ task_id: string; job: DigitalHumanJobView }>(`/api/tasks/${id}/digital-human`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };
 
 /** 订阅任务实时事件流（SSE），返回取消订阅函数。 */

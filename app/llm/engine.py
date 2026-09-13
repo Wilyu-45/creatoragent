@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 
 from ..config import LLMSettings, get_config
@@ -24,6 +25,34 @@ from .types import LLMProvider, LLMRequest, LLMResponse
 log = create_logger("llm")
 
 _mock = MockProvider()
+
+#: 输出截断后的重试加成（thread-local）。
+#: 真实网关下 A3/A11 这类「结构化长输出」很容易撞上 max_tokens，
+#: 而它们的提示词本身是好的 —— 只需给更多输出空间。
+#: 用 thread-local 而不是给每个智能体加参数：编排线程与任务一一对应，
+#: 这样「重试时放大 token 上限」这件事对智能体完全透明。
+_MAX_TOKENS_BOOST_RATIO = 2.0
+_MAX_TOKENS_CEILING = 16384
+_token_boost = threading.local()
+
+
+def boost_max_tokens(factor: float = _MAX_TOKENS_BOOST_RATIO, *, ceiling: int = _MAX_TOKENS_CEILING) -> int:
+    """放大当前线程的输出上限，返回放大后的值（供日志展示）。"""
+    base = int(getattr(_token_boost, "value", 0) or 0)
+    source = base or get_config().llm.max_tokens
+    boosted = min(ceiling, max(source + 1, int(source * factor)))
+    _token_boost.value = boosted
+    return boosted
+
+
+def reset_max_tokens() -> None:
+    """清除放大（任务结束或成功返回后调用，避免污染后续步骤）。"""
+    _token_boost.value = 0
+
+
+def effective_max_tokens() -> int:
+    """当前线程实际使用的输出上限。"""
+    return int(getattr(_token_boost, "value", 0) or 0) or get_config().llm.max_tokens
 
 #: 本地推理服务通常不需要密钥，这里放宽判定。
 _NEEDS_KEY_RE = re.compile(
@@ -133,7 +162,10 @@ def chat(request: LLMRequest) -> LLMResponse:
                 response.model or getattr(provider, "model", ""),
                 usage.prompt_tokens,
                 usage.completion_tokens,
+                # 缓存命中的输入按低价档计费（DeepSeek 差价约 50 倍）
+                cached_tokens=usage.cached_tokens,
             ),
+            cached_tokens=usage.cached_tokens,
         )
         if cache_key is not None:
             response_cache.put(cache_key, response)
@@ -169,13 +201,20 @@ def _finish_llm_span(
             "llm.provider": response.provider,
             "llm.model": response.model,
             "llm.prompt_tokens": usage.prompt_tokens,
+            "llm.cached_tokens": usage.cached_tokens,
             "llm.completion_tokens": usage.completion_tokens,
             "llm.cached": cache_hit or response.cached,
             "llm.simulated": response.simulated,
             "llm.attempts": attempts,
             "llm.degraded": degraded or (response.degraded_reason or ""),
             "llm.cost_usd": round(
-                cost_of(response.model, usage.prompt_tokens, usage.completion_tokens), 6
+                cost_of(
+                    response.model,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    cached_tokens=usage.cached_tokens,
+                ),
+                6,
             ),
         },
     )

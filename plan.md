@@ -138,8 +138,10 @@ A2A 通信的核心消息格式：
 
 | 设计项 | 实际实现 | 差距 |
 |---|---|---|
-| OpenTelemetry 覆盖整个 Agent session 的 span | ✅ **已实现**：`app/core/tracing.py` 维护 trace/span 树（W3C trace_id / 16 位 span_id / parent / kind / attributes / status），编排层在 `graph.invoke`、每个智能体、门禁、评估、RAG 召回、发布投递、模型调用处埋点；`GET /api/tasks/{id}/trace` 提供 span 树与耗时聚合，界面「调用轨迹」为瀑布图 | 无采样；span 全部在进程内（一个任务一个 trace_id） |
-| OTLP 导出到 Jaeger | ✅ **已实现**：配置 `OTLP_ENDPOINT` 后经 OTel SDK 的 OTLP/HTTP exporter 转发，`docker compose up` 即带 Jaeger；**导出的 trace_id/span_id 与本地 JSON 完全一致** | 跨进程上下文传播未实现 |
+| OpenTelemetry 覆盖整个 Agent session 的 span | ✅ **已实现**：`app/core/tracing.py` 维护 trace/span 树（W3C trace_id / 16 位 span_id / parent / kind / attributes / status），编排层在 `graph.invoke`、每个智能体、门禁、评估、RAG 召回、发布投递、模型调用处埋点；`GET /api/tasks/{id}/trace` 提供 span 树与耗时聚合，界面「调用轨迹」为瀑布图 | 无（传播与采样见下两行） |
+| OTLP 导出到 Jaeger | ✅ **已实现**：配置 `OTLP_ENDPOINT` 后经 OTel SDK 的 OTLP/HTTP exporter 转发，`docker compose up` 即带 Jaeger；**导出的 trace_id/span_id 与本地 JSON 完全一致** | 无 |
+| W3C traceparent 跨进程传播 | ✅ **已实现**：入站 `POST /api/tasks` 解析 `traceparent` 头，本地 trace **沿用远端 trace_id**、首个根 span 挂到远端 span 之下（Jaeger 里拼成完整一棵树）；出站 webhook（发布投递 / 数字人网关）自动携带当前 span 的 `traceparent`；坏头一律忽略，绝不影响业务请求 | 无 |
+| 采样（只作用于导出面） | ✅ **已实现**：`OTEL_TRACES_SAMPLER` / `_ARG` 与 OTel 语义对齐（`parentbased_always_on` 默认 / `parentbased_traceidratio` / `always_off`…），入站 `traceparent` 的采样标记优先于本地比例；未采样的 trace 不转发、不落盘，但**进程内轨迹始终完整**；采样计数在 `/api/metrics` 与 `/api/health` 可见 | 无 |
 | Jaeger / LangSmith trace replay | 🔁 事件总线 `replay(since)` + span 树下钻（本地）＋ Jaeger UI（远端） | LangSmith 的 Prompt 版本管理与 replay 未接入 |
 | Grafana 业务看板 | 🔁 `/api/metrics` + 界面「运行指标」（含 span 耗时排行） | 未接 Grafana |
 
@@ -183,10 +185,10 @@ Turn Budget 限制每个 Session 的最大迭代轮数以防止失控成本和�
 
 | 设计目标 | 实际实现 |
 |---|---|
-| 组件级回归 | `scripts/doctor.py`：跑**真实智能体本体**（非生成器）验证契约漂移，并覆盖向量检索、租户隔离、检查点后端、评估器复现性、**回归判定器有效性**共 9 类检查 |
-| 集成级回归 | `scripts/smoke_api.py`：拉真实 uvicorn，逐条核对 `/api/*` 与 SSE 契约，含**另起带鉴权实例**验证租户隔离；`scripts/verify_contracts.py` 提供约 10 秒的快速版 |
+| 组件级回归 | `scripts/doctor.py`：跑**真实智能体本体**（非生成器）验证契约漂移，覆盖向量检索、租户隔离、检查点后端、评估器复现性、回归判定器有效性、传播/采样、数字人样例共 **16 项**检查 |
+| 集成级回归 | `scripts/smoke_api.py`：拉真实 uvicorn，逐条核对 `/api/*` 与 SSE 契约，含**另起带鉴权实例**验证租户隔离；`scripts/verify_contracts.py` 提供约 20 秒的快速版 |
 | 系统级评测 | `scripts/stress_llm.py`：并发正确性（租约残留归零、账本不串味）+ 真实网关下的延迟/成本基线 |
-| 黄金数据集 + LLM-as-a-Judge | ✅ 双轨落地：**规则评估器**（`app/core/judge.py`，可复现、即「尺子」）+ **黄金数据集**（`golden/`，固定 10 条用例 + 基线，`scripts/golden_eval.py` 判定回归）+ **模型评估器**（LLM-as-a-Judge，失败自动回退规则评估器） |
+| 黄金数据集 + LLM-as-a-Judge | ✅ 双轨落地：**规则评估器**（`app/core/judge.py`，可复现、即「尺子」）+ **黄金数据集**（`golden/`，固定 11 条用例 + 基线，`scripts/golden_eval.py` 判定回归）+ **模型评估器**（LLM-as-a-Judge，失败自动回退规则评估器） |
 
 **关键设计取舍**：评估是**旁路**，不是门禁。
 
@@ -203,7 +205,7 @@ Turn Budget 限制每个 Session 的最大迭代轮数以防止失控成本和�
 
 固定输入是把质量讨论从主观变客观的前提。数据集与判定规则：
 
-- **10 条用例**覆盖全部 7 个渠道 × 9 个行业，另含两个边界用例（极简 Brief、强监管行业）。
+- **11 条用例**覆盖全部 7 个渠道 × 9 个行业，另含边界用例（极简 Brief、强监管行业、英文多语言）。
 - **基线**记录质量分 / 评估分 / 返工轮次 / 产物数 / 事实准确率 / 品牌一致性 / 合规裁决序列，
   并绑定生成时的 `rubric` 与 `engine`（口径不同则拒绝直接比较）。
 - **判定**：分数回退超过容差、**返工轮次增加**（更慢更贵）、监管用例首轮合规未被拦截，
@@ -402,7 +404,7 @@ Turn Budget 限制每个 Session 的最大迭代轮数以防止失控成本和�
 | v1.1 | A3 内容策划、A10 数据分析 | ✅ 完成 |
 | v1.2 | A8 视觉、A9 渠道 SEO、多平台输出 | ✅ 完成（多平台为「适配稿 + 排期 + webhook 投递」） |
 | v1.3 | A11 记忆知识库、自动复盘与模板沉淀 | ✅ 完成（含关键词/向量混合 RAG、过期下线、**租户 + 语言隔离**、发布后复盘） |
-| v2.0 | 多语言本地化、视频脚本、A/B 测试闭环、自动发布 | 🟡 **大部分完成**：多语言（中/英/日/韩/西，原生创作 + 字数口径 + 合规如实告知）✅、A/B 闭环 ✅、自动发布 🟡（webhook 投递 + 到期队列）、视频脚本 🟡（抖音分镜已实现，独立交付物类型未做）、数字人 ⬜ |
+| v2.0 | 多语言本地化、视频脚本、A/B 测试闭环、自动发布、数字人 | 🟡 **大部分完成**：多语言（中/英/日/韩/西，原生创作 + 字数口径 + 合规如实告知）✅、**视频脚本（独立交付物 + 渠道时间轴）✅**、A/B 闭环 ✅、自动发布 🟡（webhook 投递 + 到期队列）、数字人 🟡（**开发样例完成**，正式接入由使用者决定） |
 
 **横切能力（不属任何单一版本，随需补齐）**：
 
@@ -410,15 +412,16 @@ Turn Budget 限制每个 Session 的最大迭代轮数以防止失控成本和�
 |---|---|---|
 | API 鉴权 + 任务/记忆库租户隔离（D17） | ✅ 完成 | 令牌 → 租户，越权一律 404，记忆库按租户分区与计量 |
 | LLM-as-a-Judge 评估流水线（D14） | ✅ 完成 | 六维评分、双评估器、按需评估、advisory/blocking 两档介入 |
-| 黄金数据集与回归门禁（D13/D14） | ✅ 完成 | 固定 10 条用例（全渠道覆盖）+ 基线对比 + 返工与门禁强度回退判定 |
+| 黄金数据集与回归门禁（D13/D14） | ✅ 完成 | 固定 11 条用例（全渠道覆盖）+ 基线对比 + 返工与门禁强度回退判定 |
 | CI 流水线（D18） | ✅ 完成 | `.github/workflows/ci.yml`：自检 / 质量回归 / 契约 / 端到端 / 并发 / 前端 / 文档一致性 |
 | 调用轨迹（OTel 数据模型 + OTLP 导出） | ✅ 完成 | span 树覆盖整个 Agent session + 耗时排行；配 `OTLP_ENDPOINT` 即转发到 Jaeger，id 与本地一致 |
 | 多语言本地化（v2.0） | ✅ 完成 | 中/英/日/韩/西语言画像；原生创作 + 按语言口径校字数 + 记忆库按语言分区 + 非中文合规如实告知 |
 | 断点续跑健康度可见性 | ✅ 完成 | `/api/health.checkpointer.kind` + 自检断言，防止静默退回内存检查点 |
-| 容器化与生产部署（Docker / K8s，D18 后半） | ✅ 完成 | 多阶段 Dockerfile + compose（含 Jaeger）+ k8s 清单 + 无需 daemon 的清单核验脚本 |
-| 视频脚本（v2.0） | 🟡 部分 | 抖音分镜/口播/字幕已实现；独立「短视频脚本」交付物类型未做 |
-| 数字人（v2.0） | ⬜ 未做 | 需第三方数字人视频服务，属产品形态决策 |
-| 跨进程 trace 上下文传播 / 采样 | ⬜ 未做 | 当前一个任务一个 trace_id，span 全在进程内 |
+| 容器化与生产部署（Docker / K8s，D18 后半） | ✅ 完成 | 多阶段 Dockerfile + **受限网络变体**（`Dockerfile.offline`）+ compose（含 Jaeger）+ k8s 清单 + 无需 daemon 的清单核验；已实机验证（容器 healthy、跑通任务、`/data` 卷持久化） |
+| 真实网关接入 | 🟡 进行中 | 已接 DeepSeek `deepseek-flash` 跑通并量到首版基线（单任务 ~315s / ~$0.04 / 质量分 62）；Prompt 调优待续 |
+| 视频脚本（v2.0） | ✅ 完成 | 独立 `video_script` 产物：钩子 + 分镜（时长/画面/口播/字幕/机位）+ 口播表 + 字幕表 + CTA + 拍摄要点；按渠道生成时间轴 |
+| 数字人（v2.0） | 🟡 开发样例完成 | **数字人渲染不在本系统内实现**（HeyGen / D-ID / 腾讯智影等授权、形象库、计费与回调协议差异极大，接哪家属产品形态决策）。系统提供可回归的接入样例 `app/core/digital_human.py`：`sample` 内置引擎（离线模拟「排队→渲染→完成」+ 按 `video_script` 生成渲染清单）与 `http` 适配样例（「POST 建任务 → GET 查状态」最小契约，未配置显式失败）；生命周期惰性推进、按租户隔离、任务删除一并回收；API + 前端面板齐备 |
+| 跨进程 trace 上下文传播 / 采样 | ✅ 完成 | W3C `traceparent` 入站解析（延续远端 trace_id）+ 出站 webhook 自动携带；`OTEL_TRACES_SAMPLER` 导出面采样（OTel 语义），进程内轨迹始终完整 |
 
 ### 5.4 验收指标实测（对应 4.6）
 
@@ -428,16 +431,16 @@ Turn Budget 限制每个 Session 的最大迭代轮数以防止失控成本和�
 | 单篇生成时间 | ≤ 5 分钟 | Mock 引擎下秒级（8 任务 / 并发 4：p50 5.98s、p99 6.57s）；真实模型取决于网关延迟 |
 | 返工后质量提升 | ≥ 30% | 首轮 A7 75 → 返工后 100 |
 | 合规通过率 | ≥ 98% | 返工 1 轮后 100%（`doctor.py`） |
-| 全链路可观测 | Trace 覆盖 100% | ✅ **span 树覆盖整个 Agent session**：实测单任务 42 个 span、3 个根（层级成型）、事件 126/127 带 trace_id；`llm.*` 全部正确嵌套在智能体/评估之下；配 `OTLP_ENDPOINT` 后 42 个 span 全部导出且 **trace_id/span_id 与本地一致**。跨进程传播未接入 |
-| 内容级硬约束 | 品牌名/关键词/阻断用语/标题字数全部达标 | ✅ 10 条用例 **136 项断言全通过**（`golden_eval.py`） |
+| 全链路可观测 | Trace 覆盖 100% | ✅ **span 树覆盖整个 Agent session**：实测单任务 42 个 span、3 个根（层级成型）、事件 126/127 带 trace_id；`llm.*` 全部正确嵌套在智能体/评估之下；配 `OTLP_ENDPOINT` 后 42 个 span 全部导出且 **trace_id/span_id 与本地一致**；W3C `traceparent` 跨进程传播与导出面采样已落地（入站延续远端 trace、出站 webhook 携带；采样只影响导出面，进程内轨迹完整），传播/采样/数字人样例已纳入 `doctor.py` 16 项自检与 `verify_contracts.py` |
+| 内容级硬约束 | 品牌名/关键词/阻断用语/标题字数全部达标 | ✅ 11 条用例 **151 项断言全通过**（`golden_eval.py`） |
 | 评估可复现性 | 同一输入同一分数 | ✅（离线评估器，`doctor.py` 断言） |
 | 评估对合规风险的敏感性 | 注入阻断用语必须显著压分 | ✅ 91.0 → 46.6，合规维度 5.0 → 0.0（`doctor.py` 断言） |
 | 租户隔离 | 跨租户零泄漏 | ✅ 任务越权 404、记忆库检索命中 0（`smoke_api.py` 独立鉴权实例断言） |
 | 并发正确性 | 活跃租约归零 | ✅ 0 冲突 / 0 残留（`stress_llm.py -n 8 -c 4`） |
-| 契约快速核验 | 新能力不静默回归 | ✅（`verify_contracts.py`，约 10s） |
-| 质量回归门禁 | 改动不得让质量变差 | ✅ 10 条黄金用例 10/10 持平；判定器 9 项偏差全部正确识别（`doctor.py`） |
+| 契约快速核验 | 新能力不静默回归 | ✅（`verify_contracts.py`，约 20s） |
+| 质量回归门禁 | 改动不得让质量变差 | ✅ 11 条黄金用例 11/11 持平；判定器 9 项偏差全部正确识别（`doctor.py`） |
 | 黄金用例渠道覆盖 | 全部渠道至少一条 | ✅ 7/7（`golden_eval.py --coverage`） |
-| 内容级质量门禁 | 品牌名 / 关键词 / 阻断用语 / 标题字数 | ✅ 136 项断言 0 失败（曾据此发现标题压缩 off-by-one 与交付标题超限两个真实缺陷） |
+| 内容级质量门禁 | 品牌名 / 关键词 / 阻断用语 / 标题字数 | ✅ 151 项断言 0 失败（曾据此发现标题压缩 off-by-one 与交付标题超限两个真实缺陷） |
 
 > 说明：上表中延迟与成本类指标在 **Mock 引擎** 下测得；真实模型链路需按 `scripts/stress_llm.py --provider openai` 复测后再校准基线。
 

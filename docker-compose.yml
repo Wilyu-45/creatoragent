@@ -15,7 +15,11 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
+      # 默认用标准 Dockerfile（从 Docker Hub 拉基础镜像）。
+      # **Docker Hub 不可达时**改用它：
+      #   DOCKERFILE=Dockerfile.offline docker compose up -d --build
+      # 该变体只用本地已有镜像作底座，已在受限网络下实测构建成功。
+      dockerfile: ${DOCKERFILE:-Dockerfile}
     image: creator-agent-studio:latest
     container_name: creator-app
     ports:

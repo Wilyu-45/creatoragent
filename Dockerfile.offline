@@ -1,0 +1,107 @@
+# Creator Agent Studio —— 受限网络下的镜像构建（不需要访问 Docker Hub）
+#
+# 为什么需要这个变体
+# ------------------
+# 标准 ``Dockerfile`` 从 Docker Hub 拉 ``node:22-alpine`` 与 ``python:3.12-slim``。
+# 在部分网络环境里 registry-1.docker.io 不可达（实测：连认证 token 都取不到），
+# 于是镜像永远构建不出来 —— 而「镜像能不能构建」是上线前的 P0 事项，
+# 不该因为网络策略就一直悬着。
+#
+# 思路：**只用本地已有的镜像**作底座。
+#   * ``langgenius/dify-api``  → Debian bookworm + Python 3.12 + 可用的 pip（运行阶段）
+#   * ``langgenius/dify-web``  → Node 22 + npm（构建前端）
+#   * Python 依赖从 PyPI 装 —— 容器内 PyPI 可达（实测仅 Docker Hub 不可达）
+#
+# 构建：
+#   docker build -f Dockerfile.offline -t creator-agent-studio:local .
+#
+# 取舍（如实说明）
+# ----------------
+# * 底座比 ``python:3.12-slim`` 大得多（带进了用不到的东西）。
+#   它是**受限网络下的可行方案，不是更优方案**；网络恢复后请用标准 Dockerfile。
+# * 依赖本地已缓存这两个镜像；换机器若没有，需要先自行准备等价底座。
+#
+# ⚠️ 前端的 **api 代理与静态托管** 与标准镜像完全一致，因此两者可互换部署。
+
+# ------------------------------------------------------------------ #
+# 阶段 1：构建前端（底座为本地已有的 Node 镜像）                        #
+# ------------------------------------------------------------------ #
+FROM langgenius/dify-web:1.16.1 AS web
+
+WORKDIR /web
+
+# ⚠️ 必须先把 NODE_ENV 置回 development：
+# dify-web 底座预设了 NODE_ENV=production，npm 会**跳过 devDependencies**，
+# 而本项目的前端构建工具（vite / typescript）全在 devDependencies 里 ——
+# 于是 `npm ci` 只装 1 个包、`npm run build` 报 `vite: not found`。
+# 这类「底座自带环境变量改变了安装语义」的问题，日志里只表现为命令找不到，
+# 极容易被误判成缓存或网络问题。
+ENV NODE_ENV=development
+
+# 先只拷依赖清单：依赖没变时该层可复用缓存
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY index.html vite.config.ts tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+# ------------------------------------------------------------------ #
+# 阶段 2：运行时                                                      #
+# ------------------------------------------------------------------ #
+FROM langgenius/dify-api:1.16.1 AS runtime
+
+# ⚠️ 底座以非 root 用户运行，而我们要往系统 Python 装依赖 ——
+# 显式声明 root，末尾再切回非 root 运行（这是「构建期特权、运行期最小权限」的标准做法，
+# 不要把整个镜像都以 root 跑）。
+USER root
+
+# dify 镜像把 venv 放在 PATH 前面，而那个 venv 里没有 pip。
+# 这里把系统 Python 放回最前，让 pip / python 都落到 /usr/local。
+ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    CREATOR_DATA_DIR=/data \
+    PORT=8787
+
+WORKDIR /app
+
+# pip 源可覆盖：部分地区直连 pypi.org 会被 TLS 中间设备打断
+# （实测报 SSLError: UNEXPECTED_EOF_WHILE_READING），换镜像源即可。
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 先装依赖（单独一层，改代码不必重装）
+COPY requirements.txt ./
+RUN /usr/local/bin/python -m pip install --no-cache-dir \
+        --index-url "${PIP_INDEX_URL}" \
+        --trusted-host "$(echo "${PIP_INDEX_URL}" | sed -e 's|https\?://||' -e 's|/.*||')" \
+        -r requirements.txt
+
+# 应用代码 + 文档 + 黄金数据集 + 前端产物
+COPY app ./app
+COPY scripts ./scripts
+COPY golden ./golden
+COPY creator.md plan.md MEMORY.md USER_GUIDE.md README.md ./
+COPY --from=web /web/dist ./dist
+
+# 非 root 运行
+RUN useradd --create-home --uid 10001 creator \
+    && mkdir -p /data \
+    && chown -R creator:creator /app /data
+USER creator
+
+VOLUME ["/data"]
+EXPOSE 8787
+
+# 探针用 python 而非 curl：dify 底座不保证有 curl，
+# 而 python 一定在（少一个「换个底座探针就失效」的隐患）。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD /usr/local/bin/python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/api/health', timeout=4).status == 200 else 1)"
+
+# ⚠️ 底座带了自己的 ENTRYPOINT（会去启动 dify 的 gunicorn，报 `gunicorn: not found`）。
+# 必须清空它，否则 CMD 根本不生效。
+ENTRYPOINT []
+
+CMD ["/usr/local/bin/python", "-m", "app.main"]

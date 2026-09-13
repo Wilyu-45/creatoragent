@@ -76,7 +76,11 @@ SYSTEM = system_prompt(
 - 卡片正文必须自包含：脱离本次任务也能读懂，禁止出现「上述」「本文档提到的」这类指代
 - 只沉淀**已被验证**的内容：合规未通过或事实存疑的表述不得写入知识库
 - 不得把一次性的事实（如某次活动的具体数字）包装成通用规律
-- 只输出 JSON，不输出任何解释性文字""",
+- 只输出 JSON，不输出任何解释性文字
+
+输出体量（控制 token，超量从简）：
+- knowledge_cards ≤4 张、templates ≤3 个、gaps ≤3 条
+- 每张卡片 content ≤150 字：写「可复用的结论」，不复述创作过程""",
 )
 
 SCHEMA = """{
@@ -232,6 +236,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
             "artifact_count": len(ctx.artifacts),
             "memory": recalled,
         },
+        schema=SCHEMA,
     )
 
     content = normalize(result.data)

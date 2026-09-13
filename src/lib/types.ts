@@ -190,6 +190,7 @@ export type ArtifactType =
   | 'fact_check_report'
   | 'compliance_report'
   | 'visual_brief'
+  | 'video_script'
   | 'channel_adaptation'
   | 'publish_plan'
   | 'effect_report'

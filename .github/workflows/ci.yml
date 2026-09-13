@@ -1,0 +1,148 @@
+name: CI
+
+# 为什么这些关卡能做成 CI
+# ------------------------
+# 本项目的验证脚本全部设计为「无外部依赖 + 退出码即结论」：
+#   · doctor.py            环境与能力自检（八项，含断点续跑后端与回归判定器）
+#   · golden_eval.py       黄金数据集回归（固定 10 条 Brief，与基线逐项对比）
+#   · smoke_api.py         端到端验收（真实 uvicorn + 全部 /api 契约 + 租户隔离）
+#   · verify_contracts.py  约 10 秒的快速契约核验
+#   · stress_llm.py        并发正确性（黑板租约残留必须归零）
+# 默认走内置离线引擎（LLM_PROVIDER=mock），因此**不需要任何模型密钥**，
+# 这也让「质量回归」能在 PR 阶段就拦住，而不是等到上线前才发现 Prompt 改坏了。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新提交取消旧运行，避免排队浪费
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端 · 自检 / 回归 / 契约
+    runs-on: ubuntu-latest
+    env:
+      # 统一使用离线引擎：CI 不依赖任何外部模型网关
+      LLM_PROVIDER: mock
+      PYTHONNOUSERSITE: "1"
+      PYTHONIOENCODING: utf-8
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 1) 能力自检：环境、智能体链路、租户隔离、检查点后端、评估器、回归判定器
+      - name: doctor.py（八项自检）
+        run: python scripts/doctor.py
+
+      # 2) 黄金数据集回归：分数回退超过容差 / 返工轮次增加 / 监管用例未被拦截 → 失败
+      #    这是「Prompt 或规则改动是否让质量变差」的唯一量化门禁。
+      - name: golden_eval.py（质量回归）
+        run: python scripts/golden_eval.py
+
+      # 3) 快速契约核验：先跑它，失败时不必等完整的 smoke
+      - name: verify_contracts.py（契约核验）
+        run: python scripts/verify_contracts.py
+
+      # 4) 容器化清单核验：Dockerfile 的 COPY 路径 / compose 与 k8s 的环境变量 /
+      #    探针路径是否与代码一致。**不需要 Docker daemon**，因此 CI 里可稳定运行。
+      #    这一关拦的是「只有 docker build 才会失败」的那类错误。
+      - name: check_deploy.py（容器化清单核验）
+        run: python scripts/check_deploy.py
+
+      # 5) 端到端验收：真实 uvicorn + 全部接口 + 独立鉴权实例的租户隔离
+      - name: smoke_api.py（端到端验收）
+        run: python scripts/smoke_api.py
+
+      # 6) 并发正确性：黑板租约残留必须归零、成本账本不能串味
+      - name: stress_llm.py（并发基线）
+        run: python scripts/stress_llm.py -n 8 -c 4
+
+      # 失败时把服务端日志与临时数据一并留下，便于定位
+      - name: 上传诊断产物
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-diagnostics
+          path: |
+            .doctor-data/**/server.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  frontend:
+    name: 前端 · 类型检查与构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 构建
+        run: npm run build
+
+  # 文档与代码的一致性：契约变化必须同步文档，否则这类项目最容易「代码跑得通、
+  # 文档说的是上个版本」。这里只做轻量校验（关键章节与关键配置项是否仍被提及）。
+  docs:
+    name: 文档 · 关键内容同步检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验四份文档的关键章节存在
+        run: |
+          set -e
+          fail=0
+          check() {
+            if ! grep -q "$2" "$1"; then
+              echo "::error file=$1::缺少关键内容：$2"
+              fail=1
+            fi
+          }
+          check README.md     "快速开始"
+          check README.md     "需要人工协助的事项"
+          check creator.md    "LLM-as-a-Judge"
+          check creator.md    "记忆库隔离"
+          check creator.md    "黄金数据集"
+          check creator.md    "调用轨迹"
+          check creator.md    "OTLP"
+          check creator.md    "多语言"
+          check plan.md       "黄金数据集"
+          check MEMORY.md     "make_temp_dir"
+          check USER_GUIDE.md "质量评估"
+          check USER_GUIDE.md "回归测试"
+          check USER_GUIDE.md "调用轨迹"
+          check USER_GUIDE.md "容器化"
+          exit $fail
+
+      - name: 校验新增接口已写入接口速查
+        run: |
+          set -e
+          for path in "/api/evaluations" "/api/golden" "/api/memory" "/trace"; do
+            if ! grep -q -- "$path" USER_GUIDE.md; then
+              echo "::error file=USER_GUIDE.md::接口速查缺少 $path"
+              exit 1
+            fi
+          done

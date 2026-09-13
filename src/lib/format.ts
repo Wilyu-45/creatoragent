@@ -107,6 +107,7 @@ export const EVENT_ICON: Record<AgentEvent['type'], string> = {
   'approval.required': '⏸',
   'approval.decided': '✔',
   'blackboard.write': '▤',
+  'judge.scored': '⚖',
   log: '·',
 };
 

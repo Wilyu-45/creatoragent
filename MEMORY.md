@@ -55,7 +55,8 @@ npm run dev:web      # 仅前端，/api 代理到 8787
 - `PORT` / LLM 相关配置见 `.env.example`。
 - 本轮新增：`EMBEDDING_PROVIDER/DIM/WEIGHT/BASE_URL/API_KEY/MODEL`（记忆库向量检索）、
   `PUBLISH_WEBHOOK_URL/PUBLISH_RETRY/PUBLISH_AUTO_DISPATCH/PUBLISH_TICK_SECONDS`（发布投递）、
-  `CREATOR_API_TOKENS`（开启后 `/api/*` 需携带 Token，并映射到租户做数据隔离）。
+  `CREATOR_API_TOKENS`（开启后 `/api/*` 需携带 Token，并映射到租户做数据隔离）、
+  `JUDGE_MODE/JUDGE_PROVIDER/JUDGE_MODEL/JUDGE_PASS_THRESHOLD/JUDGE_WEIGHT`（LLM-as-a-Judge 评估）。
 
 ---
 
@@ -85,7 +86,7 @@ app/
     industry.py          # 渠道规范、SEO 模式、建议发布时段、行业画像
     compliance.py        # 广告法词库扫描、品牌语气检查、自动改写
     visual.py            # 视觉风格库（色彩/构图/光线/Prompt 片段 + 渠道画幅）
-    memory.py            # A11 记忆库：知识卡片持久化 + 关键词/向量混合检索（RAG）
+    memory.py            # A11 记忆库：卡片持久化 + 关键词/向量混合检索（RAG）+ 租户分区
     embedding.py         # 文本向量化：本地确定性 hashing embedding + 可选 OpenAI /embeddings
   agents/
     base.py              # 统一上下文/提示词/产物与结果构造
@@ -93,13 +94,62 @@ app/
     registry.py          # 已实现 AGENTS（A1-A11）+ PLANNED_AGENTS（仅 A0）
   api/routes.py          # REST + SSE 路由（契约与 TS 版逐字段对齐）
 scripts/
-  doctor.py              # 环境 + 智能体链路自检（含抖音分支、真实 A11 智能体的 RAG 闭环、向量/投递/鉴权）
-  smoke_api.py           # 端到端验收（REST/SSE/错误分支/持久化/静态托管/新增阶段/记忆召回/投递队列）
+  doctor.py              # 环境 + 能力自检（12 项：含租户隔离、检查点后端、评估器、回归判定器）
+  golden_eval.py         # 黄金数据集回归（固定 10 条用例 vs 基线；--update-baseline / --coverage）
+  smoke_api.py           # 端到端验收（REST/SSE/错误分支/持久化/评估/独立实例的鉴权与租户隔离）
+  verify_contracts.py    # 快速契约核验（约 10s：检查点后端 / 评估 / 租户视角 / 新事件）
   stress_llm.py          # 压测与 Prompt 调优基线（并发正确性 / 延迟分位 / 成本缓存 / 租约残留）
+golden/                  # 黄金数据集（随代码版本化的测试资产，不在 data/ 下）
+  briefs/*.json          # 10 条固定用例，覆盖全部 7 个渠道
+  baseline.json          # 基线分数 + 生成时的 rubric / engine
+.github/workflows/ci.yml # CI：自检 / 质量回归 / 契约 / 端到端 / 并发 / 前端 / 文档一致性
+.doctor-data/            # 自检与冒烟脚本的临时数据目录（已 gitignore，可安全删除）
 src/                     # 前端；契约类型自持于 src/lib/types.ts
-  components/MemoryPanel.tsx   # 设置抽屉「记忆库」标签页：统计 + 检索召回 + 卡片列表
+  components/MemoryPanel.tsx   # 设置抽屉「记忆库」标签页：统计 + 租户 + 检索召回 + 卡片列表
   components/PublishPanel.tsx  # 发布登记 + 效果回填（触发 A10 复盘）
+  components/JudgePanel.tsx    # 「评估报告」标签页：六维评分 + 评估历史 + 按需评估
+  components/GoldenPanel.tsx   # 设置抽屉「回归测试」标签页：跑回归 + 基线对比 + 覆盖矩阵
 ```
+
+### 核心层新增文件（第五轮）
+
+| 文件 | 职责 |
+| --- | --- |
+| `app/core/judge.py` | LLM-as-a-Judge 评估器：六维评分、离线规则版 + 模型版（失败回退）、评分口径版本 |
+| `app/core/evaluations.py` | 评估历史存储（`data/evaluations.json`）：记录 / 查询 / 聚合统计 |
+
+### 黄金数据集与回归门禁（第六轮）
+
+| 文件 | 职责 |
+| --- | --- |
+| `golden/briefs/*.json` | **10 条固定用例**，覆盖全部 7 个渠道 × 9 个行业 + 两个边界用例 |
+| `golden/baseline.json` | 基线分数（含生成时的 `rubric` / `engine`），随代码版本化 |
+| `app/core/golden.py` | 数据集加载、覆盖矩阵、基线读写、`compare()` 回归判定 |
+| `app/core/golden_runner.py` | 执行器：驱动真实流水线 → 压缩为标量 → 后台任务状态机 |
+| `scripts/golden_eval.py` | CLI：跑回归 / 更新基线 / 查看覆盖，退出码即结论 |
+| `.github/workflows/ci.yml` | CI：自检 / 质量回归 / 契约 / 端到端 / 并发 / 前端 / 文档一致性 |
+
+### 调用轨迹（第七轮）
+
+| 文件 | 职责 |
+| --- | --- |
+| `app/core/tracing.py` | OTel 数据模型的进程内实现：trace/span 树、thread-local span 栈、耗时占比、OTel 形状导出 |
+| `data/traces/<task_id>.json` | 每个任务的 trace 落盘（含 `otel[]` 段，可直接喂 OTLP collector） |
+| `src/components/TracePanel.tsx` | 「调用轨迹」标签页：可折叠 span 树 + 瀑布图 + 耗时排行 |
+
+### OTLP 导出与容器化（第八轮）
+
+| 文件 | 职责 |
+| --- | --- |
+| `app/core/otel.py` | 把进程内 span 转发到真实 OTel（OTLP/HTTP）：手工构造 `ReadableSpan` 保证 id 一致；默认不加载 SDK |
+| `Dockerfile` / `.dockerignore` | 多阶段镜像：Node 构建前端 → Python 运行时不带构建工具链 |
+| `docker-compose.yml` | 应用 + Jaeger 一键起；命名卷持久化 `/data` |
+| `deploy/k8s.yaml` | Namespace / ConfigMap / Secret / PVC / Deployment / Service / Ingress |
+| `scripts/check_deploy.py` | **不需要 Docker daemon** 的清单一致性核验（COPY 路径 / 环境变量 / 探针免鉴权） |
+
+> 为什么数据集放 `golden/` 而不是 `data/`：`data/` 是运行期产物（已 gitignore），
+> 而黄金数据集是**随代码版本化的测试资产** —— 它必须能被 review、被 diff、被追责，
+> 否则「改了基线让 CI 变绿」就成了一种无人察觉的作弊。
 
 ---
 
@@ -206,6 +256,184 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 - **验收同步**：`doctor.py` 新增 `check_embedding / check_publisher / check_auth`（`main` 汇总五项检查）；
   `smoke_api.py` 增加 settings（embedding/publish/authRequired）、向量检索字段、dispatch → queue 断言。
 
+### 4.1d 后端 · 第五轮：租户记忆库 + LLM-as-a-Judge（2026-09-13，已完成）
+
+- **记忆库租户隔离（补齐 creator.md A11「管理权限」与 plan.md D17 的最后一块拼图）**：
+  - `MemoryCard` 新增 `tenant` 字段（旧数据缺字段时按 `default` 读取，**无需迁移脚本**）；
+    去重键从 `sha1(kind|title|content)` 改为 `sha1(tenant|kind|title|content)`——
+    不同租户的同名知识各自存活，同租户内仍然幂等。
+  - `MemoryStore.remember/retrieve/list_cards/stats` 全部新增 `tenant` 参数；
+    `_evict` 改为**按租户计量**（容量是「每租户 500 条」，否则先入库的租户会挤掉后来者的名额）。
+  - `AgentRunContext` 新增 `tenant` 字段（由编排器从 `TaskRecord.tenant` 注入），
+    `A11` 与编排层 `_memory_hits()` 的检索/写入都带租户；
+    `MemoryHit.to_dict()` 与提示词渲染（多租户时标注归属租户）同步带上租户。
+  - API：`GET /api/memory`、`POST /api/memory/search` 按 `request.state.tenant` 过滤；
+    `stats()` 新增 `tenant`/`tenants`/`global_total`（仅计数，不泄露内容）。
+- **LLM-as-a-Judge 评估流水线（plan.md 4.3 D14 / 2.5「黄金数据集评测」）**：
+  - 新增 `app/core/judge.py`：六维评分（**brief_fit 0.25｜compliance 0.20｜structure 0.15｜
+    brand_voice 0.15｜fact_safety 0.15｜appeal 0.10**）加权汇总为 0–100；
+    合规维度直接复用 A7 的 `scan_compliance`（同一份词库，避免两套口径互相打脸）。
+  - **双评估器**：`offline`（确定性规则，零依赖可离线、同一输入永远同一分数）+ `llm`
+    （走当前 OpenAI 兼容网关，**任何异常静默回退 offline** 并标注 `fallback`/`fallback_reason`）。
+  - 新增 `app/core/evaluations.py`：评估历史落 `data/evaluations.json`
+    （单任务最多 20 条、全局 500 条，`record/list/latest/stats`）；
+    `build_record()` 落盘前把总分统一到 1 位小数。
+  - 编排：`_judge_step()` 在**门禁时刻**（`kind=final`）与**交付前**各评估一次，
+    并发 `judge.scored` 事件；`_apply_judge_to_scorecard()` 按 `judge.weight`（默认 0.2）
+    把评估分混入 `scorecard.overall`（`weight=0` 与历史行为逐位一致，可回滚）。
+  - 门禁：`decide_gate(judge=, judge_mode=)` 支持 `off / advisory（默认，只记录不改裁决）/ blocking`
+    （`reject` 升级人工、`review` 计入返工理由），门禁事件 `payload.judge` 带上完整报告。
+  - 接口：`GET /api/evaluations`（历史 + 聚合 + 当前口径）、`POST /api/tasks/{id}/evaluate`
+    （按需评估「评分台」，改完 Prompt 不必重跑流水线）、`/api/metrics.system.judge` 聚合、
+    `/api/settings` 新增 `judgeMode/judgeProvider/judgeModel/judgePassThreshold/judgeWeight`。
+- **断点续跑健康度可见性（本轮自检拦下的真实缺陷）**：
+  - 自检原本用 `tempfile.mkdtemp`（`0o700` 目录）当数据目录，在本机沙箱下**写入被拒**，
+    于是记忆库落盘静默失败、`SqliteSaver` 退回内存检查点，而自检依然全绿——
+    「断点续跑」这条能力从未被真正覆盖过。
+  - 新增 `app/core/util.make_temp_dir()`（逐级 `mkdir` + 随机后缀，避开 `0o700` ACL），
+    `doctor.py` / `smoke_api.py` / `stress_llm.py` 全部改用它，数据目录统一落在
+    `<项目根>/.doctor-data/`（已 gitignore）。
+  - `Orchestrator` 暴露 `checkpointer_kind` / `checkpointer_error`，经 `/api/health.checkpointer`
+    透出；前端顶栏在退化为内存实现时显式告警「断点续跑不可用」。
+- **契约扩展**：`AgentEventType` 新增 `judge.scored`（前后端 + `EVENT_ICON` 同步）；
+  `MemoryCard`/`MemoryHit` 新增 `tenant`；`MemoryView.stats` 新增 `tenant/tenants/global_total`；
+  `RuntimeConfig` 新增 `judge` 设置组；`HealthView` 新增 `checkpointer`。
+- **前端同步**：新增 `src/components/JudgePanel.tsx`（六维得分条 + 证据 + 评估历史 + 全库聚合 +
+  「规则评估 / 模型评估」双按钮）→ App 新增「评估报告」标签页；任务头部新增最近评估分 Chip；
+  `MetricsPanel` 新增「质量评估」区块；`SettingsDrawer` 新增评估设置组；
+  `MemoryPanel` 新增租户 chips 与卡片「租户」列；`Topbar` 新增断点续跑告警。
+- **验收同步**：`doctor.py` 扩到**八项检查**（新增 `check_memory_tenant / check_checkpointer / check_judge`）；
+  `smoke_api.py` 新增评估流水线断言、`evaluations.json` 持久化断言，并**另起一个带
+  `CREATOR_API_TOKENS` 的实例**验证 401 / 任务越权 404 / 记忆库不串租户 / 按租户统计。
+
+### 4.1e 后端 · 第六轮：黄金数据集 + 回归门禁 + CI（2026-09-13，已完成）
+
+- **补齐 mock 引擎的评估路径（先修掉上一轮留下的缺口）**：
+  `GENERATORS` 新增 `"judge.evaluate": generate_judge`。此前默认 `provider=mock` 下
+  `judge_with_llm()` 必然抛错并回退 —— 于是 `_normalize_llm_axes()` 那条**成功分支**
+  在离线环境下永远跑不到，而它恰恰最容易因字段名漂移而坏。现在用规则评估器的真实
+  打分作为「模型回答」，成功分支也纳入离线可测范围（分数来源仍是 `judge_offline`，
+  不是第二个口径）。
+- **黄金数据集（plan.md D13）**：
+  - `golden/briefs/*.json` —— **10 条固定用例**，覆盖全部 **7 个渠道 × 9 个行业**，
+    另含两个刻意设计的边界用例：`xiaohongshu_minimal_brief`（无关键词/约束/交付物，
+    验证缺字段不崩、且「无关键词」在评估器里按满分计而不是误判 0 分）与
+    `ecommerce_medical_strict`（强监管，验证合规门禁**真的拦得住**）。
+  - `golden/baseline.json` —— 基线，逐用例记录质量分 / 评估分（门禁时刻 + 交付前）/
+    返工轮次 / 产物数 / 事实准确率 / 品牌一致性 / 合规裁决序列 / 首轮是否被拦，
+    并绑定生成时的 `rubric` 与 `engine`（口径或引擎不同则拒绝直接比较）。
+  - `app/core/golden.py` —— `load_dataset / coverage / load_baseline / save_baseline / compare`。
+  - `app/core/golden_runner.py` —— 执行器（驱动真实流水线 → 压缩为标量）+ 后台任务状态机
+    `start_background_run / state / reset_state`。
+  - `scripts/golden_eval.py` —— CLI：跑回归 / `--update-baseline` / `--coverage` /
+    `--tolerance` / `-n` / `--case`，退出码即结论。
+  - 接口：`GET /api/golden`（用例 + 基线 + 覆盖 + 运行状态 + 对比结论）、
+    `POST /api/golden/run`（后台启动，立即 202）、`POST /api/golden/reset`。
+- **回归判定规则**：分数回退超容差（默认 ±3）→ `regressed`；**返工轮次 +1 → `regressed`**
+  （更慢更贵，即使总分没掉）；**监管用例首轮合规不再被拦截 → `regressed`**（门禁强度下降）；
+  运行失败 / 全量运行缺用例 → 不通过；容差内波动 → 持平（不把噪声当回归）。
+- **CI 流水线（plan.md D18）**：`.github/workflows/ci.yml` 三组任务 ——
+  后端（doctor → golden → verify_contracts → smoke → stress）、前端（typecheck + build）、
+  文档一致性（关键章节与接口速查是否仍被提及）。失败时上传 `.doctor-data/**/server.log` 便于定位。
+  之所以能全量做成 CI，是因为所有脚本都是「无外部依赖 + 退出码即结论」（默认离线引擎，无需密钥）。
+- **自检扩展**：`doctor.py` 新增 `check_golden()`，**逐条构造偏差**确认判定器真的会判回归
+  （9 个子断言：一致通过 / 质量分回退 / 评估分回退 / 返工增加 / 容差内持平 /
+  全量缺失 / 部分运行缺失 / 运行失败 / 监管未拦截）。
+- **前端同步**：新增 `src/components/GoldenPanel.tsx` → 设置抽屉「回归测试」标签页
+  （跑全量 / 快速跑 3 条 / 清除结果、进度条、基线对比表、覆盖矩阵、用例清单）；
+  `api.ts` 新增 `golden / runGolden / resetGolden` 与完整视图类型。
+
+### 4.1f 后端 · 第七轮：调用轨迹与分布式追踪（2026-09-13，已完成）
+
+- **`app/core/tracing.py`（新增）**：**OTel 数据模型的进程内实现** ——
+  W3C 格式的 `trace_id`（32 位）/ `span_id`（16 位）、`parent_span_id`、`kind`、
+  `attributes`、`status`、嵌套 span、self-time 占比计算；
+  `Tracer` 用 thread-local 维护 span 栈（编排在工作线程、HTTP 在事件循环，不能假设单线程），
+  按任务存 trace 并在终态落盘为 `data/traces/<task_id>.json`（含 `otel[]` 段）。
+  单任务 span 上限 600、进程内 trace 上限 200，防异常环路吃内存。
+- **埋点位置**：
+  | span | 层级 | 关键属性 |
+  |---|---|---|
+  | `graph.invoke#<turn>` | 根（每次 LangGraph 调用） | `graph.interrupted` |
+  | `human.wait` | 独立根 | 与执行链并列，避免把「人在犹豫」算成系统耗时 |
+  | `A<n>.<produces>` | 智能体一次执行 | `agent.gate_result` / `confidence` / `risks` |
+  | `gate.review` | 门禁整体 | `gate.verdict` / `blocking` / `overall_score` |
+  | `judge.evaluate` | 评估 | `judge.total` / `verdict` / `used_llm` / `fallback` |
+  | `llm.<purpose>` | client | provider / model / token / 成本 / 缓存命中 / 降级原因 |
+  | `memory.retrieve` | RAG 召回 | `recall.hits` |
+  | `publish.dispatch` | client | `publish.channel` / `result` |
+- **事件自动关联 trace**：事件总线在 `publish()` 里统一注入当前的 `trace_id` / `span_id`
+  （`AgentEvent` 新增这两个字段），因此排查时不必靠时间戳猜「这条事件属于哪个 span」。
+- **接口**：`GET /api/tasks/{id}/trace`（span 树 + 按 span 名的耗时聚合 + 导出信息）；
+  `/api/metrics.system.tracing`（跨任务的 span 耗时排行、错误数、导出路径）；
+  `DELETE /api/tasks/{id}` 一并回收 trace。
+- **前端同步**：新增 `src/components/TracePanel.tsx` → 任务详情「调用轨迹」标签页
+  （可折叠 span 树、瀑布图、span 属性内联显示、耗时排行）；
+  `MetricsPanel` 新增「调用轨迹」区块（已追踪任务 / span 错误数 / 模型调用耗时占比 + 排行）。
+- **验收同步**：`doctor.py` 新增 `check_tracing()`（第 13 项，断言 span 树**不是平铺列表**、
+  llm span 正确嵌套、属性齐全、OTel 形状导出）；
+  `verify_contracts.py` 新增 14 项 trace 契约断言；
+  `smoke_api.py` 新增 trace 端点断言（含跨租户 404 与事件 trace 一致性）。
+
+### 4.1g 后端 · 第八轮：OTLP 真实导出 + 内容级期望 + 容器化（2026-09-13，已完成）
+
+- **OTLP 真实导出（把 §7.5 的「未实现」补上）**：
+  - 新增 `app/core/otel.py`：配置 `OTLP_ENDPOINT` 后经 OTel SDK 的 OTLP/HTTP exporter
+    转发 span；`OTLP_HEADERS` 支持带鉴权的托管 collector；`shutdown()` 先 `force_flush`
+    再关闭（批量处理器异步发送，不 flush 会丢掉最后一批）。
+  - **关键实现取舍**：不走 `Tracer.start_span`，而是**手工构造 `ReadableSpan`**
+    直接投给 span processor。因为 OTel 的 span id 由 SDK 生成，
+    用 API 创建的 span 不可能带我们自己的 `span_id` —— 本地 trace JSON 与 Jaeger 的 id 会对不上，
+    「按 id 去 Jaeger 查这一条」就断了。手工构造后**本地与远端是同一份数据**。
+  - **默认零依赖**：OTel SDK 只在配置了 endpoint 时才被 import；
+    未配置时进程内追踪完全自实现（`doctor.py` 专门断言这一点）。
+  - 智能体归属沿 span 树继承：`llm.*` 自身没有 `agent_id`，
+    由 `tracing._export()` 计算归属后传入，否则在 Jaeger 里按 agent 过滤会丢掉这些 span。
+- **黄金数据集的内容级期望（D13 的「期望输出」那一半）**：
+  - `golden/briefs/*.json` 新增 `expect` 块：`must_contain` / `min_keyword_hits` /
+    `must_not_contain` / `min_quality` / `min_judge` / `max_revisions` / `max_title_length` /
+    `expect_first_round_blocked` / `reference_points`。
+  - `app/core/golden.py` 新增 `check_expectations()`：品牌名、关键词覆盖率、禁用表述、
+    标题字数上限（用例未指定时取渠道规则）、**广告法阻断级用语**（由词库现算，词库更新后自动生效）、
+    质量分/评估分门槛、返工预算、首轮门禁行为。
+  - 内容级期望失败**一律算回归**（`compare()` 里并入 `regressed`）：
+    分数波动可以容忍，但「品牌名漏了」「阻断级用语漏出去了」是确定性缺陷。
+  - CLI 打印逐条断言结果；`/api/golden` 的对比结论同样带上。
+- **本轮由内容级断言发现的三个真实缺陷**（这是它存在的意义）：
+  1. **标题压缩 off-by-one**：`mock.py` 的 `_compress_title` 写成
+     `f"{title[: limit - 1]}…"`，省略号占一个字符，实际产出 `limit + 1` 字 ——
+     恰好比渠道上限多一字。
+  2. **交付标题未受渠道上限约束**：`_publish_delivery` 直接用 A5 的基础标题，
+     而 A5 只在「小红书」分支做压缩 → 官网用例交付了 21 字标题（上限 20）。
+     修法是在交付装配时按 `title_limit(channel)` 兜底压缩，并保留
+     `base_title` / `title_limit` / `title_trimmed` 三个字段以便追溯。
+     （没有改用 A9 的渠道标题：那是**关键词前置的搜索变体**，语义不同，不能当交付标题。）
+  3. **合规检查把免责声明误判为违规**：`不得涉及疾病预防与治疗功能` 里的「治疗」
+     被当成违规宣称。详见踩坑 53–54。
+- **否定语境判定（`_is_negated`）**：按**小句**判断 —— 所在小句内、且位于该词之前存在否定词，
+  即视为免责/禁止表述。必须「所有出现都处于否定语境」，只要有一处肯定性宣称就算违规
+  （`不得用于治疗，但可治疗失眠` 必须判出来）。
+- **调性不做机器断言**：`min_tone_hits` 降级为「仅记录、不参与判定」。
+  Brief 的 tone 是抽象描述（「克制」「用数据说话」），不是要逐字写入正文的关键词；
+  若据此断言，唯一稳定的达标方式就是在文案里堆这些词 —— 与「克制」背道而驰。
+- **容器化（D18 后半）**：
+  - `Dockerfile`：多阶段（node:22-alpine 构建 → python:3.12-slim 运行），
+    非 root（uid 10001）、`HEALTHCHECK` 用免鉴权的 `/api/health`、`/data` 卷。
+  - `.dockerignore`：排除 `data/`、`node_modules/`、`dist/` 等，加快构建并避免覆盖镜像内容。
+  - `docker-compose.yml`：应用 + Jaeger（`COLLECTOR_OTLP_ENABLED=true`），
+    通过 `OTLP_ENDPOINT` 把追踪送进 Jaeger UI。
+  - `deploy/k8s.yaml`：ConfigMap/Secret 分离、PVC、Deployment（**单副本 + Recreate**，
+    因为本地 JSON + SQLite 存储不支持共享）、Service、Ingress（SSE 关缓冲 + 长超时）。
+  - `scripts/check_deploy.py`：**不需要 Docker daemon** 的清单核验 ——
+    Dockerfile 的 COPY 路径是否存在且未被 .dockerignore 排除、
+    声明的环境变量是否真的被代码 `os.environ.get` 读取、
+    探针路径是否等于免鉴权路径。这条拦的正是「只有 docker build 才会失败」的那类错误。
+- **前端同步**：`Topbar` 在 OTLP 已接入时显示 Chip；
+  `SettingsDrawer` 新增「调用轨迹与 OTLP 导出」区块（显示端点与服务名，并说明不配置也完整可用）。
+- **配置**：`RuntimeConfig` 新增 `tracing`（`OTLP_ENDPOINT` / `OTEL_SERVICE_NAME` / `OTLP_HEADERS`）；
+  `public_config()` 新增 `tracing`；`/api/health` 新增 `otlp` 状态；
+  `.env.example` 补齐全部配置项（此前缺 embedding / publish / judge 等）。
+
 ### 4.2 前端（`npm run build` 通过）
 
 - Topbar、侧栏任务列表、流水线看板、共享黑板产物查看器（**14 种类型** + 版本 diff）、
@@ -310,9 +538,203 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
     `dispatch` 返回失败但编排层把 `dispatch_status` 记为 `skipped` 并**等价比「登记发布」**，
     这样 smoke 测试在无外部依赖时也能覆盖「投递 → 队列清空」的完整分支。
 
+**租户隔离与评估（第五轮）**
+
+27. **⚠️ `tempfile.mkdtemp` 建出的目录在本机沙箱下不可写**（本轮最大的坑）：
+    它以 `mode=0o700` 建目录，Windows 上会落成一条「仅创建者可访问」的 ACL，
+    于是子进程往里写文件直接 `PermissionError`——现象是**目录明明存在、就是写不进去**。
+    受害面比想象中大：`doctor.py` 的记忆库落盘静默失败（捕获 OSError 只打日志）、
+    `sqlite3.connect` 抛 `unable to open database file` 让检查点**静默退回内存实现**，
+    而自检依然全绿 —— 也就是说「断点续跑」这条能力此前从未被真正验证过。
+    排查过程：`mkdir(parents=True)` 成功 → 直接写入失败 → 对比 `os.mkdir` **成功**、
+    `mkdtemp` **失败** → 定位到 `0o700`。
+    **结论：测试用临时目录一律走 `make_temp_dir()`（逐级 mkdir + 随机后缀），
+    并且把「目录可写」当成一条自检断言而不是假设。**
+28. **静默退化必须有可见出口**：同一个坑还暴露出一个设计问题——检查点退回内存实现时，
+    除了 `log.warn` 之外没有任何地方能看出来。于是把它提升为一等公民：
+    `Orchestrator.checkpointer_kind` → `/api/health.checkpointer` → 前端顶栏告警 + 自检断言。
+    **凡是「降级后功能仍然跑得通、但能力已经缺失」的路径，都要有可查询的状态。**
+29. **评估必须能失败且必须能回退**：与 embedding 同理，`JUDGE_PROVIDER=llm` 下网关抖动
+    不应该让评估流水线整体不可用。`judge_with_llm` 把远端调用的**任何异常**
+    （含返回非 JSON、维度缺失）都转成「回退离线评估器 + 标注 fallback」，
+    调用方无需 try/except；回退率本身就是可观测指标（`stats.fallbacks`）。
+30. **评估不能塞进门禁**：门禁是否决式（能不能发），评估是度量式（有多好）。
+    把度量塞进门禁，「低于阈值就返工」会被一个有噪声的评分放大成流程抖动。
+    因此默认 `JUDGE_MODE=advisory`，只产出报告；要收紧再切 `blocking`。
+    `judge.weight` 同理——默认 0.2 只微调综合分，`0` 则与历史行为逐位一致，保证可回滚。
+31. **合规维度必须复用 A7 的词库**：评估器若自己再写一遍扫描逻辑，迟早出现
+    「A7 判定通过、评估说合规有问题」的自相矛盾。直接调 `scan_compliance` 后，
+    两侧结论永远同源——这条也在 `doctor.py` 里被断言（注入阻断用语后合规维度 5.0 → 0.0）。
+32. **评估口径要带版本号**：权重或规则一变，旧分数就不可比。`RUBRIC_VERSION`
+    写进每条记录与配置接口，跨版本对比前必须先对齐——否则「Prompt 改好了」可能只是尺子变了。
+33. **去重键必须含租户**：租户隔离后若仍用 `sha1(kind|title|content)` 去重，
+    B 租户沉淀同名知识会被 A 租户的旧卡片顶掉（表现为「入库成功但检索不到」）。
+    正确做法是把租户并进指纹，同租户内幂等、跨租户各自存活。
+34. **容量要按租户计量**：`MAX_CARDS` 若是全局上限，先入库的租户会把后来者的名额挤光，
+    多租户下表现为「新租户什么都存不进去」。`_evict` 改为只淘汰本租户最旧的卡片。
+35. **混合检索的向量缓存只算当前批次**：`_ensure_vectors` 原本对所有卡片建索引，
+    改为只处理调用方传入（已按租户过滤）的那批——否则 A 租户检索一次会替 B/C/D 白算一遍。
+    `stats().vector_indexed` 也相应改为「本租户已建索引条数」，因此**重启后为 0 是正常的**，
+    首次检索后才涨上来（早期把它误当异常排查过）。
+36. **浮点尾数要在落盘前收干净**：加权求和会产出 `90.99999999999999` 这类值，
+    流到接口和 JSON 文件里既难看，又会在「分数是否相等」的对比里咬人。
+    `build_record()` 统一 `round(total, 1)`。
+
+**黄金数据集与回归门禁（第六轮）**
+
+37. **数据集必须放在 `data/` 之外**：`data/` 已 gitignore，是运行期产物；
+    而黄金数据集与基线是**测试资产**，必须随代码版本化 —— 能被 review、能被 diff、
+    能被追责。否则「悄悄把基线改宽让 CI 变绿」就是一条无人察觉的作弊路径。
+38. **⚠️「永远显示通过」的门禁比没有门禁更糟**：回归判定器如果因为 bug 恒返回 ok，
+    表面上 CI 全绿，实际质量已经在滑坡。因此 `doctor.py` 专门用 9 个子断言
+    **逐条构造偏差**去证明它会判回归（含「容差内不该误报」的反向断言）。
+    这是本项目一贯的做法：**关键判定逻辑本身也要有测试**，而且测试要能证伪。
+39. **返工轮次是成本指标，必须参与回归判定**：只比分数会出现「总分没掉但多返工一轮」
+    的悄悄劣化——那意味着更慢、更贵、且更接近返工上限。`compare()` 对
+    `revision_round` 单独判定方向（越少越好）。
+40. **门禁强度下降要能被发现**：强监管用例（医疗/金融/教育）在基线里是
+    「首轮合规被拦截 → 返工后通过」。如果某次改动让首轮直接放行，
+    分数可能不降反升（少了一轮返工），**看起来是改进，实际是门禁失效**。
+    因此 `first_round_blocked` 从 true 变 false 直接判 `regressed`。
+41. **部分运行不能沿用全量的缺失判定**：最初 `compare()` 把「基线里有、本次没跑」
+    一律判 `missing`，结果是 `--case X` 单跑一条时另外 9 条全被算成缺失，
+    部分运行**永远无法通过** —— 那等于逼着人每次都跑全量。
+    修法是给 `compare(scope=)`：只在范围内判定缺失，并在结果里标注 `partial`。
+    全量运行时（`scope=None`）缺失仍然算失败，跳过用例的成本依旧很高。
+42. **跨口径对比要先拒绝，而不是先给分**：基线带 `rubric` 与 `engine`。
+    若当前 `rubric` 与基线不一致，`compare()` 会置 `rubric_mismatch` 并显式提示
+    「分数不可直接比较」，而不是默默算出一个差值 —— 那会让人把「尺子换了」
+    误读成「质量变了」。
+43. **更新基线要有摩擦**：`--update-baseline` 在存在回归/失败/缺失时**拒绝执行**，
+    必须显式 `--force`。把「认定新合格线」这一步做成有意动作，
+    而不是顺手一跑就把回归固化下来。
+44. **数据集的覆盖口径要选「分支覆盖」而不是「组合覆盖」**：渠道 × 行业有 49 种组合，
+    全铺会显著拖慢回归。改为「每个渠道特化分支 + 每个行业规则组至少被一条用例命中」，
+    10 条即达成（`--coverage` 可查矩阵并报告未覆盖渠道）。
+45. **runner 抽到 `app/core` 而不是写在脚本里**：Web 界面「跑回归」与 CLI 跑回归
+    必须共用同一段执行逻辑，否则两边迟早在「什么算通过」上产生分歧。
+    脚本负责进程编排与退出码，服务端负责执行 —— 职责分清。
+46. **后台任务不能挂在 HTTP 请求上**：跑完 10 条用例是分钟级，浏览器与 fetch 都会超时。
+    因此 `/api/golden/run` 立刻返回 202，真实执行在后台线程里，
+    状态由 `RunState` 聚合供轮询。已在运行时返回 409 而不是排队（排队会掩盖双触发）。
+
+**调用轨迹（第七轮）**
+
+47. **⚠️ 不包 `graph.invoke` 会让 trace 树退化成平铺列表**（本轮实测发现的真实缺陷）：
+    LangGraph 的每个节点是**独立执行**的，节点 span 之间没有共享父节点，
+    于是 13 个节点 span 全部成了**根 span** —— trace 里 `roots` 有 13 个，
+    self-time 计算全部失真，看起来「有追踪」但对排障毫无帮助。
+    修法是把每次 `graph.invoke()` 包一层 span，节点 span 自然挂到它下面。
+    **教训：追踪做完要断言「根 span 数量 < span 总数」**，否则等于没做
+    （这条已固化进 `doctor.py` 与 `verify_contracts.py`）。
+48. **人工等待必须单独成 span，且与执行链并列**：如果把 `_wait_for_human` 算进节点耗时，
+    排障时会把「人在犹豫 3 小时」误读成「系统卡了 3 小时」。
+    实际上它本就是独立的一段，所以它成为自己的根 span 是**正确的建模**，不是缺陷。
+49. **自建追踪要如实标注边界**：本实现是 **OTel 数据模型**，不是 OTel SDK ——
+    没有 OTLP 导出、没有采样、没有跨进程上下文传播。文档里必须写清楚，
+    否则读者会以为「有 span 就等于接入了 OpenTelemetry」。
+    自建的理由是守住「默认零外部依赖、离线可跑通」；接 collector 的路径已铺好
+    （`Span.to_otel()` + 落盘 `otel[]` 段），不需要改任何埋点处。
+50. **降级与缓存命中要记为 `ok` 而不是 `error`**：成本熔断、网关降级、
+    响应缓存命中都是被设计出来的正常路径（plan.md D10/D12）。
+    把它们记成错误会让「span 错误率」这个指标彻底失去意义 ——
+    一个永远不为 0 的错误率等于没有错误率。`doctor.py` 与 `smoke_api.py` 都断言 `errors == 0`。
+51. **trace 落盘失败绝不能影响任务**：追踪是观测能力，不是业务链路的一环。
+    `_export()` 兜住 `OSError` 并计入 `exportFailures`（可在指标里看到），
+    与 embedding、评估器的「可失败」原则一致。
+52. **事件与 span 的关联要在总线里统一注入**：若让每个调用方自己传 `span_id`，
+    必然有遗漏（本轮 127 条事件里 126 条带上 trace，唯一缺的那条是
+    `task.created` —— 它发生在 `start_trace` 之前的建任务阶段，属正确行为）。
+    在 `publish()` 里读 thread-local 当前 span 是唯一不会漂移的做法。
+
+**OTLP 导出与内容级断言（第八轮）**
+
+53. **⚠️ 用 OTel API 创建 span 会让 id 对不上**（接入 OTLP 时的第一个坑）：
+    `Tracer.start_span` 的 span id 由 SDK 生成，无法指定。
+    于是本地 trace JSON 与 Jaeger 里的 id 完全不同 ——
+    「按本地日志里的 trace_id 去 Jaeger 查这一条」这个最基本的排障动作直接失效。
+    修法是**手工构造 `ReadableSpan` 并投给 span processor**：
+    我们已经有完整的 trace_id / span_id / 起止时间 / 属性，直接构造最诚实，
+    本地与远端看到的就是同一份数据。`doctor.py` 断言
+    `local_traces == exported_traces and local_ids ⊆ exported_ids`。
+54. **导出后必须复查父子关系**：即使 id 对了，如果 parent 没设，
+    在 Jaeger 里依然会看到「42 个并列根 span」—— 正是第七轮踩过的坑换了个地方复现。
+    因此断言里同时检查「导出后根 span 数」与「llm span 有父节点」。
+55. **⚠️ 标题压缩的 off-by-one**：`f"{title[: limit - 1]}…"` 看起来没错，
+    但省略号**占一个字符**，实际产出 `(limit-1) + 1 = limit + 1` 字 —— 恰好比渠道上限多一字。
+    更坑的是同一份数据里 `title_ok: len(title) <= limit` 会显示「通过」，
+    因为它算在**压缩前**的变体上，而交付用的是基础标题。
+    **教训：凡是「截断到 N」的逻辑，都要断言 `len(result) <= N`，而不是相信表达式看起来对。**
+56. **⚠️ 交付物必须受渠道规则约束，不能只靠上游自觉**：
+    `_publish_delivery` 直接取 A5 的基础标题，而 A5 只在「小红书」分支做压缩，
+    于是官网用例交付了 21 字标题（上限 20）。这类缺陷的共同点是
+    **分数完全正常**（质量分 91），只有把「渠道上限」写成断言才会暴露。
+    修法是在交付装配时兜底压缩，并保留 `base_title` / `title_limited` 便于追溯。
+    注意**不要**改用 A9 的渠道标题：那是关键词前置的**搜索变体**，语义不同。
+57. **合规扫描必须理解否定语境**：`不得涉及疾病预防与治疗功能` 是**免责声明**，
+    但朴素子串匹配会把它当违规宣称 —— 于是每一条监管用例都误报，
+    而误报会让人开始忽略这套断言，等于把门禁废掉。
+    两个反复改错的地方：① 固定字符窗口太短（否定词与禁用词相隔 8 字就漏判）→
+    改成**按小句**判断；② 没把**中文逗号**当小句边界 →
+    `不得用于治疗，但可治疗失眠` 的后半句被前半句的否定词豁免了。
+    **小句边界的定义必须包含中文标点**，这是中文文本处理与英文最大的差异之一。
+58. **断言设计要避免反向激励**：最初给「调性」也写了 `min_tone_hits`，
+    结果 `克制`/`用数据说话` 这类抽象描述永远匹配不到，而且**唯一稳定的达标方式
+    就是在文案里堆这些词** —— 那正好与「克制」背道而驰。
+    结论：调性这类主观项只做记录与人工抽查（`reference_points`），不做机器判定。
+    同类的还有「关键词必须全部命中」：那会逼出「把关键词硬塞进正文」，
+    因此改为「覆盖率 ≥ N」（`min_keyword_hits`）。
+59. **派生字段不能进持久化契约**：`CaseResult.to_dict()` 里加了给人看的
+    `checks_failed` 统计，而 `save_baseline` 直接把它写进了基线；
+    下次读取时 `CaseResult(**item)` 抛 `TypeError: unexpected keyword argument`。
+    修法是落盘与还原都以 `__dataclass_fields__` 为准过滤。
+    **自检当场拦下了它**（`check_golden` 读基线失败）—— 这正是「关键路径要有自检」的价值。
+60. **清单类配置要有 lint**：Dockerfile 的 COPY 路径、compose/k8s 的环境变量名，
+    写错了只有真正 `docker build`/部署才失败，而 CI 与开发机常常没有 daemon。
+    `scripts/check_deploy.py` 把这些变成静态检查（路径存在性、变量名是否被
+    `os.environ.get` 读取、探针路径是否免鉴权），于是这类错误能在无 daemon 环境下被拦住。
+61. **探针路径必须免鉴权**：`HEALTHCHECK`/readinessProbe 打 `/api/health`，
+    而这个路径恰好是鉴权中间件唯一放行的 —— 这不是巧合，是**必须**：
+    否则一旦开启 `CREATOR_API_TOKENS`，容器会永远处于不健康状态并被反复重启。
+    `check_deploy.py` 专门断言这条对应关系。
+62. **k8s 副本数要与存储能力匹配**：当前持久化是本地 JSON + SQLite，
+    多副本会各写各的导致状态分裂。因此清单里写死 `replicas: 1` + `Recreate`，
+    并在注释里说明「要横向扩展必须先换存储层」。
+    **在清单里假装支持多副本，比不支持更危险。**
+
+**多语言本地化（第九轮）**
+
+63. **⚠️ 新增字段必须在所有「重建对象」的地方透传**：`Brief` 加了 `language`，
+    但 `mock.as_brief()` 手工逐字段构造 `Brief`，**漏了 language** ——
+    于是本地化分支永远走不到，英文 Brief 静默产出中文。
+    危险点在于：只有单语言时这个 bug **完全不可见**，而且看起来「链路是通的」。
+    **教训：给契约加字段时，要搜出所有手工重建该对象的地方**（本项目里
+    `mock.as_brief()`、`parse_brief()`、黄金用例加载都属此类）。
+64. **断言与被断言对象必须同口径**：交付层已按「英文按词」处理标题，
+    黄金断言却用 `len(title)` 数字符 —— 12 词上限的英文标题有 60+ 字符，
+    于是被判成「超出上限 12 字」。这类 bug 的特征是**两边都「没错」，但量纲不同**。
+    统一走 `title_measure()` 后才一致。
+65. **多语言最容易做假的地方是「英文 Brief 产出中文」**：看起来链路通了，实际只是把
+    中文稿当英文交付。因此自检直接断言**英文产物的中文字符数为 0**，
+    而不是断言「有输出」。
+66. **本地化要做「原生创作」而不是翻译**：翻译腔的营销文案在本地市场基本不可用。
+    提示词里必须显式写明「不要先写中文再翻译」，因为模型收到中文 Brief 时天然先想中文。
+67. **合规能力不足时要如实告知，而不是静默放行**：广告法词库只覆盖中文。
+    选择非中文时 A7 明确声明「需人工复核」+ 写入当地红线 + 强制人工复核 ——
+    这与「假装检查过了」的区别，就是**产品能否被信任**的区别。
+68. **mock 引擎也要覆盖新语言，否则离线环境下新能力是假的**：默认
+    `LLM_PROVIDER=mock`，若 mock 只会说中文，那么「支持英文」在 CI 与自检里
+    永远验证不到。已知边界：mock 的**支撑类产物**（创意概念、内容策划、视觉指导、
+    渠道适配、效果报告、知识卡片）仍是中文模板，只有**交付物**（标题/正文/CTA/标签）
+    与最终交付件是完整的目标语言。
+
 ---
 
 ## 6. 验证结果（端到端实测）
+
+> 下面各轮的数字是**当轮**的实测记录，保留原样以便追溯。
+> 第五轮的产物数是 18（比早期的 17 多一件），产物类型数仍是 14 种；
+> 最新一轮的完整实测见 §6.1。
 
 - `scripts/doctor.py` → **自检通过**。A1→A11 离线生成器全链路可跑：
   - 首轮：A5 pass/88、A6 revise(high)、A7 revise/75（blocker=1）——门禁触发返工，符合预期
@@ -358,6 +780,169 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 - 关于「验收过程」：上一轮先被两个真实缺陷拦下（详见踩坑 12–14），修复后才拿到通过结果——
   **这说明自检通过并不等于链路可用**；本轮因此把「跑智能体本体」直接写进了 `doctor.py`。
 
+### 6.1 第五轮实测（2026-09-13）
+
+- `scripts/doctor.py` → **八项检查全通过**：
+  - Mock 引擎收敛（返工 1 轮后 A7 100）、记忆库 RAG 闭环（入库 7 → 召回 5）、
+    向量检索（确定性 / 范数 1.0000 / 自相似 1.000）、发布排期（跨天顺延正确）、
+    鉴权 Token→租户解析。
+  - **新增〔记忆库租户隔离〕**：`acme` 入库 1 条、`beta` 入库 1 条（同名同内容各自存活）、
+    acme 重复入库 0 条（同租户内仍幂等）、acme 可见 1 条（全局 9）、跨租户泄漏 0 条。
+  - **新增〔断点续跑检查点〕**：后端 = `sqlite`（修复前是 `memory`）。
+  - **新增〔LLM-as-a-Judge〕**：总分 91.0/100（pass，置信度 0.81），
+    六维 需求契合 4.0｜合规安全 5.0｜结构完整 5.0｜品牌语气 3.7｜事实稳妥 5.0｜吸引力 5.0，
+    可复现 = True；注入阻断用语后总分 91.0 → 46.6、合规维度 5.0 → 0.0。
+- `scripts/smoke_api.py` → **结果：通过（exit 0）**，新增覆盖：
+  - settings 的 `judge`（advisory/offline/通过线 70/权重 0.2/rubric）、`/api/health.checkpointer`
+  - **评估流水线**：`/api/metrics.system.judge`（6 条记录 / 覆盖 2 任务 / 均分 85.18 / 通过率 100%）、
+    `/api/evaluations`（记录 5 条、每条 6 个维度）、`POST /evaluate`（trigger=manual、总分 91.0）、
+    门禁事件 `payload.judge` 携带评估结论
+  - **租户隔离（另起带 `CREATOR_API_TOKENS` 的实例）**：`/api/health` 免鉴权 200、
+    无 token/错误 token = 401、beta 访问 acme 任务 = 404、acme 记忆库 7 张（租户 `{'acme'}`）/
+    beta 0 张、beta 检索 acme 知识命中 0 条、beta 视图任务数 0
+  - 持久化新增 `evaluations.json`；主流程 18 产物 / 14 种类型
+- `scripts/verify_contracts.py` → **核验通过**（约 10s）：`/api/health.checkpointer=sqlite`、
+  `/api/settings.judge`（advisory/offline/75/0.2）、`/api/evaluations` 空库与落库后结构、
+  `/api/memory` 租户视角、`/api/metrics.system.judge`、`judge.scored` 事件、
+  门禁事件携带评估结论、`POST /evaluate` 的 manual 记录（六维齐全）。
+- `scripts/stress_llm.py -n 8 -c 4` → 完成率 100%，p50 5.98s / p99 6.57s，
+  平均返工 1.00 轮，质量分 93.0，**租约冲突 0、活跃租约 0（已归零）**，吞吐 0.64 任务/秒。
+- 前端：`npm run typecheck` 通过；`npm run build` 通过（48 modules，317 kB / gzip 95.9 kB）。
+
+### 6.2 第六轮实测（2026-09-13）
+
+- `scripts/golden_eval.py --coverage` → **10 条用例覆盖 7/7 渠道、9 个行业**，
+  无未覆盖渠道。
+- `scripts/golden_eval.py --update-baseline` → 生成首版基线，结果呈现真实差异
+  （不是一片同分）：
+
+  | 用例 | 渠道 | 质量分 | 评估分 | 返工 | 产物 |
+  |---|---|---|---|---|---|
+  | xiaohongshu_food | 小红书 | 93.0 | 91.0 | 1 | 18 |
+  | xiaohongshu_beauty | 小红书 | 93.0 | 89.0 | 1 | 18 |
+  | xiaohongshu_minimal_brief | 小红书 | 94.0 | 94.0 | 1 | 18 |
+  | douyin_short_video | 抖音 | 92.0 | 84.0 | 1 | 18 |
+  | wechat_longform_tech | 公众号 | 92.0 | 84.0 | 1 | 18 |
+  | zhihu_b2c_education | 知乎 | 93.0 | 89.0 | 1 | 18 |
+  | ecommerce_home_appliance | 电商详情页 | 94.0 | 91.5 | 1 | 18 |
+  | ecommerce_medical_strict | 电商详情页 | 87.0 | 81.5 | **2** | 22 |
+  | pr_release_finance | PR稿 | 90.0 | 82.4 | **2** | 22 |
+  | website_b2b_industrial | 官网 | 91.0 | 78.5 | 1 | 18 |
+
+  两条强监管用例（医疗健康、金融）走满 2 轮返工才通过 —— 这正是期望行为。
+- `scripts/golden_eval.py`（全量复跑）→ **10/10 持平，退出码 0**。
+  离线评估器的确定性得到实证：两次运行分数逐位相同。
+- `scripts/golden_eval.py --case xiaohongshu_food` → **部分运行退出码 0**，
+  并打印「这是部分运行，结论仅对范围内用例成立」的提示。
+- 回归判定器 **9 项偏差全部正确识别**（`doctor.py` 第 12 项，现已固化为自检）：
+  完全一致→通过｜质量分 −10→回退｜评估分 −5→回退｜返工 +1→回退｜
+  容差内 −2→持平｜全量缺用例→不通过｜部分运行缺范围外用例→通过｜
+  运行失败→不通过｜监管用例未被拦截→回退。
+- `scripts/doctor.py` → **12 项检查全通过**（新增第 12 项「黄金数据集判定器」）。
+- `scripts/smoke_api.py` / `scripts/verify_contracts.py` → 仍为 **通过（exit 0）**。
+- 前端：`npm run typecheck` 与 `npm run build` 通过。
+- CI：新增 `.github/workflows/ci.yml`；**本地无法验证 GitHub runner**，
+  但其中每一条命令都已在本地以相同参数跑通（`doctor` / `golden_eval` / `verify_contracts` /
+  `smoke_api` / `stress_llm` / `typecheck` / `build`）。
+
+### 6.3 第七轮实测（2026-09-13）
+
+- `scripts/doctor.py` → **13 项检查全通过**（新增第 13 项「调用轨迹追踪」）。实测数据：
+
+  | 指标 | 值 |
+  |---|---|
+  | span 总数 | 42 |
+  | 根 span | **3**（`graph.invoke#0` / `human.wait` / `graph.invoke#16`）—— 层级成型 |
+  | 智能体 span | 15（11 个智能体 + 返工轮次的 A4/A5/A6/A7） |
+  | 门禁 span | 2（返工 1 轮 → 两次门禁） |
+  | llm span | 15（全部带 `llm.model` 属性，且全部嵌套在智能体/评估之下） |
+  | span 类型 | internal 27 / client 15 |
+  | span 状态 | 全部 `ok`（错误 0） |
+  | 事件关联 | 127 条事件，126 条带 `trace_id`、125 条带 `span_id`，trace 一致 |
+  | OTel 形状导出 | ✅ `data/traces/<task_id>.json`，42 条 `otel[]` 记录，字段齐全 |
+  | 总耗时 | 5792ms（其中 `graph.invoke#0` 5745ms） |
+
+  说明：`task.created` 是唯一没有 `trace_id` 的事件 —— 它发生在 `start_trace` 之前的
+  建任务阶段，属正确行为而非遗漏。
+- 耗时排行实测（返工 1 轮）：`gate.review` 跨 2 轮累计 **2538ms**，是编排本身之外
+  最贵的层级；单看「最慢的一次调用」只会看到某个 500ms 的模型调用，
+  看不出门禁链路的总开销 —— 这正是按层级聚合的价值。
+- `scripts/verify_contracts.py` → **核验通过**，新增 14 项 trace 契约断言
+  （trace_id 非空 / span 数量 / **根 span 少于总数** / llm span 数量 /
+  llm 嵌套正确 / 带模型属性 / 状态全 ok / 耗时聚合非空 / 导出格式 /
+  事件带 span_id / 事件 trace 一致 / metrics.tracing 四项）。
+- `scripts/smoke_api.py` → **通过（exit 0）**，新增 trace 端点断言：
+  span=42 根=3、智能体 span=19、llm span=15、最贵 `graph.invoke#0` 5577ms、
+  不存在任务的 trace → 404、`metrics.system.tracing` 的 traces/spans/errors。
+- 前端：`npm run typecheck` 通过；`npm run build` 通过（50 modules，334 kB / gzip 101 kB）。
+
+### 6.4 第八轮实测（2026-09-13）
+
+- `scripts/doctor.py` → **15 项检查全通过**（新增「否定语境判定」与「OTLP 导出链路」）。
+  OTLP 实测（内存导出器，无需 collector）：
+  | 指标 | 值 |
+  |---|---|
+  | 默认不启用导出 | ✅（未配置 `OTLP_ENDPOINT` 时不加载 OTel） |
+  | 本地 span / 导出 span | 42 / 42 |
+  | trace_id 一致 | ✅ |
+  | span_id 全部命中 | ✅（本地 id ⊆ 导出 id） |
+  | 导出后根 span | 3（层级保留，未退化成并列根） |
+  | llm span 嵌套保留 | ✅（15 个全部有父节点） |
+  | 带智能体归属 | 15/15 |
+  | 导出失败数 | 0 |
+- 否定语境判定 → **10 个用例全部符合预期**（免责声明豁免、肯定宣称不豁免、
+  逗号后不跨小句豁免、跨句不豁免、绝对化用语必判出）。
+- `scripts/golden_eval.py` → **10/10 持平，136 项内容级断言 0 失败**。
+  本轮该断言发现的三个真实缺陷：
+  1. 标题压缩 off-by-one（`_compress_title` 产出 `limit + 1` 字）；
+  2. 交付标题未受渠道上限约束（官网用例 21 字 > 上限 20）；
+  3. 合规扫描把免责声明「不得涉及疾病预防与治疗功能」误判为违规。
+  修复后交付标题全部达标：
+
+  | 用例 | 渠道 | 交付标题字数 | 上限 |
+  |---|---|---|---|
+  | website_b2b_industrial | 官网 | 20 | 20 |
+  | xiaohongshu_beauty | 小红书 | 20 | 20 |
+  | xiaohongshu_minimal_brief | 小红书 | 17 | 20 |
+  | pr_release_finance | PR稿 | 21 | 30 |
+  | zhihu_b2c_education | 知乎 | 17 | 30 |
+- `scripts/check_deploy.py` → **核验通过**：15 条 COPY 路径全部存在且未被 .dockerignore 排除、
+  Dockerfile/compose/k8s 共 40 个环境变量名全部被后端真实读取、
+  探针路径 = 免鉴权路径（`/api/health`）。
+- `scripts/smoke_api.py` / `verify_contracts.py` / `stress_llm.py` → 均 **exit 0**。
+- 前端：`npm run typecheck` 与 `npm run build` 通过（50 modules，336 kB / gzip 101 kB）。
+- **Docker 镜像未在本机构建**：Docker CLI 存在但 daemon 未运行
+  （`failed to connect to the docker API`）。因此 `docker compose config` 做了 YAML
+  与变量替换校验（通过），镜像构建本身未验证 —— 这一点如实标注，未假装已构建。
+
+---
+
+### 6.5 第九轮实测（2026-09-13）
+
+- `scripts/doctor.py` → **16 项检查全通过**（新增「多语言本地化」）。该检查实测输出：
+
+  | 项 | 结果 |
+  |---|---|
+  | 语言识别（11 个写法） | 全部正确（`en-US`/`English`/`英文`→`en`；`日文`→`ja`；`xx`→回落 `zh`） |
+  | 字数口径 | 英文 6 词｜中文 13 字 |
+  | 本地化指令 | 英文含「原生创作」+ FTC + `#ad`；中文为空串（不影响既有行为） |
+  | 合规覆盖 | `en` 如实声明未覆盖｜`zh` 已接入词库 |
+  | 英文产出 | 正文 442 字符，**中文字符 0**；标题中文字符 0 |
+  | 中文回归 | 中文 Brief 仍产出中文标题 |
+- `scripts/golden_eval.py` → **11 条用例 / 147 项断言，0 失败**。
+  新增英文用例 `instagram_en_multilingual`：质量分 92、评估分 78.5、返工 1 轮，
+  11 项内容级断言全通过。
+- 英文任务全链路中文残留实测：
+
+  | 产物 | 交付物 | 支撑类产物 |
+  |---|---|---|
+  | 中文字符数 | `copy_draft` 0、`edited_copy` 0、`final_delivery` 0 | `creative_concept` 558、`visual_brief` 606、`knowledge_card` 663 等仍为中文模板 |
+
+  即：**交付物是干净的英文，支撑类产物仍是中文**（已知边界，见踩坑 68）。
+- `verify_contracts.py` / `check_deploy.py` / `smoke_api.py` / `stress_llm.py` → 均 **exit 0**。
+- 前端：`npm run typecheck` 与 `npm run build` 通过。
+- 新增 `README.md`（项目门面 + **需要人工协助的事项清单**）。
+
 ---
 
 ## 7. 待办 / 后续扩展
@@ -379,7 +964,37 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 - [ ] 真实模型链路压测与 Prompt 调优 —— 脚本已就绪，仍需在真实网关跑一轮并据数据调 Prompt / 预算。
 - [ ] 多平台真实一键发布 —— 已提供平台无关的 webhook 投递通道与到期队列，
   平台私有授权/限流需由发布网关承接，仍在「登记事实 + 复盘」范围内。
-- [ ] 记忆库的多租户 / 权限 —— 任务已按租户隔离，记忆库卡片目前仍为全局共享（尚未按租户分区）。
+- [x] 记忆库的多租户 / 权限 —— **已完成**：卡片带 `tenant` 归属，写入/召回/列表/统计/容量全部按租户分区，
+  跨租户既不召回也不可见（`doctor.py` 与 `smoke_api.py` 双重断言）。
+- [x] LLM-as-a-Judge 评估流水线 —— **已完成**：六维评分、离线/模型双评估器（失败回退）、
+  评估历史与聚合接口、按需评估、advisory/blocking 两档门禁介入。
+- [x] 分布式追踪（OpenTelemetry / LangSmith）—— **已完成 OTel 数据模型 + 真实 OTLP 导出**：
+  配置 `OTLP_ENDPOINT` 即把同一份 span（id 与本地一致）转发给 collector，
+  `docker compose up` 自带 Jaeger；未配置时进程内追踪完全自建、零外部依赖。
+- [x] 黄金数据集的期望输出 —— **已完成**：每条用例带 `expect` 块（品牌名 / 关键词覆盖率 /
+  禁用表述 / 标题字数上限 / 质量与评估门槛 / 返工预算 / 首轮门禁行为 / `reference_points`），
+  共 136 项内容级断言，并已据其发现三个真实缺陷。
+- [x] 容器化与生产部署（Docker / K8s）—— **已完成**：多阶段镜像 + compose（含 Jaeger）+
+  k8s 清单 + 无需 daemon 的清单核验脚本。
+- [x] 多语言本地化（plan.md v2.0）—— **已完成**：中/英/日/韩/西语言画像、
+  原生创作、按语言口径校字数、记忆库按语言分区、非中文合规如实告知。
+- [x] README 门面文档与人工协助清单 —— **已完成**：`README.md`。
+- [ ] **镜像构建未实机验证** —— Docker daemon 未运行，只做了 `docker compose config` 校验。
+  恢复 daemon 后应执行 `docker build -t creator-agent-studio:latest .` 与
+  `docker compose up -d` 实测一次，确认镜像内 `dist/` 与 `/data` 卷工作正常。
+- [ ] **mock 支撑类产物的本地化** —— 交付物（标题/正文/CTA/标签/最终交付件）已是完整目标语言，
+  但创意概念、内容策划、视觉指导、渠道适配、效果报告、知识卡片仍是中文模板。
+  真实模型模式下由本地化指令驱动，不受此限；若要在离线模式全链路演示多语言，需补齐这些生成器。
+- [ ] **非中文市场的法规词库** —— 目前只有中文广告法词库；英文/日文/韩文/西语的合规红线
+  仅写入提示词，未经法规校验（P0 人工事项）。
+- [ ] **视频脚本独立交付物类型（v2.0）** —— 抖音分镜/口播/字幕已实现，
+  但没有独立的 `video_script` artifact 类型；需先确定产品形态。
+- [ ] **数字人（v2.0）** —— 需第三方数字人视频生成服务，属产品形态决策。
+- [ ] 跨进程 trace 上下文传播与采样 —— 当前一个任务一个 trace_id、span 全在进程内、全量采集。
+- [ ] 横向扩展（多副本）—— 需先把共享黑板与检查点换成 PostgreSQL + Redis。
+- [ ] 真实模型链路压测与 Prompt 调优 —— 脚本已就绪，仍需在真实网关跑一轮并据数据调 Prompt / 预算。
+- [ ] 多平台真实一键发布 —— 已提供平台无关的 webhook 投递通道与到期队列，
+  平台私有授权/限流需由发布网关承接，仍在「登记事实 + 复盘」范围内。
 
 ---
 
@@ -486,3 +1101,142 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
     - **验收**：`doctor.py` 新增 embedding/publisher/auth 三检；`smoke_api.py` 新增对应断言。
   - 验证：`scripts/doctor.py` 通过（五项检查全绿）；`scripts/smoke_api.py` **通过（exit 0）**；
     `npm run typecheck` 与 `npm run build` 通过（47 modules）。
+
+- **2026-09-13（第五轮：租户记忆库 + LLM-as-a-Judge + 断点续跑可见性）**
+  - 依据《plan.md》4.3 D14「LLM-as-a-Judge 评估流水线」、2.5「黄金数据集评测」、
+    D17「数据隔离」与《creator.md》A11「管理版本、标签、权限与过期知识」中的**权限**一项：
+    - **记忆库租户隔离**：`MemoryCard.tenant` + 去重键含租户（`sha1(tenant|kind|title|content)`）+
+      `remember/retrieve/list_cards/stats` 全量 `tenant` 参数 + `_evict` 按租户计量；
+      `AgentRunContext.tenant` 由编排器注入，A11 与 `_memory_hits()` 的读写都带租户；
+      `/api/memory*` 按 `request.state.tenant` 过滤，`stats` 新增 `tenant/tenants/global_total`。
+    - **LLM-as-a-Judge**：新增 `app/core/judge.py`（六维加权评分；离线规则评估器 +
+      LLM 评估器，后者任何异常静默回退并标注）与 `app/core/evaluations.py`
+      （评估历史落 `data/evaluations.json`）；编排在门禁时刻与交付前各评估一次并发
+      `judge.scored` 事件；`decide_gate(judge=, judge_mode=)` 支持 off/advisory/blocking；
+      `judge.weight` 把评估分按比例混入综合质量分（0 = 完全不影响，可回滚）。
+    - **新接口**：`GET /api/evaluations`、`POST /api/tasks/{id}/evaluate`、
+      `/api/metrics.system.judge`、`/api/settings` 的 judge 组、`/api/health.checkpointer`。
+    - **修复（自检拦下的真实缺陷）**：测试用 `tempfile.mkdtemp`（`0o700`）目录在本机沙箱下不可写，
+      导致记忆库落盘静默失败、**SQLite 检查点静默退回内存实现**（断点续跑从未被真正覆盖）。
+      新增 `app/core/util.make_temp_dir()` 并让三个脚本改用 `.doctor-data/`；
+      `Orchestrator.checkpointer_kind/error` 经 `/api/health` 暴露，前端顶栏显式告警。
+    - **前端**：新增 `JudgePanel.tsx` 与「评估报告」标签页；任务头部评估分 Chip；
+      `MetricsPanel` 评估区块；`SettingsDrawer` 评估设置组；`MemoryPanel` 租户 chips 与列；
+      `Topbar` 断点续跑告警；`types.ts` 新增 `judge.scored` 事件类型。
+    - **验收**：`doctor.py` 扩到八项检查；`smoke_api.py` 新增评估断言与
+      **独立鉴权实例的租户隔离验收**。
+  - 验证：`scripts/doctor.py` 通过（八项全绿）；`scripts/smoke_api.py` **通过（exit 0）**；
+    `scripts/stress_llm.py -n 8 -c 4` 完成率 100% / 租约残留 0；
+    `npm run typecheck` 与 `npm run build` 通过（48 modules）。
+
+- **2026-09-13（第六轮：黄金数据集 + 回归门禁 + CI）**
+  - 依据《plan.md》4.3 D13「黄金数据集构建」、D14「Prompt 优化迭代（基于评估结果）」、
+    D18「CI/CD 流水线」与 2.5「系统级：黄金数据集评测」清点并落地：
+    - **mock 引擎补 `judge.evaluate`**：此前默认 mock 下 `judge_with_llm` 必然回退，
+      `_normalize_llm_axes` 的成功分支离线永远跑不到（最容易因字段漂移而坏的正是它）。
+      新增 `generate_judge()`，用规则评估器的真实打分作为「模型回答」。
+    - **黄金数据集**：`golden/briefs/*.json`（10 条，覆盖 7/7 渠道）+ `golden/baseline.json`；
+      `app/core/golden.py`（加载 / 覆盖矩阵 / 基线读写 / `compare` 判定）；
+      `app/core/golden_runner.py`（执行器 + 后台任务状态机）；
+      `scripts/golden_eval.py`（CLI，退出码即结论）。
+    - **判定规则**：分数回退超容差、**返工轮次增加**、**监管用例首轮合规未被拦截**
+      三类均判 `regressed`；全量缺用例算失败；部分运行只对范围内判定（`scope`/`partial`）；
+      跨 `rubric` 时置 `rubric_mismatch` 并拒绝直接比较。
+    - **接口**：`GET /api/golden`、`POST /api/golden/run`（202 + 后台执行）、`POST /api/golden/reset`。
+    - **CI**：`.github/workflows/ci.yml` —— 后端五道关卡（doctor / golden / verify_contracts /
+      smoke / stress）+ 前端 typecheck&build + 文档一致性检查；失败时上传服务端日志。
+    - **自检**：`doctor.py` 新增第 12 项，用 9 个子断言证明回归判定器**真的会判回归**
+      （含「容差内不该误报」的反向断言）。
+    - **前端**：新增 `GoldenPanel.tsx`（设置抽屉「回归测试」标签页：
+      跑全量 / 快速跑 3 条 / 清除结果、进度条、基线对比表、覆盖矩阵与用例清单）。
+  - 验证：`doctor.py` **12 项全绿**；`golden_eval.py` 全量 **10/10 持平（exit 0）**、
+    `--coverage` 7/7 渠道；`smoke_api.py` 与 `verify_contracts.py` 仍 **exit 0**；
+    `npm run typecheck` 与 `npm run build` 通过。
+
+- **2026-09-13（第七轮：调用轨迹与分布式追踪）**
+  - 依据《plan.md》2.4「可观测性：创建覆盖整个 Agent session 的 span，而非仅追踪单次模型调用」
+    与 MEMORY 待办收口：
+    - **新增 `app/core/tracing.py`**：OTel 数据模型的进程内实现（W3C trace_id/span_id、
+      parent、kind、attributes、status、嵌套 span、self-time 占比、OTel 形状导出）。
+      thread-local span 栈（编排在工作线程、HTTP 在事件循环），
+      单任务 span 上限 600、进程内 trace 上限 200，终态落盘 `data/traces/<task_id>.json`。
+    - **埋点**：`graph.invoke#<turn>`（根）／`human.wait`（独立根）／
+      `A<n>.<produces>`（智能体）／`gate.review`（门禁）／`judge.evaluate`（评估）／
+      `llm.<purpose>`（client，带 provider/model/token/成本/缓存/降级）／
+      `memory.retrieve`（RAG）／`publish.dispatch`（投递）。
+    - **修复（实测发现的真实缺陷）**：不包 `graph.invoke` 会让所有节点 span 成为根，
+      trace 树退化成「13 个并列根节点」，self-time 全部失真；包一层后根降到 3 个。
+      并把「根 span 少于总数」固化为自检与契约断言。
+    - **事件关联**：`AgentEvent` 新增 `trace_id` / `span_id`，由事件总线在 `publish()` 里
+      统一注入（调用方无需传参），排查时不必靠时间戳猜事件归属。
+    - **接口**：`GET /api/tasks/{id}/trace`、`/api/metrics.system.tracing`；
+      `DELETE /api/tasks/{id}` 一并回收 trace。
+    - **前端**：新增 `TracePanel.tsx` → 任务详情「调用轨迹」标签页
+      （可折叠 span 树 + 瀑布图 + span 属性内联 + 耗时排行）；
+      `MetricsPanel` 新增「调用轨迹」区块。
+    - **验收**：`doctor.py` 第 13 项 `check_tracing()`；`verify_contracts.py` 新增 14 项断言；
+      `smoke_api.py` 新增 trace 端点断言（含跨租户 404）。
+  - 验证：`doctor.py` **13 项全绿**（span=42 / 根=3 / llm=15 全部正确嵌套 / OTel 导出形状齐全）；
+    `verify_contracts.py` 与 `smoke_api.py` **exit 0**；`golden_eval.py` 仍 **exit 0**；
+    `npm run typecheck` 与 `npm run build` 通过（50 modules）。
+
+- **2026-09-13（第八轮：OTLP 真实导出 + 内容级期望 + 容器化）**
+  - 依据《plan.md》2.4「OpenTelemetry + Jaeger」、4.3 D13「黄金数据集构建」、
+    D18「生产环境部署」与 MEMORY 待办收口：
+    - **OTLP 真实导出**：新增 `app/core/otel.py`；配置 `OTLP_ENDPOINT` 后经 OTel SDK
+      OTLP/HTTP exporter 转发。**手工构造 `ReadableSpan`** 而非走 `start_span`，
+      以保证导出的 trace_id/span_id 与本地 JSON 完全一致（否则 Jaeger 与本地的 id 对不上）。
+      默认不加载 OTel（`doctor.py` 断言）；智能体归属沿 span 树继承到 `llm.*`。
+    - **黄金数据集内容级期望**：`golden/briefs/*.json` 新增 `expect` 块；
+      `app/core/golden.py` 新增 `check_expectations()` 与 `_is_negated()`（按小句判定否定语境）；
+      内容级失败一律算回归。
+    - **修复三个真实缺陷**：标题压缩 off-by-one、交付标题未受渠道上限约束、
+      合规扫描把免责声明误判为违规。
+    - **容器化**：`Dockerfile`（多阶段、非 root、健康检查）、`.dockerignore`、
+      `docker-compose.yml`（应用 + Jaeger）、`deploy/k8s.yaml`、
+      `scripts/check_deploy.py`（无需 daemon 的清单核验）。
+    - **前端**：`Topbar` 显示 OTLP 接入状态；`SettingsDrawer` 新增「调用轨迹与 OTLP 导出」区块。
+    - **配置**：`RuntimeConfig.tracing` + `public_config().tracing` + `/api/health.otlp`；
+      `.env.example` 补齐全部配置项。
+    - **依赖**：`requirements.txt` 新增 opentelemetry-api/sdk/exporter-otlp-proto-http
+      （仅在配置 OTLP 后才 import）。
+  - 验证：`doctor.py` **15 项全绿**；`golden_eval.py` **136 项断言 0 失败**；
+    `check_deploy.py` 通过；`smoke_api.py` / `verify_contracts.py` / `stress_llm.py` 均 **exit 0**；
+    `npm run typecheck` 与 `npm run build` 通过。
+    **镜像构建未实机验证**（本机 Docker daemon 未运行），已记入待办。
+
+### 4.1h 后端 · 第九轮：多语言本地化 + README + 人工事项清单（2026-09-13，已完成）
+
+- **多语言本地化（plan.md v2.0 的第一项）**：
+  - 新增 `app/knowledge/language.py`：**语言画像**（中/英/日/韩/西），每个语言包含
+    本地渠道、标题口径与上限、正文长度建议、表达惯例、合规红线、度量与日期格式、
+    广告披露要求、以及**是否已接入可执行词库**。
+  - `Brief` 新增 `language` 字段；`parse_brief()` 做**归一化**
+    （`en-US` / `English` / `英文` → `en`），无法识别时回落 `zh`。
+  - **原生创作而非翻译**：`localization_block(ctx)` 把本地化指令注入 A4 等创作智能体，
+    明确要求「用目标语言原生创作，不要先写中文再翻译」。
+  - **字数口径按语言**：`title_measure()` 英文按**词**、中日韩按**字**；
+    `title_limit_for()` 非中文用语言画像的上限。交付标题压缩也改用该口径 ——
+    Instagram 的 12 **词**上限若按字符算（60+ 字）会得出完全错误的结论。
+  - **记忆库按语言分区**：`MemoryCard.language` + `remember/retrieve` 的 `language` 参数；
+    英文资产不会被中文任务当语气基线复用（复用语言不对的资产比不复用更糟）。
+  - **合规诚实性**：非中文市场**没有自动词库**，A7 显式声明「需人工复核」、
+    写入当地红线（如 FTC 披露要求）并强制 `needs_human_review` —— 不假装检查过了。
+  - **离线链路也支持英文**：mock 引擎新增英文分支（`_english_strategy` / `_english_copy`），
+    否则默认 `LLM_PROVIDER=mock` 时「多语言」在离线环境就是假的。
+  - 接口：`/api/knowledge` 新增 `languages` 与 `language_compliance`（各语言的合规覆盖情况）。
+- **黄金数据集新增英文用例**：`instagram_en_multilingual`，
+  验证原生英文（正文中文字符数必须为 0）、标题按词计上限、非中文合规如实告知。
+  共 **11 条用例 / 147 项断言**。
+- **修复两个真实缺陷**：
+  1. `mock.as_brief()` **没有透传 `language`** —— 本地化分支永远走不到（静默回落 `zh`）。
+     这类「字段漏传」在只有单一语言时完全不可见。
+  2. 黄金数据集的标题断言用**字符数**度量，而交付层已按**词**处理，
+     导致 12 词上限的英文标题被判成「超出上限 12 字」。断言与被断言对象必须同口径。
+- **README.md**：新增项目门面文档（核心能力、快速开始、架构、智能体清单、门禁、
+  评估与回归、可观测性、多语言、部署、配置、接口、开发验证、项目状态、
+  **需要人工协助的事项**、文档导航）。
+- **需要人工协助的事项清单**（写进 README 与 `USER_GUIDE.md`）：
+  P0 四项（镜像实机验证、生产令牌、真实网关定基线、非中文合规人工审核）、
+  P1 四项（品牌资产、发布网关、行业用例、行业词库）、P2 四项（视频脚本/数字人形态、
+  横向扩展方案、Jaeger 生产实例、人工抽检机制）。

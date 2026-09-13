@@ -185,6 +185,10 @@ def run(ctx: AgentRunContext) -> AgentResult:
             industry=brief.industry,
             top_k=5,
             exclude_task=ctx.task_id,
+            # 只召回本租户资产：A/B 两个品牌的调性基线不能互相串用（plan.md D17）
+            tenant=ctx.tenant,
+            # 只召回同语言资产：英文基调用在中文任务上比不用更糟（plan.md v2.0）
+            language=brief.language,
         )
     ]
     if recalled:
@@ -241,6 +245,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 
     # 检索结果与入库数量同样以系统真实数据为准
     content["recalled"] = recalled
+    content["tenant"] = ctx.tenant
     content["archive"]["indexed_cards"] = memory_store.remember(
         task_id=ctx.task_id,
         brand=brief.brand,
@@ -249,6 +254,8 @@ def run(ctx: AgentRunContext) -> AgentResult:
         cards=cards,
         templates=content["templates"],
         revision=ctx.revision,
+        tenant=ctx.tenant,
+        language=brief.language,
     )
 
     ctx.emit(

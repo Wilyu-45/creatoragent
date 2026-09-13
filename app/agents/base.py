@@ -63,6 +63,9 @@ class AgentRunContext:
     artifacts: list[Artifact] = field(default_factory=list)
     #: A11 记忆库召回的历史资产（RAG），由编排层在创作类智能体执行前注入
     memory: list[dict[str, Any]] = field(default_factory=list)
+    #: 归属租户（plan.md D17）。A11 据此读写**本租户**的记忆库，
+    #: 避免跨租户复用品牌调性；未启用鉴权时固定为 ``default``。
+    tenant: str = "default"
 
     def upstream_of(self, key: str) -> dict[str, Any]:
         return self.upstream.get(key) or {}
@@ -316,6 +319,17 @@ def memory_block(ctx: AgentRunContext, *, limit: int = 5) -> str:
     return render_hits(ctx.memory, limit=limit)
 
 
+def localization_block(ctx: AgentRunContext) -> str:
+    """渲染目标语言的本地化要求；中文任务返回空串（不影响既有行为）。
+
+    关键点是「**原生创作，不要先写中文再翻译**」：翻译腔的营销文案在本地市场
+    基本不可用，而模型在收到中文 Brief 时天然会先用中文思考。
+    """
+    from ..knowledge.language import localization_directive
+
+    return localization_directive(ctx.brief.channel, ctx.brief.language)
+
+
 def content_to_text(content: dict[str, Any]) -> str:
     """把结构化产物压平成可读文本，用于版本 diff、关键词检索与全文合规扫描。"""
     lines: list[str] = []
@@ -363,6 +377,7 @@ __all__ = [
     "read_gate",
     "read_reviews",
     "memory_block",
+    "localization_block",
     "content_to_text",
     "as_num",
     "as_obj",

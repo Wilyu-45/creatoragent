@@ -3,6 +3,7 @@ import type { AgentEvent, Brief } from './lib/types.ts';
 import { ApprovalPanel } from './components/ApprovalPanel.tsx';
 import { ArtifactViewer } from './components/ArtifactViewer.tsx';
 import { BriefForm } from './components/BriefForm.tsx';
+import { JudgePanel } from './components/JudgePanel.tsx';
 import { MetricsPanel } from './components/MetricsPanel.tsx';
 import { Pipeline } from './components/Pipeline.tsx';
 import { PublishPanel } from './components/PublishPanel.tsx';
@@ -11,6 +12,7 @@ import { SettingsDrawer } from './components/SettingsDrawer.tsx';
 import { TaskList } from './components/TaskList.tsx';
 import { Timeline } from './components/Timeline.tsx';
 import { Topbar } from './components/Topbar.tsx';
+import { TracePanel } from './components/TracePanel.tsx';
 import { Chip, Empty, Spinner } from './components/ui.tsx';
 import type {
   AgentsResponse,
@@ -23,11 +25,13 @@ import type {
 import { api, subscribeTask } from './lib/api.ts';
 import { formatCost, formatDateTime, STATUS_LABEL, statusTone } from './lib/format.ts';
 
-type Tab = 'pipeline' | 'artifacts' | 'timeline' | 'metrics';
+type Tab = 'pipeline' | 'artifacts' | 'judge' | 'trace' | 'timeline' | 'metrics';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'pipeline', label: '流水线看板' },
   { key: 'artifacts', label: '共享黑板产物' },
+  { key: 'judge', label: '评估报告' },
+  { key: 'trace', label: '调用轨迹' },
   { key: 'timeline', label: '事件时间线' },
   { key: 'metrics', label: '运行指标' },
 ];
@@ -221,6 +225,19 @@ export function App() {
     [tasks],
   );
 
+  /** 最近一次评估结论（来自 SSE/轮询事件流），用于在任务头部直接暴露质量分。 */
+  const latestJudge = useMemo(() => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event.type !== 'judge.scored') continue;
+      const payload = (event.payload ?? {}) as Record<string, unknown>;
+      const total = typeof payload.total === 'number' ? payload.total : null;
+      if (total === null) continue;
+      return { total, verdict: String(payload.verdict ?? 'review'), mode: String(payload.mode ?? '') };
+    }
+    return null;
+  }, [events]);
+
   const industries = knowledge?.industries ?? [];
   const config = health?.config ?? null;
 
@@ -301,6 +318,14 @@ export function App() {
                           租约冲突 {detail.task.intent_conflicts}
                         </Chip>
                       ) : null}
+                      {latestJudge ? (
+                        <Chip
+                          tone={latestJudge.verdict === 'pass' ? 'tone-ok' : latestJudge.verdict === 'reject' ? 'tone-bad' : 'tone-warn'}
+                          title={`LLM-as-a-Judge 评估（${latestJudge.mode}）`}
+                        >
+                          评估 {latestJudge.total.toFixed(1)}
+                        </Chip>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -344,6 +369,15 @@ export function App() {
                 </div>
               ) : null}
 
+              {tab === 'trace' ? (
+                <div className="panel">
+                  <div className="panel-title">
+                    调用轨迹 <span className="count">· span 树与耗时分布</span>
+                  </div>
+                  <TracePanel taskId={detail.task.id} />
+                </div>
+              ) : null}
+
               {tab === 'timeline' ? (
                 <div className="panel">
                   <div className="panel-title">
@@ -356,6 +390,15 @@ export function App() {
                   <div className="timeline">
                     <Timeline events={events} />
                   </div>
+                </div>
+              ) : null}
+
+              {tab === 'judge' ? (
+                <div className="panel">
+                  <div className="panel-title">
+                    评估报告 <span className="count">· 与门禁解耦的质量度量</span>
+                  </div>
+                  <JudgePanel taskId={detail.task.id} onToast={showToast} />
                 </div>
               ) : null}
 
@@ -381,6 +424,7 @@ export function App() {
           saving={saving}
           onClose={() => setShowSettings(false)}
           onSave={handleSaveSettings}
+          onToast={showToast}
         />
       ) : null}
 

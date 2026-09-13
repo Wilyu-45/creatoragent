@@ -1,0 +1,31 @@
+{
+  "id": "ecommerce_home_appliance",
+  "note": "电商详情页 + 消费品：详情页要求「卖点结构化 + 参数可核对」，是结构维度最容易拿满分也最容易漏 CTA 的场景。",
+  "brief": {
+    "brand": "净界",
+    "product": "静音除湿机",
+    "objective": "转化",
+    "audience": "南方回南天地区的租房人群",
+    "channel": "电商详情页",
+    "tone": "直接、参数说话、突出场景痛点",
+    "industry": "家电",
+    "keywords": ["静音", "除湿"],
+    "constraints": ["噪音分贝需标注测试距离", "不得夸大除湿面积"],
+    "deliverables": ["详情页文案 1 套"],
+    "priority": "high"
+  },
+  "expect": {
+    "min_quality": 85,
+    "min_judge": 80,
+    "max_revisions": 2,
+    "min_keyword_hits": 1,
+    "min_tone_hits": 1,
+    "must_not_contain": ["国家级", "最佳", "治疗", "保证有效", "无效退款"],
+    "reference_points": [
+      "详情页标题 25 字以内",
+      "卖点结构化：静音分贝、除湿量、适用面积、水箱容量",
+      "噪音分贝需标注测试距离",
+      "不得夸大除湿面积，末尾要有明确行动引导"
+    ]
+  }
+}

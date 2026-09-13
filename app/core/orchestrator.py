@@ -40,17 +40,26 @@ from langgraph.types import Command, interrupt
 
 from ..agents.base import AgentRunContext
 from ..agents.registry import get_agent
-from ..config import CHECKPOINT_FILE, get_config
-from ..knowledge.industry import publish_slots
+from ..config import CHECKPOINT_FILE, RUBRIC_VERSION, get_config
+from ..knowledge.industry import publish_slots, title_limit
+from ..knowledge.language import (
+    is_multilingual,
+    language_label,
+    localization_directive,
+    title_limit_for,
+)
 from ..knowledge.memory import memory_store
 from ..llm.cost import cost_guard
 from ..logger import create_logger
 from .blackboard import INTENT_TTL_MS, blackboard
 from .clock import now_iso
+from .evaluations import build_record, evaluation_store
 from .events import event_bus, new_id
 from .gatekeeper import build_scorecard, decide_gate, to_gate_records
+from .judge import JudgeReport, evaluate as judge_evaluate
 from .publisher import compute_due_at, dispatch as dispatch_webhook, is_due
 from .store import task_store
+from .tracing import tracer
 from .types import (
     AgentResult,
     ApprovalState,
@@ -146,6 +155,11 @@ class Orchestrator:
         self._waiters: dict[str, threading.Event] = {}
         self._running: set[str] = set()
         self._auto_approve: set[str] = set()
+        #: 检查点后端类型（sqlite / memory）。断点续跑是否真的可用，全看这个字段，
+        #: 因此把它暴露出来供 /api/health 与自检断言 —— 「静默退回内存检查点」
+        #: 是最容易在几个月后才被发现的那类退化。
+        self.checkpointer_kind = "memory"
+        self.checkpointer_error = ""
         self._graph = self._build_graph()
 
     # ---------------------------------------------------------------- #
@@ -153,13 +167,28 @@ class Orchestrator:
     # ---------------------------------------------------------------- #
 
     def _checkpointer(self) -> Any:
-        """优先使用 SQLite 检查点（可跨重启），失败则退回内存实现。"""
+        """优先使用 SQLite 检查点（可跨重启），失败则退回内存实现。
+
+        两个容易踩的点：
+        1. 检查点在**导入期**就要打开数据库，而 ``ensure_dirs()`` 要等 lifespan
+           才执行，因此这里必须先自己建目录；
+        2. 建目录成功 ≠ 数据库能打开（例如目录被沙箱/权限限制时 ``sqlite3`` 会抛
+           ``unable to open database file``）。失败必须留下明确痕迹 —— 否则
+           「断点续跑」会静默失效，直到某天进程重启才发现任务全都没了。
+        """
         try:
             CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(CHECKPOINT_FILE), check_same_thread=False)
+            self.checkpointer_kind = "sqlite"
+            self.checkpointer_error = ""
             return SqliteSaver(conn)
         except Exception as error:  # noqa: BLE001
-            log.warn("初始化 SQLite 检查点失败，退回内存检查点（重启后无法续跑）", error)
+            self.checkpointer_kind = "memory"
+            self.checkpointer_error = f"{type(error).__name__}: {error}"
+            log.warn(
+                "初始化 SQLite 检查点失败，退回内存检查点（重启后无法续跑）："
+                f"{self.checkpointer_error}；数据目录 {CHECKPOINT_FILE.parent}"
+            )
             return InMemorySaver()
 
     def _build_graph(self) -> Any:
@@ -302,18 +331,40 @@ class Orchestrator:
         cfg = get_config()
         # 成本账本绑定到本任务的执行线程，llm.chat 据此计费并在超预算时熔断
         cost_guard.begin(task.id, budget_usd=cfg.cost_budget_usd, token_budget=cfg.token_budget)
+        # 追踪：一个任务一个 trace，覆盖整个 Agent session（plan.md 2.4），
+        # 而不是只追踪单次模型调用。span 树在终态时落盘为 OTel 形状的 JSON。
+        trace_id = tracer.start_trace(task.id, tenant=task.tenant)
+        self._publish(
+            task, "log", f"追踪已开启（trace {trace_id[:8]}）", {"level": "debug"}
+        )
         try:
             while True:
-                output = self._graph.invoke(payload, config)
+                # 每次 graph.invoke 包一个 span：LangGraph 的节点各自独立执行，
+                # 若不包一层，所有节点 span 都会成为**根 span**，trace 树退化成
+                # 「13 个并列根节点」——看不出谁属于哪条链路，self-time 也失真。
+                with tracer.span(
+                    f"graph.invoke#{task.turn_used}",
+                    attributes={"graph.resuming": payload is None},
+                ) as invoke_span:
+                    output = self._graph.invoke(payload, config)
+                    tracer.finish_span(
+                        invoke_span,
+                        status="ok",
+                        attributes={
+                            "graph.interrupted": bool((output or {}).get("__interrupt__")),
+                        },
+                    )
                 interrupts = (output or {}).get("__interrupt__") or ()
                 if not interrupts:
                     break
                 pending = dict(interrupts[0].value or {})
-                decision = self._wait_for_human(
-                    task,
-                    str(pending.get("milestone") or "approval"),
-                    str(pending.get("message") or "等待人工裁决"),
-                )
+                # 人工等待不应计入耗时：否则排障时会把「人在犹豫」误读成「系统很慢」
+                with tracer.span("human.wait", kind="internal"):
+                    decision = self._wait_for_human(
+                        task,
+                        str(pending.get("milestone") or "approval"),
+                        str(pending.get("message") or "等待人工裁决"),
+                    )
                 payload = Command(resume=decision)
         except Exception as error:  # noqa: BLE001 - 任何异常都要落成 failed，不能吞掉
             self._handle_fatal(task, error)
@@ -322,6 +373,12 @@ class Orchestrator:
             released = blackboard.release_task_intents(task.id)
             if released:
                 log.info(f"任务 {task.id} 进入终态，回收 {released} 条黑板租约")
+            trace = tracer.finish_trace(task.id)
+            if trace is not None:
+                log.info(
+                    f"任务 {task.id} 追踪完成：{len(trace.spans)} 个 span，"
+                    f"总耗时 {trace.duration_ms}ms"
+                )
             with self._lock:
                 self._running.discard(task.id)
                 self._waiters.pop(task.id, None)
@@ -350,10 +407,24 @@ class Orchestrator:
 
     def _node_review(self, state: PipelineState) -> PipelineState:
         task = self._task(state)
+        # 门禁整体作为一个 span，其下挂 A5/A6/A7 三个智能体 span + judge span，
+        # 于是「审核链路一共花了多久」是一个可读的数字，而不是三次求和。
+        with tracer.span("gate.review", attributes={"gate.revision": task.revision_round}) as span:
+            return self._review_body(task, state, span)
+
+    def _review_body(
+        self, task: TaskRecord, state: PipelineState, span: Any
+    ) -> PipelineState:
         results = [self._run_agent_step(task, reviewer) for reviewer in REVIEW_AGENTS]
 
         scorecard = self._current_scorecard(task)
         task.scorecard = scorecard
+
+        # LLM-as-a-Judge：评估是旁路能力，默认只产出报告与建议（plan.md D14）。
+        # 放在门禁之前，是为了让 blocking 模式下的评估结论能参与本次裁决。
+        report = self._judge_step(task, "final", "review")
+        if report is not None:
+            self._apply_judge_to_scorecard(task, scorecard, report)
 
         cfg = get_config()
         decision = decide_gate(
@@ -362,6 +433,8 @@ class Orchestrator:
             max_revisions=cfg.max_revisions,
             quality_threshold=cfg.quality_threshold,
             scorecard=scorecard,
+            judge=report,
+            judge_mode=cfg.judge.mode,
         )
         task.gates.extend(to_gate_records(decision, task.revision_round))
 
@@ -373,11 +446,22 @@ class Orchestrator:
                 "verdict": decision.verdict,
                 "scorecard": scorecard.model_dump(mode="json"),
                 "blocking": decision.blocking,
+                "judge": report.to_dict() if report else None,
             },
             "info" if decision.verdict == "pass" else "warn",
         )
         self._save(task)
 
+        tracer.finish_span(
+            span,
+            status="ok",
+            attributes={
+                "gate.verdict": decision.verdict,
+                "gate.blocking": len(decision.blocking),
+                "gate.requests": len(decision.requests),
+                "gate.overall_score": scorecard.overall,
+            },
+        )
         return {
             "gate_verdict": decision.verdict,
             "gate_reason": decision.reason,
@@ -480,6 +564,9 @@ class Orchestrator:
 
     def _node_delivery(self, state: PipelineState) -> PipelineState:
         task = self._task(state)
+        # 交付前再评一次：此时定稿已冻结，分数可用于跨任务的 Prompt 回归对比。
+        # review 节点那一份记录的是「门禁时刻」的中间态，两者差值本身也是信号。
+        self._judge_step(task, "final", "delivery")
         self._publish_delivery(task, str(state.get("approval_comment") or ""))
         return {}
 
@@ -528,6 +615,8 @@ class Orchestrator:
         brief = task.brief
         objective_base = f"{brief.brand}｜{brief.product}｜{brief.channel}｜{brief.objective}"
         cfg = get_config()
+        language_label_text = language_label(brief.language)
+        localized = is_multilingual(brief.language)
 
         stages: list[dict[str, str]] = [
             {
@@ -612,6 +701,7 @@ class Orchestrator:
                     "channel": brief.channel,
                     "tone": brief.tone,
                     "industry": brief.industry,
+                    "language": brief.language,
                     "keywords": brief.keywords,
                     "objective": brief.objective,
                     "product": brief.product,
@@ -630,6 +720,9 @@ class Orchestrator:
             "goal": brief.objective,
             "audience": brief.audience,
             "channel": brief.channel,
+            "language": brief.language,
+            "language_label": language_label_text,
+            "localized": localized,
             "stages": [
                 {
                     "agent": stage["agent"],
@@ -736,6 +829,23 @@ class Orchestrator:
         if task.turn_used >= cfg.turn_budget:
             raise TurnBudgetExceeded(cfg.turn_budget)
 
+        # 一个智能体一次执行 = 一个 span（内部再嵌 llm.* 子 span）。
+        # 这样「这一步花了多久、其中模型占多少」可以直接从 trace 树读出来。
+        with tracer.span(
+            f"{agent_id}.{definition.meta.produces}",
+            agent_id=agent_id,
+            attributes={"agent.phase": definition.meta.phase, "agent.revision": task.revision_round},
+        ) as span:
+            return self._run_agent_body(task, agent_id, definition, feedback, span)
+
+    def _run_agent_body(
+        self,
+        task: TaskRecord,
+        agent_id: str,
+        definition: Any,
+        feedback: list[str] | None,
+        span: Any,
+    ) -> AgentResult:
         node = self._node(task, agent_id)
         task.turn_used += 1
         node.status = "running"
@@ -778,6 +888,7 @@ class Orchestrator:
             ),
             artifacts=list(task.artifacts),
             memory=memory_hits,
+            tenant=task.tenant,
         )
 
         try:
@@ -890,6 +1001,19 @@ class Orchestrator:
             )
 
         self._save(task)
+        # 把这一步的关键结论写进 span：错误率、门禁不通过率因此可以直接按 span 聚合
+        tracer.finish_span(
+            span,
+            status="ok",
+            attributes={
+                "agent.confidence": result.confidence,
+                "agent.gate_result": result.gate_result or "pass",
+                "agent.status": result.status,
+                "agent.risks": len(result.risks),
+                "agent.needs_human_review": result.needs_human_review,
+                "agent.artifact_count": len(result.artifacts),
+            },
+        )
         return result
 
     @staticmethod
@@ -999,14 +1123,26 @@ class Orchestrator:
             )
             if part
         )
-        hits = memory_store.retrieve(
-            query,
-            brand=brief.brand,
-            channel=brief.channel,
-            industry=brief.industry,
-            top_k=MEMORY_RECALL_TOP_K,
-            exclude_task=task.id,
-        )
+        with tracer.span(
+            "memory.retrieve",
+            agent_id=agent_id,
+            attributes={"recall.agent": agent_id, "recall.top_k": MEMORY_RECALL_TOP_K},
+        ) as span:
+            hits = memory_store.retrieve(
+                query,
+                brand=brief.brand,
+                channel=brief.channel,
+                industry=brief.industry,
+                top_k=MEMORY_RECALL_TOP_K,
+                exclude_task=task.id,
+                # 只召回本租户的历史资产：跨租户复用会直接污染品牌调性（plan.md D17）
+                tenant=task.tenant,
+                # 只召回同语言资产：英文基调用在中文任务上比不用更糟（plan.md v2.0）
+                language=brief.language,
+            )
+            tracer.finish_span(
+                span, status="ok", attributes={"recall.hits": len(hits)}
+            )
         if not hits:
             return []
 
@@ -1025,6 +1161,121 @@ class Orchestrator:
             },
         )
         return payload
+
+    # ---------------------------------------------------------------- #
+    # LLM-as-a-Judge 评估（plan.md 4.3 D14 / 2.5）                        #
+    # ---------------------------------------------------------------- #
+
+    def _judge_step(
+        self, task: TaskRecord, kind: str = "final", trigger: str = "review"
+    ) -> JudgeReport | None:
+        """对「当前有效文案」跑一次评估并落库。
+
+        评估失败**绝不允许**影响流水线：这里兜住所有异常，只记一条 warn 事件。
+        这与 embedding 的「可失败」原则一致——旁路能力不能成为新的失败面。
+        """
+        cfg = get_config()
+        if cfg.judge.mode == "off":
+            return None
+
+        with tracer.span(
+            "judge.evaluate",
+            attributes={"judge.mode": cfg.judge.mode, "judge.provider": cfg.judge.provider},
+        ) as span:
+            try:
+                report = judge_evaluate(
+                    task.brief,
+                    self._upstream_for_judge(task),
+                    mode=cfg.judge.provider,
+                    pass_threshold=cfg.judge.pass_threshold,
+                    kind=kind,
+                    revision=task.revision_round,
+                )
+            except Exception as error:  # noqa: BLE001 - 评估是旁路，不能拖垮创作链路
+                log.warn(f"任务 {task.id} 评估失败（已忽略）", error)
+                tracer.finish_span(
+                    span, status="error", status_message=f"{type(error).__name__}: {error}"
+                )
+                self._publish(
+                    task,
+                    "log",
+                    f"质量评估失败，已跳过（不影响交付）：{type(error).__name__}",
+                    {"level": "warn", "error": str(error)},
+                    "warn",
+                )
+                return None
+            tracer.finish_span(
+                span,
+                status="ok",
+                attributes={
+                    "judge.total": round(report.total, 1),
+                    "judge.verdict": report.verdict,
+                    "judge.used_llm": report.mode == "llm",
+                    "judge.fallback": report.fallback,
+                },
+            )
+
+        evaluation_store.record(
+            build_record(
+                task_id=task.id,
+                tenant=task.tenant,
+                report=report,
+                brand=task.brief.brand,
+                channel=task.brief.channel,
+                industry=task.brief.industry,
+                trigger=trigger,
+            )
+        )
+        self._publish(
+            task,
+            "judge.scored",
+            f"质量评估：{report.total:.1f}/100（{report.verdict}），"
+            f"最弱维度 {min(report.axes, key=lambda a: a.score).label if report.axes else '—'}",
+            {
+                "total": round(report.total, 1),
+                "verdict": report.verdict,
+                "mode": report.mode,
+                "axes": report.axis_scores,
+                "issues": report.issues[:4],
+                "suggestions": report.suggestions[:4],
+                "rubric": report.rubric,
+                "fallback": report.fallback,
+            },
+            "warn" if report.verdict != "pass" else "info",
+        )
+        return report
+
+    def _upstream_for_judge(self, task: TaskRecord) -> dict[str, dict[str, Any]]:
+        """评估所需的最小上游集合（与 A10/A11 的口径一致，取最新产物）。"""
+        def get(type_: str) -> dict[str, Any]:
+            artifact = blackboard.latest_artifact(task.id, type_)
+            return dict(artifact.content) if artifact else {}
+
+        return {
+            "strategy": get("strategy_brief"),
+            "creative": get("creative_concept"),
+            "plan": get("content_plan"),
+            "draft": self._effective_draft(task, True),
+            "edit": get("edited_copy"),
+            "factcheck": get("fact_check_report"),
+            "compliance": get("compliance_report"),
+        }
+
+    @staticmethod
+    def _apply_judge_to_scorecard(
+        task: TaskRecord, scorecard: QualityScorecard, report: JudgeReport
+    ) -> None:
+        """把评估总分按 ``judge.weight`` 混入综合质量分。
+
+        混入而不是替换：A5/A6/A7 的门禁结论仍然是主体，评估只做微调。
+        ``weight=0`` 时综合分与历史行为逐位一致，便于回滚。
+        """
+        weight = get_config().judge.weight
+        if weight <= 0 or not report.axes:
+            return
+        blended = scorecard.overall * (1.0 - weight) + report.total * weight
+        scorecard.overall = int(round(blended))
+        task.scorecard = scorecard
 
     def _effective_draft(self, task: TaskRecord, include_editor: bool) -> dict[str, Any]:
         """装配「当前有效文案」。
@@ -1388,6 +1639,7 @@ class Orchestrator:
         dispatched: list[str] = []
         failed: list[str] = []
         skipped: list[str] = []
+        # 投递按渠道各自成 span：失败重试的耗时与 last_error 因此可精确定位到渠道
         for item in schedule:
             name = str(item.get("channel"))
             if target and name != target:
@@ -1398,22 +1650,39 @@ class Orchestrator:
                 skipped.append(name)
                 continue
 
-            ok, detail = dispatch_webhook(
-                cfg.publish.webhook_url,
-                {
-                    "task_id": task.id,
-                    "brand": task.brief.brand,
-                    "product": task.brief.product,
-                    "channel": name,
-                    "slot": item.get("slot"),
-                    "due_at": item.get("due_at"),
-                    "title": item.get("title"),
-                    "keywords": item.get("keywords") or [],
-                    "body": platform_body.get(name, ""),
-                },
-                retry=cfg.publish.retry,
-                timeout_ms=cfg.llm.timeout_ms,
-            )
+            with tracer.span(
+                "publish.dispatch",
+                kind="client",
+                attributes={"publish.channel": name, "publish.due_at": item.get("due_at")},
+            ) as span:
+                ok, detail = dispatch_webhook(
+                    cfg.publish.webhook_url,
+                    {
+                        "task_id": task.id,
+                        "brand": task.brief.brand,
+                        "product": task.brief.product,
+                        "channel": name,
+                        "slot": item.get("slot"),
+                        "due_at": item.get("due_at"),
+                        "title": item.get("title"),
+                        "keywords": item.get("keywords") or [],
+                        "body": platform_body.get(name, ""),
+                    },
+                    retry=cfg.publish.retry,
+                    timeout_ms=cfg.llm.timeout_ms,
+                )
+                # 未配置 webhook 时退化为「登记发布」，是既定离线语义而非故障
+                tracer.finish_span(
+                    span,
+                    status="ok" if (ok or not cfg.publish.webhook_url) else "error",
+                    status_message="" if ok else detail,
+                    attributes={
+                        "publish.webhook_configured": bool(cfg.publish.webhook_url),
+                        "publish.result": "dispatched"
+                        if ok
+                        else ("skipped" if not cfg.publish.webhook_url else "failed"),
+                    },
+                )
             item["attempts"] = int(item.get("attempts") or 0) + 1
             item["last_error"] = "" if ok else detail
             if ok:
@@ -1609,6 +1878,21 @@ class Orchestrator:
         hashtags = target.get("hashtags")
         hashtags = hashtags if isinstance(hashtags, list) else []
 
+        # 交付标题必须符合主渠道的字数上限：这是「能不能直接发出去」的硬条件。
+        # A5 只在 小红书 分支做了压缩，其它渠道的基础标题可能超限；A9 的渠道标题是
+        # **关键词前置的搜索变体**（语义不同，不能拿来当交付标题），因此必须在这里兜底压缩。
+        # 原始标题一并保留在 base_title，避免压缩丢信息后无法追溯。
+        #
+        # 上限按**目标语言的口径**取：英文按词、中日韩按字。用错口径会让
+        # 「标题合规」的判断失去意义（12 个词的英文标题早已超出信息流截断点）。
+        base_title = str(target.get("title") or "")
+        delivery_limit = title_limit_for(task.brief.channel, task.brief.language)
+        title = (
+            base_title
+            if len(base_title) <= delivery_limit
+            else f"{base_title[: delivery_limit - 1]}…"
+        )
+
         # 交付物把视觉、渠道、知识三类「投放侧资产」一并带上，
         # 让交付件可直接交给运营执行，而不是只有一篇正文。
         visual_brief = self._content_of(task, "visual_brief")
@@ -1629,7 +1913,11 @@ class Orchestrator:
             "channel": task.brief.channel,
             "brand": task.brief.brand,
             "product": task.brief.product,
-            "title": target.get("title") or "",
+            "title": title,
+            # 压缩前的原始标题：便于追溯「发出去的标题」与「写给运营的完整标题」的差异
+            "base_title": base_title,
+            "title_limit": delivery_limit,
+            "title_trimmed": title != base_title,
             "body": target.get("body") or "",
             "cta": target.get("cta") or "",
             "hashtags": hashtags,

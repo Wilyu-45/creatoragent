@@ -46,13 +46,31 @@ def decide_gate(
     max_revisions: int,
     quality_threshold: int,
     scorecard: QualityScorecard,
+    judge: Any | None = None,
+    judge_mode: str = "advisory",
 ) -> GateDecision:
+    """汇总审核结论。
+
+    ``judge`` 是 LLM-as-a-Judge 的评估报告（``core/judge.JudgeReport``，类型用
+    ``Any`` 以免门禁层反向依赖评估器）。它有三种介入方式：
+
+    * 未传或 ``judge_mode="off"``：完全不参与，行为与历史版本一致；
+    * ``advisory``（默认）：只把评估结论写进门禁理由与阻断项，**不改裁决**；
+    * ``blocking``：``reject`` 直接升级人工，``review`` 计入返工理由。
+    """
     records: list[dict[str, Any]] = []
     requests: list[str] = []
     blocking: list[str] = []
 
     has_reject = False
     has_revise = False
+
+    judge_verdict = str(getattr(judge, "verdict", "") or "") if judge is not None else ""
+    judge_total = float(getattr(judge, "total", 0.0) or 0.0)
+    judge_notes = [
+        *[str(item) for item in (getattr(judge, "issues", None) or [])],
+        *[str(item) for item in (getattr(judge, "suggestions", None) or [])],
+    ][:4]
 
     for result in results:
         phase = REVIEWER_PHASE.get(result.agent_id)
@@ -96,10 +114,26 @@ def decide_gate(
             }
         )
 
+    # ---- LLM-as-a-Judge 的介入（plan.md 4.3 D14） -------------------- #
+    judge_note = ""
+    if judge is not None and judge_mode != "off":
+        judge_note = f"（质量评估 {judge_total:.1f}/100：{judge_verdict}）"
+        if judge_mode == "blocking":
+            if judge_verdict == "reject":
+                has_reject = True
+                blocking.append(f"[评估·否决] 质量评估 {judge_total:.1f}/100 显著低于通过线")
+                requests.extend(f"[评估] {item}" for item in judge_notes)
+            elif judge_verdict == "review":
+                has_revise = True
+                requests.extend(f"[评估·待改进] {item}" for item in judge_notes)
+        elif judge_verdict != "pass":
+            # advisory 模式：只记录，不影响裁决
+            blocking.extend(f"[评估·参考] {item}" for item in judge_notes[:2])
+
     if has_reject:
         return GateDecision(
             verdict="escalate",
-            reason="事实核查或合规智能体行使否决权，需人工复核后方可继续",
+            reason="事实核查或合规智能体行使否决权，需人工复核后方可继续" + judge_note,
             requests=requests,
             blocking=blocking,
             records=records,
@@ -109,14 +143,15 @@ def decide_gate(
         if revision >= max_revisions:
             return GateDecision(
                 verdict="escalate",
-                reason=f"已用完 {max_revisions} 轮返工额度仍未通过审核，升级人工处理",
+                reason=f"已用完 {max_revisions} 轮返工额度仍未通过审核，升级人工处理" + judge_note,
                 requests=requests,
                 blocking=blocking,
                 records=records,
             )
         return GateDecision(
             verdict="revise",
-            reason=f"存在 {len(requests)} 条需修订项，退回文案智能体修订（第 {revision + 1}/{max_revisions} 轮）",
+            reason=f"存在 {len(requests)} 条需修订项，退回文案智能体修订"
+            f"（第 {revision + 1}/{max_revisions} 轮）" + judge_note,
             requests=requests,
             blocking=blocking,
             records=records,
@@ -124,7 +159,7 @@ def decide_gate(
 
     return GateDecision(
         verdict="pass",
-        reason="编辑、事实核查、合规三项审核全部通过",
+        reason="编辑、事实核查、合规三项审核全部通过" + judge_note,
         requests=[],
         blocking=[],
         records=records,

@@ -1,0 +1,33 @@
+{
+  "id": "instagram_en_multilingual",
+  "note": "多语言本地化（plan.md v2.0）：英文 Brief + Instagram。验证**原生英文创作**（而不是中文再翻译）、标题按「词」计上限、以及非中文市场的合规未覆盖必须显式告知而不是静默放行。",
+  "brief": {
+    "brand": "Morning Field",
+    "product": "Cold Brew Coffee",
+    "objective": "转化",
+    "audience": "busy commuters in their 20s and 30s",
+    "channel": "Instagram",
+    "tone": "casual, honest, no hype",
+    "industry": "Food & Beverage",
+    "language": "en",
+    "keywords": ["cold brew", "morning routine"],
+    "constraints": ["no health claims", "must disclose paid partnership"],
+    "deliverables": ["1 Instagram caption", "5 headline options"],
+    "priority": "normal"
+  },
+  "expect": {
+    "min_quality": 80,
+    "min_judge": 70,
+    "max_revisions": 2,
+    "min_keyword_hits": 1,
+    "max_title_length": 12,
+    "must_not_contain": ["cure", "guaranteed", "best in the world", "#1"],
+    "reference_points": [
+      "正文必须是英文原生表达，不能出现中文（否则说明只是把中文稿翻了过来）",
+      "标题按「词」计上限（Instagram 12 词），不是按字符",
+      "不得出现健康功效承诺（no health claims 是 Brief 的硬约束）",
+      "付费合作必须显式标注 #ad（当地强制要求）",
+      "A7 合规报告必须声明「英文无自动词库、需人工复核」，不得静默判通过"
+    ]
+  }
+}

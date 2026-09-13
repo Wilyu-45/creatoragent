@@ -74,6 +74,22 @@ export function MemoryPanel() {
           ))}
         </div>
         <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+          <Chip
+            tone={stats.tenant ? 'tone-ok' : 'tone-idle'}
+            title="检索、列表与容量都按租户隔离：不同令牌对应不同租户，知识互不可见"
+          >
+            {stats.tenant ? `当前租户 ${stats.tenant}` : '未启用鉴权（单租户）'}
+          </Chip>
+          <Chip tone="tone-idle" title="全局卡片数（仅计数，不含其他租户的内容）">
+            全局 {stats.global_total}
+          </Chip>
+          {stats.tenants.length > 0 ? (
+            <Chip tone="tone-idle" mono>
+              租户 {stats.tenants.join('、')}
+            </Chip>
+          ) : null}
+        </div>
+        <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
           {stats.by_kind.map((item) => (
             <Chip key={item.kind} tone={KIND_TONE[item.kind] ?? 'tone-idle'}>
               {item.label} {item.count}
@@ -160,7 +176,7 @@ export function MemoryPanel() {
         {cards.length === 0 ? (
           <Empty>还没有沉淀任何知识，完成任务后 A11 会自动写入</Empty>
         ) : (
-          <Table head={['类型', '标题', '品牌 / 渠道', '来源任务', '入库时间']}>
+          <Table head={['类型', '标题', '品牌 / 渠道', '租户', '来源任务', '入库时间']}>
             {cards.map((card) => (
               <tr key={card.id}>
                 <td>
@@ -175,6 +191,7 @@ export function MemoryPanel() {
                 <td>
                   {card.brand || '—'} / {card.channel || '—'}
                 </td>
+                <td className="small mono">{card.tenant || 'default'}</td>
                 <td className="mono small">{card.task_id}</td>
                 <td className="small">{formatDateTime(card.created_at)}</td>
               </tr>

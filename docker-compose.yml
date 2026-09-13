@@ -1,0 +1,82 @@
+# 一键起本地环境：应用 + Jaeger（用于查看 OTLP 导出的调用轨迹）
+#
+#   docker compose up -d --build
+#   应用   http://127.0.0.1:8787
+#   Jaeger http://127.0.0.1:16686    （Service 选 creator-agent-studio）
+#
+# 只想要应用（不接 Jaeger）：
+#   docker compose up -d --build app
+#
+# 说明：本 compose 通过 OTLP_ENDPOINT 把追踪送到 Jaeger。
+# **不配这个变量时应用同样完整可用** —— 进程内 span 树与本地
+# data/traces/*.json 不依赖任何外部服务。
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: creator-agent-studio:latest
+    container_name: creator-app
+    ports:
+      - "8787:8787"
+    volumes:
+      # 命名卷持久化：任务、黑板、记忆库、评估历史、检查点、trace 都在 /data
+      - creator-data:/data
+    environment:
+      PORT: "8787"
+      CREATOR_DATA_DIR: /data
+
+      # ---- 模型：默认离线引擎，无需密钥即可跑通全流程 ----
+      LLM_PROVIDER: "${LLM_PROVIDER:-mock}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+
+      # ---- 门禁与编排 ----
+      TURN_BUDGET: "${TURN_BUDGET:-25}"
+      MAX_REVISIONS: "${MAX_REVISIONS:-2}"
+      QUALITY_THRESHOLD: "${QUALITY_THRESHOLD:-75}"
+      AUTO_APPROVE: "${AUTO_APPROVE:-false}"
+
+      # ---- 成本与评估 ----
+      COST_BUDGET_USD: "${COST_BUDGET_USD:-0.5}"
+      TOKEN_BUDGET: "${TOKEN_BUDGET:-50000}"
+      JUDGE_MODE: "${JUDGE_MODE:-advisory}"
+      JUDGE_PROVIDER: "${JUDGE_PROVIDER:-offline}"
+
+      # ---- 向量检索 ----
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-local}"
+      EMBEDDING_WEIGHT: "${EMBEDDING_WEIGHT:-0.35}"
+
+      # ---- 访问令牌（为空则不鉴权；生产环境务必设置）----
+      CREATOR_API_TOKENS: "${CREATOR_API_TOKENS:-}"
+
+      # ---- 追踪：指向 Jaeger 的 OTLP/HTTP 端点 ----
+      OTLP_ENDPOINT: "http://jaeger:4318"
+      OTEL_SERVICE_NAME: "creator-agent-studio"
+    depends_on:
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  jaeger:
+    # all-in-one：collector + storage + UI 一体，适合本地与演示
+    # 生产环境请换用持久化存储（Elasticsearch / Cassandra）并单独部署 collector
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: creator-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4318:4318"     # OTLP/HTTP（宿主也可直连，方便容器外的进程导出）
+    restart: unless-stopped
+
+volumes:
+  creator-data:

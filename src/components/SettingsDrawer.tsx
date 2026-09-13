@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import type { KnowledgeView, PublicConfigView } from '../lib/api.ts';
 import { getApiToken, setApiToken } from '../lib/api.ts';
+import { GoldenPanel } from './GoldenPanel.tsx';
 import { KnowledgePanel } from './KnowledgePanel.tsx';
 import { MemoryPanel } from './MemoryPanel.tsx';
 import { Chip, Spinner } from './ui.tsx';
 
-type Tab = 'runtime' | 'knowledge' | 'memory';
+type Tab = 'runtime' | 'knowledge' | 'memory' | 'golden';
 
 export function SettingsDrawer({
   config,
@@ -13,12 +14,14 @@ export function SettingsDrawer({
   saving,
   onClose,
   onSave,
+  onToast,
 }: {
   config: PublicConfigView;
   knowledge: KnowledgeView | null;
   saving: boolean;
   onClose: () => void;
   onSave: (patch: Record<string, unknown>) => void;
+  onToast?: (text: string, error?: boolean) => void;
 }) {
   const [tab, setTab] = useState<Tab>('runtime');
   const [provider, setProvider] = useState(config.llm.provider);
@@ -42,6 +45,10 @@ export function SettingsDrawer({
   const [publishWebhookUrl, setPublishWebhookUrl] = useState(config.publish.webhookUrl);
   const [publishAutoDispatch, setPublishAutoDispatch] = useState(config.publish.autoDispatch);
   const [publishRetry, setPublishRetry] = useState(config.publish.retry);
+  const [judgeMode, setJudgeMode] = useState(config.judge.mode);
+  const [judgeProvider, setJudgeProvider] = useState(config.judge.provider);
+  const [judgePassThreshold, setJudgePassThreshold] = useState(config.judge.passThreshold);
+  const [judgeWeight, setJudgeWeight] = useState(config.judge.weight);
   const [apiToken, setApiTokenState] = useState(getApiToken());
 
   const save = (): void => {
@@ -65,6 +72,10 @@ export function SettingsDrawer({
       publishWebhookUrl,
       publishAutoDispatch,
       publishRetry,
+      judgeMode,
+      judgeProvider,
+      judgePassThreshold,
+      judgeWeight,
     };
     if (apiKey.trim()) patch.apiKey = apiKey.trim();
     if (embeddingApiKey.trim()) patch.embeddingApiKey = embeddingApiKey.trim();
@@ -99,6 +110,9 @@ export function SettingsDrawer({
           </button>
           <button className={`tab${tab === 'memory' ? ' active' : ''}`} onClick={() => setTab('memory')}>
             记忆库
+          </button>
+          <button className={`tab${tab === 'golden' ? ' active' : ''}`} onClick={() => setTab('golden')}>
+            回归测试
           </button>
         </div>
 
@@ -317,6 +331,86 @@ export function SettingsDrawer({
               未配置 webhook 时，「投递」等价于「登记发布」，离线同样可用。
             </div>
 
+            <div className="section-h">质量评估（LLM-as-a-Judge）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>介入方式</label>
+                <select
+                  value={judgeMode}
+                  onChange={(e) => setJudgeMode(e.target.value as PublicConfigView['judge']['mode'])}
+                >
+                  <option value="off">off（关闭评估）</option>
+                  <option value="advisory">advisory（只打分，不影响门禁）</option>
+                  <option value="blocking">blocking（低分参与返工判定）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>评估器</label>
+                <select
+                  value={judgeProvider}
+                  onChange={(e) =>
+                    setJudgeProvider(e.target.value as PublicConfigView['judge']['provider'])
+                  }
+                >
+                  <option value="offline">offline（规则评估，零依赖可离线）</option>
+                  <option value="llm">llm（走模型网关，失败自动回退）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>通过线（0–100）</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={judgePassThreshold}
+                  onChange={(e) => setJudgePassThreshold(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>计入综合质量分的权重（0–1）</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={judgeWeight}
+                  onChange={(e) => setJudgeWeight(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+              <Chip tone="tone-idle" mono title="评分口径版本：跨版本对比分数前必须先对齐">
+                {config.judge.rubric}
+              </Chip>
+              <Chip tone="tone-idle">六维：需求契合 / 合规安全 / 结构完整 / 品牌语气 / 事实稳妥 / 吸引力</Chip>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              默认 advisory：评估只产出分数与建议，不改变门禁结论；权重 0 表示评估分完全不影响综合质量分。
+            </div>
+
+            <div className="section-h">调用轨迹与 OTLP 导出</div>
+            <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+              <Chip tone={config.tracing.otlpConfigured ? 'tone-ok' : 'tone-idle'}>
+                {config.tracing.otlpConfigured ? 'OTLP 已配置' : '进程内追踪（未接 OTLP）'}
+              </Chip>
+              <Chip tone="tone-idle" mono>
+                service {config.tracing.serviceName}
+              </Chip>
+              {config.tracing.otlpEndpoint ? (
+                <Chip tone="tone-info" mono>
+                  {config.tracing.otlpEndpoint}
+                </Chip>
+              ) : null}
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              OTLP 端点通过环境变量 <code>OTLP_ENDPOINT</code> 配置（如
+              <code> http://localhost:4318</code>），因此不在此处热改。
+              <strong>不配置也完整可用</strong>：进程内 span 树与
+              <code> data/traces/*.json </code>不依赖任何外部服务；配置后会把同一份 span
+              （相同的 trace_id / span_id）转发给 collector，可在 Jaeger 里直接查。
+              本地一键起 Jaeger：<code>docker compose up -d</code>。
+            </div>
+
             <div className="section-h">访问令牌{config.authRequired ? '（已启用鉴权）' : ''}</div>
             <div className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
               <div className="field" style={{ flex: 1 }}>
@@ -353,9 +447,13 @@ export function SettingsDrawer({
           <div style={{ marginTop: 4 }}>
             <KnowledgePanel knowledge={knowledge} />
           </div>
-        ) : (
+        ) : tab === 'memory' ? (
           <div style={{ marginTop: 4 }}>
             <MemoryPanel />
+          </div>
+        ) : (
+          <div style={{ marginTop: 4 }}>
+            <GoldenPanel onToast={onToast} />
           </div>
         )}
       </div>

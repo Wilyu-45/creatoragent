@@ -1,0 +1,31 @@
+{
+  "id": "xiaohongshu_food",
+  "note": "主场景（MVP 默认路径）：食品饮料 + 小红书图文。初稿会命中功效类违规用语，用于验证「返工一轮后收敛」这条主链路。",
+  "brief": {
+    "brand": "晨野",
+    "product": "冷萃即饮咖啡",
+    "objective": "转化",
+    "audience": "早八通勤的都市白领",
+    "channel": "小红书",
+    "tone": "轻松、真实、有种草感",
+    "industry": "食品饮料",
+    "keywords": ["0 糖", "冷萃"],
+    "constraints": ["不承诺减肥功效", "必须标注真实成分"],
+    "deliverables": ["图文笔记 1 篇", "标题备选 5 条"],
+    "priority": "normal"
+  },
+  "expect": {
+    "min_quality": 85,
+    "min_judge": 80,
+    "max_revisions": 2,
+    "min_tone_hits": 1,
+    "min_keyword_hits": 1,
+    "must_not_contain": ["减肥", "瘦身", "燃脂", "治疗", "国家级", "最佳"],
+    "reference_points": [
+      "标题 20 字以内，含身份锚点（早八通勤）并给出具体场景",
+      "正文先共情痛点再给方案，用具体细节替代形容词",
+      "至少覆盖 1 个 Brief 关键词（0 糖 / 冷萃）",
+      "全文不得出现功效承诺或绝对化用语"
+    ]
+  }
+}

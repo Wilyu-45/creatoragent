@@ -1,0 +1,31 @@
+{
+  "id": "wechat_longform_tech",
+  "note": "长文分支 + 非消费品行业：公众号长图文（1500-2500 字）与 B2B 科技行业画像，验证行业与渠道双双切换后的合规规则强度差异。",
+  "brief": {
+    "brand": "云枢",
+    "product": "云原生可观测平台",
+    "objective": "教育",
+    "audience": "中大型企业的 SRE 与平台工程负责人",
+    "channel": "公众号",
+    "tone": "专业、克制、用数据说话",
+    "industry": "科技",
+    "keywords": ["可观测性", "全链路追踪"],
+    "constraints": ["不贬损竞品", "性能数据必须标注测试条件"],
+    "deliverables": ["长图文 1 篇"],
+    "priority": "normal"
+  },
+  "expect": {
+    "min_quality": 85,
+    "min_judge": 76,
+    "max_revisions": 2,
+    "min_keyword_hits": 1,
+    "min_tone_hits": 2,
+    "must_not_contain": ["吊打同行", "碾压所有", "假货", "山寨货", "国家级", "最佳"],
+    "reference_points": [
+      "公众号标题可双标题、善用冒号结构，信息量优先",
+      "正文 1500-2500 字，结构为「导语钩子 → 背景 → 核心观点 3 段 → 案例 → 结论」",
+      "专业克制，不贬损竞品",
+      "性能数据必须标注测试条件"
+    ]
+  }
+}

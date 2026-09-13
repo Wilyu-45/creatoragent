@@ -33,6 +33,7 @@ from ..knowledge.industry import (
     seo_pattern,
     title_limit,
 )
+from ..knowledge.language import normalize_language
 from ..knowledge.memory import evidence_from_hits
 from ..knowledge.visual import channel_visual_spec, visual_styles_for
 from .json_utils import (
@@ -89,6 +90,8 @@ def as_brief(ctx: dict[str, Any]) -> Brief:
         channel=as_str(raw.get("channel"), "小红书"),
         tone=as_str(raw.get("tone"), "轻松、真实"),
         industry=as_str(raw.get("industry"), "消费品"),
+        # 语言必须透传：漏掉它会让本地化分支永远走不到（默认回落 zh）
+        language=normalize_language(as_str(raw.get("language"))),
         keywords=as_str_array(raw.get("keywords")),
         constraints=as_str_array(raw.get("constraints")),
         deliverables=as_str_array(raw.get("deliverables")),
@@ -116,6 +119,79 @@ def memory_evidence(ctx: dict[str, Any]) -> list[dict[str, Any]]:
 # ------------------------------------------------------------------ #
 
 
+def _english_strategy(brief: Brief, keyword: str, seed: int) -> dict[str, Any]:
+    """英文策略简报（mock 本地化分支）。
+
+    行业洞察库（``industry_profile``）是中文语料，直接复用会把中文漏进英文文案。
+    这里改为用 Brief 本身的信息产出英文结论 —— 离线环境下的目标不是「洞察有多深」，
+    而是**整条链路在目标语言下自洽**，这样黄金数据集与自检才能验证多语言行为。
+    """
+    audience = brief.audience or "the core buying audience"
+    product = brief.product
+    return {
+        "audience_profile": {
+            "segment": audience,
+            "size_hint": f"{audience} is the core decision-making and advocacy group for {brief.industry}",
+            "pain_points": [
+                f"too many options when choosing {keyword}",
+                "claims are hard to verify before buying",
+                "the cost of getting it wrong is high",
+            ],
+            "scenarios": [
+                "a normal weekday morning",
+                "the moment right before a decision",
+                "the first week of use",
+            ],
+            "motivations": [
+                "spend less time deciding",
+                "avoid repeating a bad purchase",
+                "feel confident recommending it",
+            ],
+            "objections": [
+                "is this actually different from the cheaper option",
+                "will it still work in three months",
+            ],
+        },
+        "message_house": {
+            "proposition": (
+                f"{brief.brand} helps {audience} get {product} right the first time — "
+                f"verifiable, not overstated"
+            ),
+            "support_points": [
+                f"a concrete difference built around {keyword}",
+                f"{product} maps directly to the cost of choosing wrong",
+                f"a claim you can repeat to a friend in one sentence on {brief.channel}",
+            ],
+            "benefits": [
+                "less time spent comparing",
+                "fewer decisions to re-litigate",
+                "a recommendation you can stand behind",
+            ],
+            "evidence": [
+                {"type": asset, "status": "needed", "note": "Collect real usage evidence before launch"}
+                for asset in ("spec sheet", "usage log", "third-party test")
+            ],
+        },
+        "objectives": [
+            {"type": brief.objective, "metric": "reach", "target": "baseline+30%"},
+            {"type": "trust", "metric": "save_rate", "target": "baseline+15%"},
+        ],
+        "channel_priority": [
+            {"channel": brief.channel, "reason": "primary channel from the brief", "priority": 1},
+            {"channel": "Email", "reason": "low-cost retention surface", "priority": 2},
+        ],
+        "confidence": 0.8,
+        "risks": ["English insights are generated without a local industry corpus"],
+        "evidence": [
+            {
+                "claim": f"primary keyword is {keyword}",
+                "source": "brief",
+                "reliability": 0.9,
+            }
+        ],
+    }
+
+
 def generate_strategy(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = as_brief(ctx)
     profile = industry_profile(brief.industry)
@@ -125,6 +201,11 @@ def generate_strategy(ctx: dict[str, Any]) -> dict[str, Any]:
     pain_points = pick_many(profile.pain_points, 3, seed)
     scenarios = pick_many(profile.scenarios, 3, seed + 2)
     motivations = pick_many(profile.motivations, 3, seed + 5)
+
+    # 非中文 Brief：行业洞察库目前只有中文语料，若直接沿用会让英文文案里夹中文。
+    # 离线分支改为产出英文结论（真实模型由本地化指令驱动，不受此限）。
+    if normalize_language(brief.language) == "en":
+        return _english_strategy(brief, keyword, seed)
 
     return {
         "audience_profile": {
@@ -525,6 +606,72 @@ def compose_body(brief: Brief, opts: dict[str, Any]) -> str:
     )
 
 
+def _english_copy(
+    brief: Brief, pain: str, scenario: str, benefits: list[str], support: list[str], keyword: str
+) -> dict[str, Any]:
+    """英文文案（mock 的多语言分支）。
+
+    为什么 mock 引擎也要做本地化：默认 ``LLM_PROVIDER=mock`` 时，如果英文 Brief
+    仍然产出中文，那么「多语言」在离线环境下就是假的 —— 黄金数据集与自检都会
+    因此得出错误结论。这里给出真正用目标语言写的内容，让离线链路可持续验证。
+
+    **覆盖范围如实说明**：只有英文有完整的原生模板；其它语言会退化为
+    「英文骨架 + 明确标注待本地化」，而不是假装已支持。
+    """
+    brand, product = brief.brand, brief.product
+    benefit_line = "; ".join(benefits[:3]) if benefits else "simpler, steadier, less trial and error"
+    support_line = support[0] if support else "based on real usage records"
+
+    v1_title = f"Still {pain.lower()}? I switched to {product}"
+    v1_body = (
+        f"Full disclosure: I did not expect much from {product}.\n\n"
+        f"I use it every day for {scenario.lower()}, and the part that actually surprised me "
+        f"was how little I had to think about it.\n\n"
+        f"{brand} keeps the spec sheet honest: {benefit_line}. "
+        f"What convinced me is simpler — {support_line}.\n\n"
+        f"If you are still dealing with {pain.lower()}, this is the version I would try first."
+    )
+    v2_title = f"{keyword}: what {product} actually trades off"
+    v2_body = (
+        f"Let me separate what I can verify from what I cannot.\n\n"
+        f"{brand} {product} is built around {keyword}. In practice that means {benefit_line}.\n\n"
+        f"What it does not do: it will not fix a problem you have not diagnosed yet. "
+        f"Start with {scenario.lower()} and measure before and after."
+    )
+    v3_title = f"The morning I stopped thinking about {pain.lower()}"
+    v3_body = (
+        f"There is a version of {scenario.lower()} that does not require willpower.\n\n"
+        f"I keep {product} where I can reach it without deciding anything. "
+        f"{brand} made the boring parts invisible, and that turned out to be the whole trick.\n\n"
+        f"Comfort is not a feature. It is what is left when the friction is gone."
+    )
+
+    def version(vid: str, style: str, title: str, body: str, cta: str) -> dict[str, Any]:
+        return {
+            "id": vid,
+            "style": style,
+            "title": title,
+            "body": body,
+            "cta": cta,
+            "hashtags": [f"#{keyword.replace(' ', '')}", f"#{brand}", "#review"],
+        }
+
+    return {
+        "versions": [
+            version("V1", "Primary · first-hand review", v1_title, v1_body, "See the full spec"),
+            version("V2", "Rational · decision aid", v2_title, v2_body, "Compare the details"),
+            version("V3", "Emotional · resonance", v3_title, v3_body, "Try it for a week"),
+        ],
+        "recommended_version": "V1",
+        "headlines": [v1_title, v2_title, v3_title],
+        "claims": [
+            {"text": benefit_line, "source": "product spec sheet"},
+            {"text": support_line, "source": "internal usage log"},
+        ],
+        "revision_notes": [],
+    }
+
+
 def generate_copy(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = as_brief(ctx)
     strategy = rec(ctx.get("strategy"))
@@ -537,12 +684,29 @@ def generate_copy(ctx: dict[str, Any]) -> dict[str, Any]:
     seed = fnv1a(f"{brief.brand}{brief.product}{brief.channel}{'r' if is_revision else 'v'}{len(feedback)}")
     rule = channel_rule(brief.channel)
 
-    pain = (as_str_array(audience.get("pain_points")) or ["选择成本太高"])[0]
-    scenario = (as_str_array(audience.get("scenarios")) or ["日常使用"])[0]
-    benefits = as_str_array(house.get("benefits")) or ["更省心", "更稳定", "更少的试错成本"]
-    support = as_str_array(house.get("support_points")) or ["基于实际使用记录"]
+    # 兜底值刻意留空：语言相关的默认值在下面按目标语言补齐，
+    # 避免「中文默认值漏进英文文案」这类只有多语言场景才暴露的问题
+    english = normalize_language(brief.language) == "en"
+    pain = (as_str_array(audience.get("pain_points")) or ([] if english else ["选择成本太高"]))
+    scenario = (as_str_array(audience.get("scenarios")) or ([] if english else ["日常使用"]))
+    benefits = as_str_array(house.get("benefits")) or ([] if english else ["更省心", "更稳定", "更少的试错成本"])
+    support = as_str_array(house.get("support_points")) or ([] if english else ["基于实际使用记录"])
+    pain = pain[0] if pain else ""
+    scenario = scenario[0] if scenario else ""
     keyword = brief.keywords[0] if brief.keywords else brief.product
     headlines = as_str_array(plan.get("headline_candidates"))
+
+    # 非中文 Brief 走本地化分支：产出目标语言的**原生文案**，而不是中文再翻译。
+    # 注意这里的兜底值也要按语言取 —— 否则上游缺字段时会把中文默认值漏进英文文案。
+    if normalize_language(brief.language) == "en":
+        return _english_copy(
+            brief,
+            pain or "too many options",
+            scenario or "a normal weekday morning",
+            benefits or ["less time spent comparing", "fewer decisions to re-litigate"],
+            support or ["based on real usage records"],
+            keyword,
+        )
 
     # 未经历返工时保留风险表达 —— 用于演示「合规门禁真实拦截」。
     flavor_pool = (
@@ -1512,7 +1676,18 @@ _PUBLISH_ACTIONS: list[tuple[str, str]] = [
 
 
 def _compress_title(title: str, limit: int) -> str:
-    return title if len(title) <= limit else f"{title[: limit - 1]}…"
+    """把标题压到 ``limit`` 字以内（超出时截断并加省略号）。
+
+    ⚠️ 省略号**占一个字符**，因此切片长度必须是 ``limit - 1``：
+    写成 ``title[:limit] + "…"`` 会得到 ``limit + 1`` 字 —— 恰好比渠道上限多一个字，
+    而 ``title_ok`` 之类基于同一常量的检查却会显示「通过」。
+    这个 off-by-one 由黄金数据集的「标题 ≤ 渠道上限」断言发现（见 MEMORY 踩坑 55）。
+    """
+    if len(title) <= limit:
+        return title
+    if limit <= 1:
+        return title[:limit]
+    return f"{title[: limit - 1]}…"
 
 
 def _parse_length_range(hint: str) -> tuple[int, int] | None:
@@ -1923,6 +2098,52 @@ def generate_memory(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ #
+# 评估生成器（judge.evaluate）                                        #
+# ------------------------------------------------------------------ #
+
+
+def generate_judge(ctx: dict[str, Any]) -> dict[str, Any]:
+    """离线评估器的「模型」替身：产出与 LLM-as-a-Judge 完全同构的评分 JSON。
+
+    为什么给它建一个生成器，而不是让 mock 模式下直接回退到规则评估器：
+    ``judge_with_llm`` 的**回退分支**与**成功分支**是两条不同的代码路径
+    （回退走 ``judge_offline``，成功走 ``_normalize_llm_axes`` + LLM 的
+    issues/suggestions/confidence）。默认的 ``provider=mock`` 会让成功分支
+    永远跑不到 —— 而它恰恰是最容易因为字段名漂移而坏掉的那条。
+    这里用规则评估器的真实打分作为「模型回答」，把成功分支也纳入离线可测范围。
+
+    注意：它**不是**第二个评估口径。分数来源仍是 ``judge_offline``，
+    只是换了一条「经过 LLM 契约解析」的路径来交付，因此与 LLM 模式下
+    「模型恰好答对」时的结果一致。
+    """
+    from ..core.judge import AXIS_WEIGHTS, judge_offline  # 延迟导入，避免模块级环依赖
+
+    brief = as_brief(ctx)
+    upstream = rec(ctx.get("upstream"))
+    report = judge_offline(brief, upstream, pass_threshold=75.0, kind="final")
+
+    return {
+        "axes": [
+            {
+                "key": axis.key,
+                "score": round(axis.score, 1),
+                "rationale": axis.rationale,
+                "evidence": list(axis.evidence),
+            }
+            for axis in report.axes
+        ] or [
+            # 没有可评估文本时给全 0 分，明确表达「无法评估」而不是给个中庸分
+            {"key": key, "score": 0.0, "rationale": "缺少可评估的正文产物", "evidence": []}
+            for key in AXIS_WEIGHTS
+        ],
+        "summary": report.summary,
+        "issues": list(report.issues),
+        "suggestions": list(report.suggestions),
+        "confidence": round(report.confidence, 3),
+    }
+
+
+# ------------------------------------------------------------------ #
 # 生成器注册表                                                        #
 # ------------------------------------------------------------------ #
 
@@ -1939,6 +2160,7 @@ GENERATORS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "A10.analyze": generate_analysis,
     "A10.review": generate_analysis_review,
     "A11.memory": generate_memory,
+    "judge.evaluate": generate_judge,
 }
 
 

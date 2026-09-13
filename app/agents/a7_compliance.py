@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.types import AgentResult, GateResult
+from ..knowledge.language import compliance_coverage
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -168,6 +169,23 @@ def run(ctx: AgentRunContext) -> AgentResult:
     required_fixes = as_str_array(content.get("required_fixes"))
     needs_human = risk_level == "high" and ctx.revision > 0
 
+    # 非中文市场：广告法词库不适用，系统**不能**假装合规已通过。
+    # 明确降级为「需人工复核」并把当地红线写进 risks —— 这与「静默放行」的区别
+    # 就是「如实告知未覆盖」与「假装检查过了」的区别。
+    extra_risks = read_risks(result.data)
+    coverage = compliance_coverage(ctx.brief.language)
+    if not coverage["lexicon_coverage"]:
+        needs_human = True
+        extra_risks.append(
+            f"{coverage['label']}尚无自动合规词库，本次合规结论未经当地法规校验，需人工复核"
+        )
+        for note in list(coverage["notes"])[:3]:
+            extra_risks.append(f"[当地红线] {note}")
+        if coverage["ad_disclosure_required"]:
+            extra_risks.append(
+                f"商业推广须显式标注 {coverage['ad_disclosure_text']}（当地强制要求）"
+            )
+
     return build_result(
         ctx,
         META,
@@ -176,10 +194,15 @@ def run(ctx: AgentRunContext) -> AgentResult:
             summary=(
                 f"合规等级 {risk_level}：阻断 {summary['blocker']} 项、"
                 f"重要 {summary['major']} 项、建议 {summary['minor']} 项"
+                + (
+                    ""
+                    if coverage["lexicon_coverage"]
+                    else f"（{coverage['label']}无自动词库，需人工复核）"
+                )
             ),
             artifacts=[artifact],
             confidence=read_confidence(result.data, 0.9),
-            risks=read_risks(result.data),
+            risks=extra_risks,
             evidence=read_evidence(result.data),
             needs_human_review=needs_human,
             gate_result=verdict,

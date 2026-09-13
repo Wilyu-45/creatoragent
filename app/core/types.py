@@ -89,6 +89,9 @@ class Brief(BaseModel):
     channel: str = "小红书"
     tone: str = "轻松、真实、有种草感"
     industry: str = "消费品"
+    #: 目标语言（plan.md v2.0「多语言本地化」）。``zh`` 为默认；
+    #: 其它语言走本地化链路：原生创作而非翻译、按该语言口径校字数、记忆库按语言分区。
+    language: str = "zh"
     keywords: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     deliverables: list[str] = Field(default_factory=list)
@@ -107,6 +110,7 @@ def create_empty_brief() -> Brief:
         channel="小红书",
         tone="轻松、真实、有种草感",
         industry="消费品",
+        language="zh",
         keywords=[],
         constraints=[],
         deliverables=["图文笔记 1 篇", "标题备选 5 条"],
@@ -459,7 +463,7 @@ AgentEventType = Literal[
     "task.created", "task.status", "task.completed", "task.failed", "phase.enter",
     "agent.start", "agent.progress", "agent.finish", "gate.decision",
     "revision.requested", "approval.required", "approval.decided",
-    "blackboard.write", "log",
+    "blackboard.write", "judge.scored", "log",
 ]
 
 
@@ -475,6 +479,10 @@ class AgentEvent(BaseModel):
     level: Literal["debug", "info", "warn", "error"] = "info"
     message: str = ""
     payload: dict[str, Any] | None = None
+    #: 追踪关联：让每个事件都能定位到所属 trace 与产出它的 span
+    #: （plan.md 2.4 要求「覆盖整个 Agent session 的 span」，而非仅单次模型调用）
+    trace_id: str | None = None
+    span_id: str | None = None
 
 
 # ------------------------------------------------------------------ #

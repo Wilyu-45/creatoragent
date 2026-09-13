@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api.routes import create_api_router
 from .config import API_TOKENS, ROOT_DIR, ensure_dirs, get_config
+from .core import otel
 from .core.blackboard import blackboard
 from .core.orchestrator import orchestrator
 from .core.store import task_store
@@ -34,6 +35,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     ensure_dirs()
     info: dict[str, Any] = task_store.load_all()
     blackboard.load()
+
+    # 追踪：只在配置了 OTLP_ENDPOINT 时才加载 OTel SDK（默认零外部依赖）
+    tracing_cfg = get_config().tracing
+    if tracing_cfg.otlp_endpoint:
+        if not otel.setup(
+            endpoint=tracing_cfg.otlp_endpoint,
+            service_name=tracing_cfg.service_name,
+            headers=tracing_cfg.otlp_headers,
+        ):
+            log.warn("OTLP_ENDPOINT 已配置但初始化失败，继续使用进程内追踪")
+    else:
+        log.info("OTLP 导出未启用（进程内 span 树仍完整可用；配置 OTLP_ENDPOINT 即可转发）")
 
     interrupted = list(info.get("interrupted") or [])
     if interrupted:
@@ -84,6 +97,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if ticker is not None:
             ticker.cancel()
         log.info("正在优雅退出…")
+        # 先 flush OTLP 再落盘：BatchSpanProcessor 里可能还有未发送的 span
+        otel.shutdown()
         task_store.flush_all()
         blackboard.flush()
         log.info("数据已保存，进程退出")

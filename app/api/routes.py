@@ -17,15 +17,27 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..agents.registry import PLANNED_AGENTS, all_agent_meta
-from ..config import get_config, public_config, update_config
+from ..config import RUBRIC_VERSION, get_config, public_config, update_config
 from ..core.blackboard import blackboard
 from ..core.clock import now_iso
+from ..core.evaluations import build_record, evaluation_store
 from ..core.events import event_bus
+from ..core.golden import DEFAULT_TOLERANCE, compare, coverage, load_baseline, load_dataset
+from ..core.golden_runner import reset_state as reset_golden_state
+from ..core.golden_runner import start_background_run, state as golden_state
+from ..core.judge import evaluate as judge_evaluate
 from ..core.orchestrator import orchestrator
 from ..core.store import task_store
+from ..core.tracing import EXPORT_DIR, tracer
+from ..core import otel
 from ..core.types import PHASE_LABEL, PHASE_ORDER, Brief, TaskRecord, create_empty_brief
 from ..knowledge.compliance import INDUSTRY_RULES, LEXICON_GROUPS
 from ..knowledge.industry import CHANNEL_RULES, INDUSTRY_PROFILES
+from ..knowledge.language import (
+    compliance_coverage,
+    language_options,
+    normalize_language,
+)
 from ..knowledge.memory import CARD_KINDS, KIND_LABEL, memory_store
 from ..llm import resolve_provider
 from ..llm.cache import response_cache
@@ -81,6 +93,8 @@ def parse_brief(input_value: Any) -> Brief:
         channel=_pick(raw, "channel", base.channel),
         tone=_pick(raw, "tone", base.tone),
         industry=_pick(raw, "industry", base.industry),
+        # 语言做归一化：用户可能写 en-US / English / 英文，统一收敛到主语言子标签
+        language=normalize_language(str(raw.get("language") or base.language)),
         keywords=_as_string_array(raw.get("keywords")),
         constraints=_as_string_array(raw.get("constraints")),
         deliverables=_as_string_array(raw.get("deliverables")),
@@ -171,6 +185,13 @@ def health() -> dict[str, Any]:
             "model": provider.model,
             "simulated": getattr(provider, "simulated", True),
         },
+        # 断点续跑是否真的可用：sqlite = 可跨重启；memory = 重启后任务无法续跑
+        "checkpointer": {
+            "kind": orchestrator.checkpointer_kind,
+            "error": orchestrator.checkpointer_error,
+        },
+        # OTLP 导出状态：未配置时进程内追踪仍完整可用
+        "otlp": {**otel.stats(), "endpoint": get_config().tracing.otlp_endpoint},
     }
 
 
@@ -214,23 +235,34 @@ def knowledge() -> dict[str, Any]:
             for channel, rule in CHANNEL_RULES.items()
         ],
         "industries": list(INDUSTRY_PROFILES.keys()),
+        # 多语言本地化：可选语言与各语言的合规覆盖情况（未覆盖的必须显式说明）
+        "languages": language_options(),
+        "language_compliance": {
+            code: compliance_coverage(code)
+            for code in [item["code"] for item in language_options()]
+        },
     }
 
 
 @router.get("/memory")
-def read_memory(kind: str | None = Query(default=None), limit: int = Query(default=50)) -> dict[str, Any]:
-    """A11 记忆库：知识卡片列表 + 容量统计。"""
-    cards = memory_store.list_cards(kind=kind, limit=max(1, min(limit, 200)))
+def read_memory(
+    request: Request, kind: str | None = Query(default=None), limit: int = Query(default=50)
+) -> dict[str, Any]:
+    """A11 记忆库：知识卡片列表 + 容量统计（按当前租户隔离）。"""
+    tenant = _tenant_of(request)
+    cards = memory_store.list_cards(kind=kind, limit=max(1, min(limit, 200)), tenant=tenant)
     return {
-        "stats": memory_store.stats(),
+        "stats": memory_store.stats(tenant),
         "kinds": [{"kind": item, "label": KIND_LABEL[item]} for item in CARD_KINDS],
         "cards": [card.to_dict() for card in cards],
     }
 
 
 @router.post("/memory/search")
-def search_memory(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
-    """按自然语言描述检索可复用知识（供其他智能体与人工复用）。"""
+def search_memory(
+    request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """按自然语言描述检索可复用知识（与智能体召回同源，限当前租户）。"""
     body: dict[str, Any] = payload or {}
     query = str(body.get("query") or "").strip()
     if not query:
@@ -244,8 +276,143 @@ def search_memory(payload: dict[str, Any] | None = Body(default=None)) -> dict[s
         channel=str(body.get("channel") or "").strip(),
         industry=str(body.get("industry") or "").strip(),
         top_k=max(1, min(top_k, 20)),
+        tenant=_tenant_of(request),
     )
     return {"query": query, "hits": [hit.to_dict() for hit in hits]}
+
+
+@router.get("/evaluations")
+def read_evaluations(
+    request: Request,
+    taskId: str | None = Query(default=None),
+    limit: int = Query(default=20),
+) -> dict[str, Any]:
+    """LLM-as-a-Judge 评估历史（plan.md 4.3 D14）。
+
+    不传 ``taskId`` 时返回当前租户的最近评估记录，用于跨任务的 Prompt 回归对比。
+    """
+    records = evaluation_store.list(
+        task_id=taskId, tenant=_tenant_of(request), limit=max(1, min(limit, 200))
+    )
+    return {
+        "stats": evaluation_store.stats(tenant=_tenant_of(request)),
+        "config": {
+            "mode": get_config().judge.mode,
+            "provider": get_config().judge.provider,
+            "passThreshold": get_config().judge.pass_threshold,
+            "weight": get_config().judge.weight,
+            "rubric": RUBRIC_VERSION,
+        },
+        "records": [record.to_dict() for record in records],
+    }
+
+
+@router.post("/tasks/{task_id}/evaluate")
+def evaluate_task(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """对当前任务跑一次按需评估（人工触发，写入手工触发记录）。
+
+    这是「评分台」：改完 Prompt 或人工改稿后，不必重跑整条流水线就能拿到新分数。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    provider = body.get("provider")
+    if provider not in (None, "offline", "llm"):
+        raise HTTPException(status_code=400, detail="provider 必须是 offline / llm")
+
+    upstream = _judge_upstream(task)
+    if not upstream:
+        raise HTTPException(status_code=409, detail="该任务还没有可评估的文案产物")
+
+    cfg = get_config()
+    report = judge_evaluate(
+        task.brief,
+        upstream,
+        mode=provider or cfg.judge.provider,
+        pass_threshold=cfg.judge.pass_threshold,
+        kind="manual",
+        revision=task.revision_round,
+    )
+    record = evaluation_store.record(
+        build_record(
+            task_id=task.id,
+            tenant=task.tenant,
+            report=report,
+            brand=task.brief.brand,
+            channel=task.brief.channel,
+            industry=task.brief.industry,
+            trigger="manual",
+        )
+    )
+    return {"task_id": task.id, "record": record.to_dict()}
+
+
+def _judge_upstream(task: TaskRecord) -> dict[str, dict[str, Any]]:
+    """装配按需评估所需的上游产物（复用编排器的取值口径）。"""
+    return orchestrator._upstream_for_judge(task)  # noqa: SLF001 - 同一进程内的既定复用
+
+
+# ------------------------------------------------------------------ #
+# 黄金数据集（plan.md 4.3 D13「黄金数据集构建」）                      #
+# ------------------------------------------------------------------ #
+
+
+@router.get("/golden")
+def read_golden() -> dict[str, Any]:
+    """黄金数据集：用例清单 + 基线 + 覆盖矩阵 + 最近一次运行状态。
+
+    数据集与基线都是**随仓库版本化的代码资产**（放在 ``golden/`` 而非 ``data/``），
+    因此不做租户过滤 —— 它们是测试资产，不是某个租户的业务数据。
+    """
+    cases = load_dataset()
+    baseline = load_baseline()
+    current = golden_state()
+    payload: dict[str, Any] = {
+        "cases": [case.to_dict() for case in cases],
+        "baseline": {
+            "updated_at": baseline.get("updated_at"),
+            "rubric": baseline.get("rubric"),
+            "engine": baseline.get("engine"),
+            "note": baseline.get("note"),
+            "cases": baseline.get("cases") or {},
+        },
+        "coverage": coverage(),
+        "rubric": RUBRIC_VERSION,
+        "tolerance": DEFAULT_TOLERANCE,
+        "state": current.to_dict(),
+    }
+    # 跑完（或有历史结果）时顺带给出与基线的对比结论，界面无需自己算
+    if current.results and not current.running:
+        payload["comparison"] = compare(current.results, scope=current.scope)
+    return payload
+
+
+@router.post("/golden/run", status_code=202)
+def run_golden(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    """在后台启动一次黄金数据集回归（不阻塞请求，立即返回 202）。
+
+    跑完 10 条用例是分钟级的，**不能**把 HTTP 请求挂在上面（浏览器与 fetch 都有超时）。
+    因此这里只负责启动；调用方用 ``GET /api/golden`` 轮询 ``state`` 看进度与结果。
+    """
+    body: dict[str, Any] = payload or {}
+    limit = body.get("limit")
+    limit = int(limit) if isinstance(limit, (int, float)) and not isinstance(limit, bool) else None
+    raw_ids = body.get("caseIds")
+    case_ids = [str(item) for item in raw_ids] if isinstance(raw_ids, list) else None
+
+    started, snapshot = start_background_run(limit=limit, case_ids=case_ids)
+    if not started:
+        raise HTTPException(status_code=409, detail="黄金数据集正在运行中，请等待完成或先 reset")
+    return {"started": True, "state": snapshot.to_dict()}
+
+
+@router.post("/golden/reset")
+def reset_golden() -> dict[str, Any]:
+    """清空上一次运行结果（仅在未运行时允许）。"""
+    if golden_state().running:
+        raise HTTPException(status_code=409, detail="黄金数据集正在运行中，无法重置")
+    return {"ok": True, "state": reset_golden_state().to_dict()}
 
 
 @router.get("/settings")
@@ -296,6 +463,18 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
             patch[key] = value
     if isinstance(body.get("publishAutoDispatch"), bool):
         patch["publishAutoDispatch"] = body["publishAutoDispatch"]
+
+    # LLM-as-a-Judge 评估（plan.md 4.3 D14）
+    if body.get("judgeMode") in ("off", "advisory", "blocking"):
+        patch["judgeMode"] = body["judgeMode"]
+    if body.get("judgeProvider") in ("offline", "llm"):
+        patch["judgeProvider"] = body["judgeProvider"]
+    if isinstance(body.get("judgeModel"), str):
+        patch["judgeModel"] = body["judgeModel"]
+    for key in ("judgePassThreshold", "judgeWeight"):
+        value = body.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            patch[key] = value
 
     update_config(patch)
     log.info(
@@ -356,6 +535,7 @@ def delete_task(task_id: str, request: Request) -> dict[str, Any]:
 
     task_store.delete(task_id)
     event_bus.drop(task_id)
+    tracer.drop(task_id)
     # 顺带回收该任务的断点续跑检查点，避免 checkpoints.sqlite 只增不减
     purged = orchestrator.purge_checkpoints(task_id)
     blackboard.flush()
@@ -475,6 +655,56 @@ def tick_publish(request: Request) -> dict[str, Any]:
 def get_blackboard(task_id: str, request: Request) -> dict[str, Any]:
     _require_task(task_id, request)
     return blackboard.snapshot(task_id).model_dump(mode="json")
+
+
+@router.get("/tasks/{task_id}/trace")
+def get_trace(task_id: str, request: Request) -> dict[str, Any]:
+    """任务的调用轨迹（span 树 + 按 span 名的耗时聚合）。
+
+    span 树回答的是事件流回答不了的问题：这次任务的耗时与花费**具体分布在哪一层**。
+    """
+    _require_task(task_id, request)
+    trace = tracer.trace(task_id)
+    if trace is None:
+        # 任务可能早于本功能创建，或已被删除；返回空骨架而不是 404，
+        # 让前端可以统一渲染「暂无轨迹」而不用区分错误类型
+        return {
+            "task_id": task_id,
+            "trace_id": None,
+            "spans": [],
+            "summary": {"span_count": 0, "duration_ms": 0, "by_name": []},
+            "notes": "该任务没有轨迹记录（可能创建于追踪功能上线之前）",
+        }
+
+    payload = trace.to_dict()
+    # 按 span 名聚合，供前端做「哪一层最贵」的排行
+    by_name: dict[str, dict[str, Any]] = {}
+    for span in trace.spans:
+        row = by_name.setdefault(
+            span.name,
+            {"name": span.name, "kind": span.kind, "count": 0, "total_ms": 0, "max_ms": 0},
+        )
+        row["count"] += 1
+        row["total_ms"] += span.duration_ms
+        row["max_ms"] = max(row["max_ms"], span.duration_ms)
+    rows = sorted(by_name.values(), key=lambda item: -item["total_ms"])
+    for row in rows:
+        row["avg_ms"] = round(row["total_ms"] / row["count"], 1) if row["count"] else 0
+        row["share"] = (
+            round(row["total_ms"] / trace.duration_ms, 4) if trace.duration_ms else 0.0
+        )
+
+    payload["summary"] = {
+        "span_count": len(trace.spans),
+        "duration_ms": trace.duration_ms,
+        "by_name": rows,
+    }
+    payload["export"] = {
+        "path": str(EXPORT_DIR),
+        "format": "otel-shaped-json",
+        "file": f"{task_id}.json",
+    }
+    return payload
 
 
 # ------------------------------------------------------------------ #
@@ -633,6 +863,10 @@ def metrics(request: Request) -> dict[str, Any]:
                 "active": len(blackboard.active_intents()),
                 "conflicts": sum(task.intent_conflicts for task in tasks),
             },
+            # LLM-as-a-Judge 评估（plan.md 4.3 D14）：平均分 / 通过率 / 维度均分
+            "judge": {**evaluation_store.stats(tenant=_tenant_of(request)), "mode": config.judge.mode},
+            # 追踪（plan.md 2.4）：按 span 名聚合的耗时排行，定位「哪一层最贵」
+            "tracing": {**tracer.stats(tenant=_tenant_of(request)), "otlp": otel.stats()},
         },
         "providers": [
             {

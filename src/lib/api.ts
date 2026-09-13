@@ -85,6 +85,21 @@ export interface PublicConfigView {
     tickSeconds: number;
     webhookSet: boolean;
   };
+  /** LLM-as-a-Judge 评估设置 */
+  judge: {
+    mode: 'off' | 'advisory' | 'blocking';
+    provider: 'offline' | 'llm';
+    model: string;
+    passThreshold: number;
+    weight: number;
+    rubric: string;
+  };
+  /** 分布式追踪设置（OTLP 导出为只读配置，来自环境变量） */
+  tracing: {
+    otlpEndpoint: string;
+    serviceName: string;
+    otlpConfigured: boolean;
+  };
 }
 
 export interface HealthView {
@@ -92,6 +107,16 @@ export interface HealthView {
   time: string;
   config: PublicConfigView;
   provider: { name: string; model: string; simulated: boolean };
+  /** 断点续跑后端：sqlite = 可跨重启；memory = 重启后无法续跑 */
+  checkpointer: { kind: 'sqlite' | 'memory' | string; error: string };
+  /** OTLP 导出状态（未配置时进程内追踪仍完整可用） */
+  otlp: {
+    enabled: boolean;
+    exported: number;
+    failed: number;
+    error: string;
+    endpoint: string;
+  };
 }
 
 /** 成本核算视图（/api/metrics → system.cost）。 */
@@ -123,12 +148,174 @@ export interface LeaseView {
   conflicts: number;
 }
 
+/** 评估维度明细（LLM-as-a-Judge 的一个评分项）。 */
+export interface JudgeAxisView {
+  key: string;
+  label: string;
+  /** 0–5 分 */
+  score: number;
+  weight: number;
+  rationale: string;
+  evidence: string[];
+}
+
+/** 一次评估的结论（/api/evaluations 与门禁事件里的 judge 字段）。 */
+export interface JudgeReportView {
+  total: number;
+  verdict: 'pass' | 'review' | 'reject';
+  mode: string;
+  model: string;
+  summary: string;
+  axes: JudgeAxisView[];
+  issues: string[];
+  suggestions: string[];
+  confidence: number;
+  fallback: boolean;
+  fallback_reason: string;
+  rubric: string;
+  kind: string;
+  revision: number;
+}
+
+/** 落库后的评估记录：在报告基础上带任务与来源信息。 */
+export interface EvaluationRecordView extends JudgeReportView {
+  id: string;
+  task_id: string;
+  tenant: string;
+  created_at: string;
+  trigger: string;
+  brand: string;
+  channel: string;
+  industry: string;
+}
+
+/** 评估聚合指标（/api/metrics → system.judge 与 /api/evaluations → stats）。 */
+export interface JudgeMetricsView {
+  total: number;
+  tasks: number;
+  avg_total: number;
+  pass_rate: number;
+  verdicts: Record<string, number>;
+  modes: Record<string, number>;
+  fallbacks: number;
+  axis_avg: { key: string; label: string; score: number }[];
+  latest_at: string | null;
+  mode?: string;
+}
+
+export interface EvaluationsView {
+  stats: JudgeMetricsView;
+  config: {
+    mode: PublicConfigView['judge']['mode'];
+    provider: PublicConfigView['judge']['provider'];
+    passThreshold: number;
+    weight: number;
+    rubric: string;
+  };
+  records: EvaluationRecordView[];
+}
+
+/* ------------------------------------------------------------------ */
+/* 黄金数据集（回归门禁）                                              */
+/* ------------------------------------------------------------------ */
+
+/** 一条黄金用例。 */
+export interface GoldenCaseView {
+  id: string;
+  note: string;
+  brand: string;
+  channel: string;
+  industry: string;
+  objective: string;
+  audience: string;
+  keywords: string[];
+  constraints: string[];
+  brief: Brief;
+}
+
+/** 一条用例的运行结果（已压缩为可比较的标量）。 */
+export interface GoldenResultView {
+  id: string;
+  status: string;
+  quality_score: number;
+  judge_total: number;
+  judge_final_total: number;
+  axis_scores: Record<string, number>;
+  revision_round: number;
+  artifact_count: number;
+  fact_accuracy: number;
+  brand_consistency: number;
+  compliance_verdicts: string[];
+  first_round_blocked: boolean;
+  predicted_ctr: number;
+  duration_ms: number;
+  task_id: string;
+  error: string;
+}
+
+/** 基线 vs 当前的单条对比结论。 */
+export interface GoldenDiffView {
+  id: string;
+  verdict: 'ok' | 'improved' | 'regressed' | 'new' | 'missing' | 'failed';
+  deltas: Record<string, number>;
+  reasons: string[];
+}
+
+export interface GoldenComparisonView {
+  ok: boolean;
+  tolerance: number;
+  rubric: string;
+  baseline_rubric: string | null;
+  rubric_mismatch: boolean;
+  baseline_updated_at: string | null;
+  baseline_engine: string | null;
+  /** true 表示这是一次部分运行，结论只对 scope 内用例成立 */
+  partial?: boolean;
+  scope?: string[] | null;
+  counts: Record<string, number>;
+  differences: GoldenDiffView[];
+}
+
+export interface GoldenView {
+  cases: GoldenCaseView[];
+  baseline: {
+    updated_at: string | null;
+    rubric: string | null;
+    engine: string | null;
+    note: string | null;
+    cases: Record<string, GoldenResultView>;
+  };
+  coverage: {
+    total: number;
+    channels: string[];
+    industries: string[];
+    matrix: { channel: string; industries: string[]; cases: string[] }[];
+    uncovered_channels: string[];
+  };
+  rubric: string;
+  tolerance: number;
+  state: {
+    running: boolean;
+    started_at: string;
+    finished_at: string;
+    total: number;
+    completed: number;
+    current: string;
+    scope: string[] | null;
+    error: string;
+    results: GoldenResultView[];
+  };
+  comparison?: GoldenComparisonView;
+}
+
 export interface MetricsView {
   system: Record<string, number> & {
     tokens: { prompt: number; completion: number; cost_usd: number };
     cost: CostView;
     cache: CacheView;
     leases: LeaseView;
+    judge: JudgeMetricsView;
+    tracing: TracingMetricsView;
   };
   providers: { name: string; model: string; simulated: boolean }[];
   agents: {
@@ -155,6 +342,76 @@ export interface TaskDetail {
   blackboard: BlackboardSnapshot;
 }
 
+/* ------------------------------------------------------------------ */
+/* 分布式追踪（span 树）                                               */
+/* ------------------------------------------------------------------ */
+
+/** 一个追踪片段（与 OpenTelemetry 的 span 语义一致）。 */
+export interface SpanView {
+  trace_id: string;
+  span_id: string;
+  parent_span_id: string | null;
+  name: string;
+  /** internal | client | server | producer | consumer */
+  kind: string;
+  agent_id: string | null;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  /** ok | error | unset */
+  status: string;
+  status_message: string;
+  attributes: Record<string, unknown>;
+  children: number;
+  /** 自身耗时（扣除子 span）占 trace 总耗时的比例 */
+  self_ratio: number;
+}
+
+export interface TraceView {
+  task_id: string;
+  trace_id: string | null;
+  started_at?: string;
+  finished_at?: string;
+  duration_ms?: number;
+  span_count?: number;
+  roots?: string[];
+  spans: SpanView[];
+  summary: {
+    span_count: number;
+    duration_ms: number;
+    by_name: {
+      name: string;
+      kind: string;
+      count: number;
+      total_ms: number;
+      max_ms: number;
+      avg_ms?: number;
+      share?: number;
+    }[];
+  };
+  export?: { path: string; format: string; file: string };
+  notes?: string;
+}
+
+/** 全局追踪聚合（/api/metrics → system.tracing）。 */
+export interface TracingMetricsView {
+  traces: number;
+  spans: number;
+  errors: number;
+  by_name: {
+    name: string;
+    kind: string;
+    count: number;
+    total_ms: number;
+    max_ms: number;
+    avg_ms: number;
+    errors: number;
+  }[];
+  exportPath: string;
+  exportFormat: string;
+  exportFailures: number;
+}
+
 /** A11 记忆库的一条知识卡片（跨任务存活）。 */
 export interface MemoryCardView {
   id: string;
@@ -171,6 +428,8 @@ export interface MemoryCardView {
   revision: number;
   created_at: string;
   hits: number;
+  /** 归属租户（启用鉴权时按租户隔离，未启用时固定 default） */
+  tenant: string;
 }
 
 /** 检索命中：在卡片基础上带分数与命中理由。 */
@@ -187,7 +446,13 @@ export interface MemoryHitView extends MemoryCardView {
 export interface MemoryView {
   stats: {
     total: number;
+    /** 全局卡片数（跨租户计数，不含内容） */
+    global_total: number;
     capacity: number;
+    /** 当前租户（未启用鉴权时固定为 `default`） */
+    tenant: string | null;
+    /** 库中已出现过的租户名 */
+    tenants: string[];
     by_kind: { kind: string; label: string; count: number }[];
     brands: string[];
     tasks: number;
@@ -343,11 +608,29 @@ export const api = {
       body: JSON.stringify({ query, topK }),
     }),
   metrics: () => request<MetricsView>('/api/metrics'),
+  evaluations: (taskId?: string, limit = 20) =>
+    request<EvaluationsView>(
+      `/api/evaluations?limit=${limit}${taskId ? `&taskId=${encodeURIComponent(taskId)}` : ''}`,
+    ),
+  evaluateTask: (id: string, provider?: 'offline' | 'llm') =>
+    request<{ task_id: string; record: EvaluationRecordView }>(`/api/tasks/${id}/evaluate`, {
+      method: 'POST',
+      body: JSON.stringify(provider ? { provider } : {}),
+    }),
+  golden: () => request<GoldenView>('/api/golden'),
+  runGolden: (payload: { limit?: number; caseIds?: string[] } = {}) =>
+    request<{ started: boolean; state: GoldenView['state'] }>('/api/golden/run', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  resetGolden: () =>
+    request<{ ok: boolean; state: GoldenView['state'] }>('/api/golden/reset', { method: 'POST' }),
   settings: () => request<PublicConfigView>('/api/settings'),
   updateSettings: (patch: Record<string, unknown>) =>
     request<PublicConfigView>('/api/settings', { method: 'PUT', body: JSON.stringify(patch) }),
   listTasks: () => request<{ tasks: TaskSummary[] }>('/api/tasks'),
   getTask: (id: string) => request<TaskDetail>(`/api/tasks/${id}`),
+  trace: (id: string) => request<TraceView>(`/api/tasks/${id}/trace`),
   createTask: (brief: Partial<Brief>, autoApprove?: boolean) =>
     request<{ task: TaskRecord }>('/api/tasks', {
       method: 'POST',

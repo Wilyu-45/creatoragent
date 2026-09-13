@@ -1,0 +1,30 @@
+{
+  "id": "xiaohongshu_minimal_brief",
+  "note": "边界用例：**极简 Brief**（无关键词、无硬性约束、受众很宽）。用于守住两条底线：① 缺字段不能导致链路崩溃；② 评估器的需求契合维度在「无关键词」时应按满分计而不是按 0 分误判。",
+  "brief": {
+    "brand": "无名",
+    "product": "手冲咖啡壶",
+    "objective": "曝光",
+    "audience": "咖啡爱好者",
+    "channel": "小红书",
+    "tone": "轻松",
+    "industry": "消费品",
+    "keywords": [],
+    "constraints": [],
+    "deliverables": [],
+    "priority": "low"
+  },
+  "expect": {
+    "min_quality": 85,
+    "min_judge": 85,
+    "max_revisions": 2,
+    "min_tone_hits": 0,
+    "must_not_contain": ["国家级", "最佳", "治疗"],
+    "reference_points": [
+      "缺关键词/约束/交付物时链路不崩溃，仍产出可交付文案",
+      "评估器的「需求契合」维度在无关键词时按满分计，而不是误判为 0 分（因此 min_judge 定得较高）",
+      "标题 20 字以内，正文有明确场景与行动引导",
+      "品牌名「无名」需出现在最终文本中"
+    ]
+  }
+}

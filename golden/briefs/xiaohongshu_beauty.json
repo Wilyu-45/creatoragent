@@ -1,0 +1,31 @@
+{
+  "id": "xiaohongshu_beauty",
+  "note": "美妆行业分支：化妆品不得明示或暗示医疗作用（「修复」「消炎」等为重要级违规），同时小红书带货需标注「合作」。",
+  "brief": {
+    "brand": "沐白",
+    "product": "氨基酸温和洁面乳",
+    "objective": "转化",
+    "audience": "敏感肌年轻女性",
+    "channel": "小红书",
+    "tone": "温柔、真诚、讲成分逻辑",
+    "industry": "美妆",
+    "keywords": ["氨基酸", "敏感肌"],
+    "constraints": ["不得暗示医疗作用", "商业推广需标注合作"],
+    "deliverables": ["图文笔记 1 篇", "标题备选 5 条"],
+    "priority": "normal"
+  },
+  "expect": {
+    "min_quality": 85,
+    "min_judge": 80,
+    "max_revisions": 2,
+    "min_keyword_hits": 1,
+    "min_tone_hits": 1,
+    "must_not_contain": ["消炎", "抗炎", "修复损伤", "再生", "医用面膜", "国家级", "最佳"],
+    "reference_points": [
+      "标题 20 字以内，含敏感肌身份锚点",
+      "用成分逻辑（氨基酸表活）说话，不承诺治疗效果",
+      "不得暗示医疗作用（《化妆品监督管理条例》第二十二条）",
+      "商业推广需标注「合作」"
+    ]
+  }
+}

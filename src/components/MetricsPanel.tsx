@@ -29,6 +29,15 @@ export function MetricsPanel({ metrics }: { metrics: MetricsView | null }) {
   const cost = system.cost;
   const cache = system.cache;
   const leases = system.leases;
+  const judge = system.judge;
+  const tracing = system.tracing;
+
+  // 模型调用耗时占比：这是「钱和时间的分布」最直观的一个数字
+  const llmTotalMs = (tracing?.by_name ?? [])
+    .filter((row) => row.name.startsWith('llm.'))
+    .reduce((sum, row) => sum + row.total_ms, 0);
+  const allTotalMs = (tracing?.by_name ?? []).reduce((sum, row) => sum + row.total_ms, 0);
+  const llmShare = allTotalMs ? (llmTotalMs / allTotalMs) * 100 : 0;
 
   return (
     <div>
@@ -107,6 +116,128 @@ export function MetricsPanel({ metrics }: { metrics: MetricsView | null }) {
             缓存条目 {formatNumber(cache.entries)} / {formatNumber(cache.capacity)}
           </Chip>
           <Chip tone="tone-idle">存活账本 {formatNumber(cost.activeLedgers)}</Chip>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-title">
+          质量评估 · LLM-as-a-Judge <span className="count">· 与门禁解耦的度量口径</span>
+        </div>
+        <div className="grid-3">
+          <div className="card">
+            <div className="muted small">评估次数</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>{formatNumber(judge.total)}</div>
+            <div className="muted small">覆盖任务 {formatNumber(judge.tasks)}</div>
+          </div>
+          <div className="card">
+            <div className="muted small">平均评估分</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>
+              {formatNumber(judge.avg_total, 1)}
+            </div>
+            <div className="muted small">满分 100</div>
+          </div>
+          <div className="card">
+            <div className="muted small">评估通过率</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>
+              {formatNumber(judge.pass_rate, 1)}
+              <span className="muted small"> %</span>
+            </div>
+            <div className="muted small">
+              待改进 {formatNumber(judge.verdicts.review ?? 0)}｜不合格 {formatNumber(judge.verdicts.reject ?? 0)}
+            </div>
+          </div>
+        </div>
+
+        <div className="row" style={{ marginTop: 14, flexWrap: 'wrap' }}>
+          <Chip tone={judge.mode === 'off' ? 'tone-idle' : 'tone-info'}>评估模式 {judge.mode ?? '—'}</Chip>
+          {Object.entries(judge.modes ?? {}).map(([mode, count]) => (
+            <Chip key={mode} tone="tone-idle" mono>
+              {mode} {count}
+            </Chip>
+          ))}
+          {judge.fallbacks > 0 ? (
+            <Chip tone="tone-warn" title="模型评估失败并回退到规则评估器的次数">
+              回退规则评估器 {judge.fallbacks}
+            </Chip>
+          ) : null}
+          {judge.latest_at ? <Chip tone="tone-idle">最近 {judge.latest_at.slice(0, 19)}</Chip> : null}
+        </div>
+
+        {judge.axis_avg.length > 0 ? (
+          <div className="row" style={{ marginTop: 8, flexWrap: 'wrap' }}>
+            {judge.axis_avg.map((axis) => (
+              <Chip
+                key={axis.key}
+                tone={axis.score >= 4 ? 'tone-ok' : axis.score >= 3 ? 'tone-warn' : 'tone-bad'}
+                title="该维度的历史平均分（0–5）"
+              >
+                {axis.label} {axis.score}
+              </Chip>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="panel">
+        <div className="panel-title">
+          调用轨迹 · 分布式追踪 <span className="count">· span 耗时排行（哪一层最贵）</span>
+        </div>
+        <div className="grid-3">
+          <div className="card">
+            <div className="muted small">已追踪任务</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>{formatNumber(tracing?.traces ?? 0)}</div>
+            <div className="muted small">span {formatNumber(tracing?.spans ?? 0)} 个</div>
+          </div>
+          <div className="card">
+            <div className="muted small">span 错误数</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>{formatNumber(tracing?.errors ?? 0)}</div>
+            <div className="muted small">降级与缓存命中不计为错误</div>
+          </div>
+          <div className="card">
+            <div className="muted small">模型调用耗时占比</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 2 }}>
+              {formatNumber(llmShare, 1)}
+              <span className="muted small"> %</span>
+            </div>
+            <div className="muted small">累计 {formatNumber(llmTotalMs)} ms</div>
+          </div>
+        </div>
+
+        {(tracing?.by_name ?? []).length > 0 ? (
+          <Table head={['span', '次数', '总耗时', '平均', '峰值', '错误']}>
+            {tracing.by_name.slice(0, 10).map((row) => (
+              <tr key={row.name}>
+                <td>
+                  <span className="mono small">{row.name}</span>
+                </td>
+                <td>{row.count}</td>
+                <td className="mono small">{formatNumber(row.total_ms)} ms</td>
+                <td className="mono small">{formatNumber(row.avg_ms)} ms</td>
+                <td className="mono small">{formatNumber(row.max_ms)} ms</td>
+                <td className={row.errors > 0 ? 'mono small' : 'muted small'}>{row.errors}</td>
+              </tr>
+            ))}
+          </Table>
+        ) : (
+          <div className="muted small">还没有追踪数据（跑一个任务后即可看到 span 耗时分布）。</div>
+        )}
+
+        <div className="row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
+          {tracing ? (
+            <>
+              <Chip tone="tone-idle" mono title={`${tracing.exportPath}（${tracing.exportFormat}）`}>
+                导出 {tracing.exportFormat}
+              </Chip>
+              {tracing.exportFailures > 0 ? (
+                <Chip tone="tone-warn" title="trace 落盘失败次数（不影响任务执行）">
+                  落盘失败 {tracing.exportFailures}
+                </Chip>
+              ) : null}
+            </>
+          ) : null}
+          <Chip tone="tone-idle">
+            点任务详情的「调用轨迹」查看单个任务的 span 瀑布图
+          </Chip>
         </div>
       </div>
 

@@ -1,0 +1,31 @@
+{
+  "id": "douyin_short_video",
+  "note": "短视频分支：抖音渠道会走「分镜脚本 + 9:16 画幅 + 18 字标题上限压缩」，验证渠道相关的两条特化路径。",
+  "brief": {
+    "brand": "晨野",
+    "product": "冷萃即饮咖啡",
+    "objective": "曝光",
+    "audience": "18-30 岁都市白领",
+    "channel": "抖音",
+    "tone": "节奏快、有冲突感",
+    "industry": "食品饮料",
+    "keywords": ["冷萃", "早八"],
+    "constraints": ["不得诱导点赞关注", "价格表述需与实际一致"],
+    "deliverables": ["短视频脚本 1 支"],
+    "priority": "high"
+  },
+  "expect": {
+    "min_quality": 85,
+    "min_judge": 78,
+    "max_revisions": 2,
+    "min_keyword_hits": 1,
+    "max_title_length": 18,
+    "must_not_contain": ["点赞关注", "点关注", "国家级", "最佳", "治疗"],
+    "reference_points": [
+      "标题 18 字以内（抖音信息流截断阈值）",
+      "黄金 3 秒钩子要制造冲突或悬念，不能平铺直叙",
+      "脚本包含分镜/口播/字幕，可直接开拍",
+      "不得诱导点赞关注"
+    ]
+  }
+}

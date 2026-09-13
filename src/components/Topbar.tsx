@@ -15,6 +15,10 @@ export function Topbar({
   onOpenSettings: () => void;
 }) {
   const provider = health?.provider;
+  const checkpointer = health?.checkpointer;
+  const otlp = health?.otlp;
+  // 断点续跑退化为内存实现时，进程重启会导致运行中任务永久卡住 —— 必须显式告警
+  const ephemeralCheckpoint = checkpointer != null && checkpointer.kind !== 'sqlite';
 
   return (
     <header className="topbar">
@@ -33,6 +37,16 @@ export function Topbar({
       </Chip>
       <Chip tone="tone-info">任务 {totalCount}</Chip>
       {runningCount > 0 ? <Chip tone="tone-run">运行中 {runningCount}</Chip> : null}
+      {otlp?.enabled ? (
+        <Chip tone="tone-ok" title={`OTLP → ${otlp.endpoint}（已导出 ${otlp.exported} 个 span）`}>
+          OTLP 已接入
+        </Chip>
+      ) : null}
+      {ephemeralCheckpoint ? (
+        <Chip tone="tone-bad" title={checkpointer?.error || '检查点未能落到 SQLite'}>
+          断点续跑不可用
+        </Chip>
+      ) : null}
 
       <button className="btn btn-ghost" onClick={onOpenSettings}>
         设置

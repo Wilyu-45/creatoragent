@@ -1,0 +1,31 @@
+{
+  "id": "zhihu_b2c_education",
+  "note": "教育行业分支：升学/通过考试的保证性承诺是阻断级违规，且知乎渠道要求信息密度优先。用于验证「教育 + 问答平台」组合下的选题与合规表现。",
+  "brief": {
+    "brand": "知路",
+    "product": "考研数学强化课程",
+    "objective": "转化",
+    "audience": "二战考研的应届毕业生",
+    "channel": "知乎",
+    "tone": "干货、直给、不画大饼",
+    "industry": "教育",
+    "keywords": ["考研数学", "二战"],
+    "constraints": ["不得承诺提分与通过", "必须说明课程适用基础"],
+    "deliverables": ["问答式长文 1 篇"],
+    "priority": "normal"
+  },
+  "expect": {
+    "min_quality": 85,
+    "min_judge": 78,
+    "max_revisions": 2,
+    "min_keyword_hits": 1,
+    "min_tone_hits": 1,
+    "must_not_contain": ["保过", "保分", "提分保证", "不过退款", "一次通过", "国家级", "最佳"],
+    "reference_points": [
+      "知乎标题 30 字以内，信息密度优先",
+      "问答式结构：先给明确结论，再展开论证与适用边界",
+      "必须说明课程适用基础（不适用于零基础/冲刺阶段）",
+      "不得出现提分与通过率的保证性承诺"
+    ]
+  }
+}

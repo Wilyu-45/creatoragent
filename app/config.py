@@ -29,11 +29,19 @@ BLACKBOARD_FILE = DATA_DIR / "blackboard.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 #: A11 记忆库（跨任务知识卡片），供其他智能体做 RAG 召回。
 MEMORY_FILE = DATA_DIR / "memory.json"
+#: LLM-as-a-Judge 评估历史（plan.md 4.3 D14），用于 Prompt 回归与黄金集评测。
+EVAL_FILE = DATA_DIR / "evaluations.json"
 #: LangGraph checkpointer 的落地位置：用于人工审批中断后的断点续跑。
 CHECKPOINT_FILE = DATA_DIR / "checkpoints.sqlite"
 
 LLMProviderName = Literal["mock", "openai"]
 EmbeddingProviderName = Literal["local", "openai"]
+JudgeModeName = Literal["off", "advisory", "blocking"]
+JudgeProviderName = Literal["offline", "llm"]
+
+#: 评估口径版本号。改动权重或规则时递增，便于「同一批数据跨版本对比」时区分。
+#: 放在 config 而非 judge 模块，是为了让 ``public_config()`` 不必反向 import 评估器。
+RUBRIC_VERSION = "2026-09-13.judge-v1"
 
 
 # ------------------------------------------------------------------ #
@@ -92,6 +100,43 @@ class PublishSettings:
 
 
 @dataclass
+class JudgeSettings:
+    """LLM-as-a-Judge 评估流水线设置（plan.md 4.3 D14）。
+
+    评估是**旁路**能力：默认 ``advisory``，只产出报告与建议，不改动门禁结论；
+    置为 ``blocking`` 才会让评估分数参与门禁判定。这样「引入评估」不会在
+    使用者不知情的情况下改变流水线行为。
+    """
+
+    #: off = 不评估；advisory = 只打分不影响门禁；blocking = 低分触发返工
+    mode: JudgeModeName = "advisory"
+    #: offline = 确定性规则评估器；llm = 走模型网关（失败自动回退 offline）
+    provider: JudgeProviderName = "offline"
+    #: 可选模型名（provider=llm 时生效，留空用当前 LLM 配置的模型）
+    model: str = ""
+    #: 通过线：total ≥ 该值为 pass
+    pass_threshold: float = 75.0
+    #: 评估分在最终质量分中的权重（0 = 不影响 scorecard.overall）
+    weight: float = 0.2
+
+
+@dataclass
+class TracingSettings:
+    """分布式追踪设置（plan.md 2.4）。
+
+    默认 **不导出**：进程内 span 树完全自实现，因此「零外部依赖、离线可跑通」
+    的默认体验不受影响。配置 ``OTLP_ENDPOINT`` 后才加载 OTel SDK 并转发。
+    """
+
+    #: 如 http://localhost:4318（OTLP/HTTP）；为空则只做进程内追踪
+    otlp_endpoint: str = ""
+    #: 资源里的服务名
+    service_name: str = "creator-agent-studio"
+    #: 形如 ``key1=value1,key2=value2``，供带鉴权的托管 collector 使用
+    otlp_headers: str = ""
+
+
+@dataclass
 class RuntimeConfig:
     """编排与质量门禁的运行时参数。"""
 
@@ -109,6 +154,8 @@ class RuntimeConfig:
     llm: LLMSettings = field(default_factory=LLMSettings)
     embedding: EmbeddingSettings = field(default_factory=EmbeddingSettings)
     publish: PublishSettings = field(default_factory=PublishSettings)
+    judge: JudgeSettings = field(default_factory=JudgeSettings)
+    tracing: TracingSettings = field(default_factory=TracingSettings)
 
 
 def _num(value: str | None, fallback: float) -> float:
@@ -167,7 +214,32 @@ def _build_config() -> RuntimeConfig:
             auto_dispatch=_bool(os.environ.get("PUBLISH_AUTO_DISPATCH"), False),
             tick_seconds=max(5, _int(os.environ.get("PUBLISH_TICK_SECONDS"), 60)),
         ),
+        judge=JudgeSettings(
+            mode=_judge_mode(),
+            provider=_judge_provider(),
+            model=os.environ.get("JUDGE_MODEL") or "",
+            pass_threshold=min(
+                100.0, max(0.0, _num(os.environ.get("JUDGE_PASS_THRESHOLD"), 75.0))
+            ),
+            weight=min(1.0, max(0.0, _num(os.environ.get("JUDGE_WEIGHT"), 0.2))),
+        ),
+        tracing=TracingSettings(
+            otlp_endpoint=(os.environ.get("OTLP_ENDPOINT") or "").strip(),
+            service_name=(os.environ.get("OTEL_SERVICE_NAME") or "creator-agent-studio").strip()
+            or "creator-agent-studio",
+            otlp_headers=(os.environ.get("OTLP_HEADERS") or "").strip(),
+        ),
     )
+
+
+def _judge_mode() -> str:
+    raw = (os.environ.get("JUDGE_MODE") or "advisory").strip().lower()
+    return raw if raw in ("off", "advisory", "blocking") else "advisory"
+
+
+def _judge_provider() -> str:
+    raw = (os.environ.get("JUDGE_PROVIDER") or "offline").strip().lower()
+    return raw if raw in ("offline", "llm") else "offline"
 
 
 def _embedding_provider() -> str:
@@ -230,6 +302,17 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
             "publishTickSeconds": ("tick_seconds", None),
         },
     )
+    _apply_flat(
+        patch,
+        _config.judge,
+        {
+            "judgeMode": ("mode", ("off", "advisory", "blocking")),
+            "judgeProvider": ("provider", ("offline", "llm")),
+            "judgeModel": ("model", None),
+            "judgePassThreshold": ("pass_threshold", None),
+            "judgeWeight": ("weight", None),
+        },
+    )
     return _config
 
 
@@ -243,10 +326,13 @@ def _apply_flat(patch: dict[str, Any], target: Any, mapping: dict[str, tuple[str
             continue
         if attr == "dim":
             value = max(16, int(value))
-        elif attr == "weight":
-            value = min(1.0, max(0.0, float(value)))
-        elif attr in ("retry", "tick_seconds"):
-            value = max(1 if attr == "tick_seconds" else 0, int(value))
+        elif attr in ("weight", "pass_threshold"):
+            # 0–1 的权重与 0–100 的分数线都按上界收敛，越界值直接夹紧而不是报错
+            value = min(100.0 if attr == "pass_threshold" else 1.0, max(0.0, float(value)))
+        elif attr == "retry":
+            value = max(0, int(value))
+        elif attr == "tick_seconds":
+            value = max(1, int(value))
         setattr(target, attr, value)
 
 
@@ -272,6 +358,8 @@ def public_config() -> dict[str, Any]:
     llm = _config.llm
     embedding = _config.embedding
     publish = _config.publish
+    judge = _config.judge
+    tracing = _config.tracing
     return {
         "port": _config.port,
         "turnBudget": _config.turn_budget,
@@ -309,6 +397,19 @@ def public_config() -> dict[str, Any]:
             "autoDispatch": publish.auto_dispatch,
             "tickSeconds": publish.tick_seconds,
             "webhookSet": bool(publish.webhook_url),
+        },
+        "judge": {
+            "mode": judge.mode,
+            "provider": judge.provider,
+            "model": judge.model,
+            "passThreshold": judge.pass_threshold,
+            "weight": judge.weight,
+            "rubric": RUBRIC_VERSION,
+        },
+        "tracing": {
+            "otlpEndpoint": tracing.otlp_endpoint,
+            "serviceName": tracing.service_name,
+            "otlpConfigured": bool(tracing.otlp_endpoint),
         },
     }
 

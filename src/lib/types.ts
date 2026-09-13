@@ -440,6 +440,7 @@ export type AgentEventType =
   | 'approval.required'
   | 'approval.decided'
   | 'blackboard.write'
+  | 'judge.scored'
   | 'log';
 
 export interface AgentEvent {
@@ -452,6 +453,9 @@ export interface AgentEvent {
   level: 'debug' | 'info' | 'warn' | 'error';
   message: string;
   payload?: Record<string, unknown>;
+  /** 追踪关联：事件所属的 trace 与产出它的 span（无追踪时为空） */
+  trace_id?: string | null;
+  span_id?: string | null;
 }
 
 /* ------------------------------------------------------------------ */

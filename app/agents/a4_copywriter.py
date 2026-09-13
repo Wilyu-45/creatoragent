@@ -21,6 +21,7 @@ from .base import (
     build_artifact,
     build_result,
     call_with_prompts,
+    localization_block,
     memory_block,
     read_confidence,
     read_evidence,
@@ -142,7 +143,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 关键词：{'、'.join(brief.keywords) or '（未指定）'}
 硬性约束：{'；'.join(brief.constraints) or '（未指定）'}
 
-【渠道规范】
+{localization_block(ctx)}【渠道规范】
 形态：{rule.format}｜长度：{rule.length_hint}
 必备结构：{' → '.join(rule.blocks)}
 标签策略：{rule.hashtag_policy}

@@ -1,0 +1,1086 @@
+{
+  "updated_at": "2026-09-13T10:12:43.281Z",
+  "rubric": "2026-09-13.judge-v1",
+  "engine": "mock",
+  "note": "由 scripts/golden_eval.py --update-baseline 生成",
+  "cases": {
+    "douyin_short_video": {
+      "id": "douyin_short_video",
+      "status": "completed",
+      "quality_score": 92.0,
+      "judge_total": 78.3,
+      "judge_final_total": 84.0,
+      "axis_scores": {
+        "brief_fit": 3.0,
+        "compliance": 5.0,
+        "structure": 5.0,
+        "brand_voice": 3.0,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 1,
+      "artifact_count": 18,
+      "fact_accuracy": 50.0,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "pass",
+        "pass"
+      ],
+      "first_round_blocked": false,
+      "predicted_ctr": 0.0,
+      "duration_ms": 6014,
+      "task_id": "task_fb626b3e",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 1 个：冷萃"
+        },
+        {
+          "rule": "禁用「点赞关注」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「点关注」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「治疗」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「晨野」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 18 字",
+          "ok": true,
+          "detail": "当前 15 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 85",
+          "ok": true,
+          "detail": "实际 92.0"
+        },
+        {
+          "rule": "评估分 ≥ 78",
+          "ok": true,
+          "detail": "实际 84.0"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 1 轮"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "ecommerce_home_appliance": {
+      "id": "ecommerce_home_appliance",
+      "status": "completed",
+      "quality_score": 94.0,
+      "judge_total": 85.0,
+      "judge_final_total": 91.5,
+      "axis_scores": {
+        "brief_fit": 4.1,
+        "compliance": 5.0,
+        "structure": 5.0,
+        "brand_voice": 3.67,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 1,
+      "artifact_count": 18,
+      "fact_accuracy": 50.0,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "pass",
+        "pass"
+      ],
+      "first_round_blocked": false,
+      "predicted_ctr": 0.0,
+      "duration_ms": 5735,
+      "task_id": "task_84375698",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 2 个：静音、除湿"
+        },
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「治疗」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「保证有效」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「无效退款」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「净界」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 25 字",
+          "ok": true,
+          "detail": "当前 17 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 85",
+          "ok": true,
+          "detail": "实际 94.0"
+        },
+        {
+          "rule": "评估分 ≥ 80",
+          "ok": true,
+          "detail": "实际 91.5"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 1 轮"
+        },
+        {
+          "rule": "调性关键词命中（参考，不参与判定）",
+          "ok": true,
+          "detail": "命中 1/3：直接"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "ecommerce_medical_strict": {
+      "id": "ecommerce_medical_strict",
+      "status": "completed",
+      "quality_score": 87.0,
+      "judge_total": 73.4,
+      "judge_final_total": 81.5,
+      "axis_scores": {
+        "brief_fit": 4.1,
+        "compliance": 3.0,
+        "structure": 5.0,
+        "brand_voice": 3.0,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 2,
+      "artifact_count": 22,
+      "fact_accuracy": 50.0,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "revise",
+        "revise",
+        "revise"
+      ],
+      "first_round_blocked": true,
+      "predicted_ctr": 0.0,
+      "duration_ms": 6905,
+      "task_id": "task_fb472a73",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 2 个：除菌、过敏"
+        },
+        {
+          "rule": "禁用「治疗」",
+          "ok": true,
+          "detail": "仅出现在否定/免责表述中（不算违规宣称）"
+        },
+        {
+          "rule": "禁用「防癌」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「抗癌」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「降三高」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「保健功效」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「立刻见效」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「康和」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 25 字",
+          "ok": true,
+          "detail": "当前 16 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "阻断用语仅出现在免责表述中",
+          "ok": true,
+          "detail": "以下词仅出现在否定语境（已豁免）：治疗"
+        },
+        {
+          "rule": "质量分 ≥ 80",
+          "ok": true,
+          "detail": "实际 87.0"
+        },
+        {
+          "rule": "评估分 ≥ 72",
+          "ok": true,
+          "detail": "实际 81.5"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 2 轮"
+        },
+        {
+          "rule": "首轮合规拦截符合预期",
+          "ok": true,
+          "detail": "首轮被拦截=True，期望=True"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "instagram_en_multilingual": {
+      "id": "instagram_en_multilingual",
+      "status": "completed",
+      "quality_score": 92.0,
+      "judge_total": 60.3,
+      "judge_final_total": 78.5,
+      "axis_scores": {
+        "brief_fit": 1.9,
+        "compliance": 5.0,
+        "structure": 5.0,
+        "brand_voice": 3.0,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 1,
+      "artifact_count": 18,
+      "fact_accuracy": 42.9,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "revise",
+        "pass"
+      ],
+      "first_round_blocked": true,
+      "predicted_ctr": 0.0,
+      "duration_ms": 5421,
+      "task_id": "task_6a68aedd",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 1 个：cold brew"
+        },
+        {
+          "rule": "禁用「cure」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「guaranteed」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「best in the world」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「#1」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「Morning Field」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 12 词",
+          "ok": true,
+          "detail": "当前 2 词"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 80",
+          "ok": true,
+          "detail": "实际 92.0"
+        },
+        {
+          "rule": "评估分 ≥ 70",
+          "ok": true,
+          "detail": "实际 78.5"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 1 轮"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "pr_release_finance": {
+      "id": "pr_release_finance",
+      "status": "completed",
+      "quality_score": 90.0,
+      "judge_total": 75.9,
+      "judge_final_total": 82.4,
+      "axis_scores": {
+        "brief_fit": 3.0,
+        "compliance": 4.6,
+        "structure": 5.0,
+        "brand_voice": 3.0,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 2,
+      "artifact_count": 22,
+      "fact_accuracy": 50.0,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "revise",
+        "revise",
+        "revise"
+      ],
+      "first_round_blocked": true,
+      "predicted_ctr": 0.0,
+      "duration_ms": 8109,
+      "task_id": "task_e8ac8e50",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 1 个：养老目标"
+        },
+        {
+          "rule": "禁用「稳赚」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「保收益」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「保证收益」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「必定」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「零风险」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「恒信」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 30 字",
+          "ok": true,
+          "detail": "当前 21 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 80",
+          "ok": true,
+          "detail": "实际 90.0"
+        },
+        {
+          "rule": "评估分 ≥ 72",
+          "ok": true,
+          "detail": "实际 82.4"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 2 轮"
+        },
+        {
+          "rule": "首轮合规拦截符合预期",
+          "ok": true,
+          "detail": "首轮被拦截=True，期望=True"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "website_b2b_industrial": {
+      "id": "website_b2b_industrial",
+      "status": "completed",
+      "quality_score": 91.0,
+      "judge_total": 61.1,
+      "judge_final_total": 78.5,
+      "axis_scores": {
+        "brief_fit": 1.9,
+        "compliance": 5.0,
+        "structure": 5.0,
+        "brand_voice": 3.0,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 1,
+      "artifact_count": 18,
+      "fact_accuracy": 42.9,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "revise",
+        "pass"
+      ],
+      "first_round_blocked": true,
+      "predicted_ctr": 0.0,
+      "duration_ms": 5719,
+      "task_id": "task_b2ba2bee",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 1 个：预测性维护"
+        },
+        {
+          "rule": "禁用「必定降本」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「保证翻倍」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「零风险」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「重工智造」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 20 字",
+          "ok": true,
+          "detail": "当前 20 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 85",
+          "ok": true,
+          "detail": "实际 91.0"
+        },
+        {
+          "rule": "评估分 ≥ 74",
+          "ok": true,
+          "detail": "实际 78.5"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 1 轮"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "wechat_longform_tech": {
+      "id": "wechat_longform_tech",
+      "status": "completed",
+      "quality_score": 92.0,
+      "judge_total": 76.8,
+      "judge_final_total": 84.0,
+      "axis_scores": {
+        "brief_fit": 3.0,
+        "compliance": 5.0,
+        "structure": 5.0,
+        "brand_voice": 3.0,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 1,
+      "artifact_count": 18,
+      "fact_accuracy": 50.0,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "pass",
+        "pass"
+      ],
+      "first_round_blocked": false,
+      "predicted_ctr": 0.0,
+      "duration_ms": 5780,
+      "task_id": "task_352d0f9c",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 1 个：可观测性"
+        },
+        {
+          "rule": "禁用「吊打同行」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「碾压所有」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「假货」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「山寨货」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「云枢」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 30 字",
+          "ok": true,
+          "detail": "当前 16 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 85",
+          "ok": true,
+          "detail": "实际 92.0"
+        },
+        {
+          "rule": "评估分 ≥ 76",
+          "ok": true,
+          "detail": "实际 84.0"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 1 轮"
+        },
+        {
+          "rule": "调性关键词命中（参考，不参与判定）",
+          "ok": true,
+          "detail": "命中 0/3：无"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "xiaohongshu_beauty": {
+      "id": "xiaohongshu_beauty",
+      "status": "completed",
+      "quality_score": 93.0,
+      "judge_total": 71.5,
+      "judge_final_total": 89.0,
+      "axis_scores": {
+        "brief_fit": 4.0,
+        "compliance": 5.0,
+        "structure": 5.0,
+        "brand_voice": 3.0,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 1,
+      "artifact_count": 18,
+      "fact_accuracy": 42.9,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "revise",
+        "pass"
+      ],
+      "first_round_blocked": true,
+      "predicted_ctr": 0.0,
+      "duration_ms": 5719,
+      "task_id": "task_399c8e14",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 2 个：氨基酸、敏感肌"
+        },
+        {
+          "rule": "禁用「消炎」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「抗炎」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「修复损伤」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「再生」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「医用面膜」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「沐白」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 20 字",
+          "ok": true,
+          "detail": "当前 20 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 85",
+          "ok": true,
+          "detail": "实际 93.0"
+        },
+        {
+          "rule": "评估分 ≥ 80",
+          "ok": true,
+          "detail": "实际 89.0"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 1 轮"
+        },
+        {
+          "rule": "调性关键词命中（参考，不参与判定）",
+          "ok": true,
+          "detail": "命中 0/3：无"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "xiaohongshu_food": {
+      "id": "xiaohongshu_food",
+      "status": "completed",
+      "quality_score": 93.0,
+      "judge_total": 73.6,
+      "judge_final_total": 91.0,
+      "axis_scores": {
+        "brief_fit": 4.0,
+        "compliance": 5.0,
+        "structure": 5.0,
+        "brand_voice": 3.67,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 1,
+      "artifact_count": 18,
+      "fact_accuracy": 42.9,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "revise",
+        "pass"
+      ],
+      "first_round_blocked": true,
+      "predicted_ctr": 0.0,
+      "duration_ms": 6015,
+      "task_id": "task_2b703968",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 2 个：0 糖、冷萃"
+        },
+        {
+          "rule": "禁用「减肥」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「瘦身」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「燃脂」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「治疗」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「晨野」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 20 字",
+          "ok": true,
+          "detail": "当前 15 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 85",
+          "ok": true,
+          "detail": "实际 93.0"
+        },
+        {
+          "rule": "评估分 ≥ 80",
+          "ok": true,
+          "detail": "实际 91.0"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 1 轮"
+        },
+        {
+          "rule": "调性关键词命中（参考，不参与判定）",
+          "ok": true,
+          "detail": "命中 1/3：真实"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "xiaohongshu_minimal_brief": {
+      "id": "xiaohongshu_minimal_brief",
+      "status": "completed",
+      "quality_score": 94.0,
+      "judge_total": 76.6,
+      "judge_final_total": 94.0,
+      "axis_scores": {
+        "brief_fit": 5.0,
+        "compliance": 5.0,
+        "structure": 5.0,
+        "brand_voice": 3.0,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 1,
+      "artifact_count": 18,
+      "fact_accuracy": 42.9,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "revise",
+        "pass"
+      ],
+      "first_round_blocked": true,
+      "predicted_ctr": 0.0,
+      "duration_ms": 6014,
+      "task_id": "task_bccc0c8a",
+      "error": "",
+      "checks": [
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「治疗」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「无名」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 20 字",
+          "ok": true,
+          "detail": "当前 17 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 85",
+          "ok": true,
+          "detail": "实际 94.0"
+        },
+        {
+          "rule": "评估分 ≥ 85",
+          "ok": true,
+          "detail": "实际 94.0"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 1 轮"
+        }
+      ],
+      "delivered_text": ""
+    },
+    "zhihu_b2c_education": {
+      "id": "zhihu_b2c_education",
+      "status": "completed",
+      "quality_score": 93.0,
+      "judge_total": 82.5,
+      "judge_final_total": 89.0,
+      "axis_scores": {
+        "brief_fit": 4.0,
+        "compliance": 5.0,
+        "structure": 5.0,
+        "brand_voice": 3.0,
+        "fact_safety": 5.0,
+        "appeal": 5.0
+      },
+      "revision_round": 1,
+      "artifact_count": 18,
+      "fact_accuracy": 50.0,
+      "brand_consistency": 5.0,
+      "compliance_verdicts": [
+        "pass",
+        "pass"
+      ],
+      "first_round_blocked": false,
+      "predicted_ctr": 0.0,
+      "duration_ms": 6015,
+      "task_id": "task_e7af8bfd",
+      "error": "",
+      "checks": [
+        {
+          "rule": "关键词命中 ≥ 1/2",
+          "ok": true,
+          "detail": "命中 2 个：考研数学、二战"
+        },
+        {
+          "rule": "禁用「保过」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「保分」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「提分保证」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「不过退款」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「一次通过」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「国家级」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "禁用「最佳」",
+          "ok": true,
+          "detail": "未出现"
+        },
+        {
+          "rule": "品牌名「知路」",
+          "ok": true,
+          "detail": "已出现"
+        },
+        {
+          "rule": "标题 ≤ 30 字",
+          "ok": true,
+          "detail": "当前 17 字"
+        },
+        {
+          "rule": "无广告法阻断级用语",
+          "ok": true,
+          "detail": "未发现阻断级用语"
+        },
+        {
+          "rule": "质量分 ≥ 85",
+          "ok": true,
+          "detail": "实际 93.0"
+        },
+        {
+          "rule": "评估分 ≥ 78",
+          "ok": true,
+          "detail": "实际 89.0"
+        },
+        {
+          "rule": "返工轮次 ≤ 2",
+          "ok": true,
+          "detail": "实际 1 轮"
+        },
+        {
+          "rule": "调性关键词命中（参考，不参与判定）",
+          "ok": true,
+          "detail": "命中 0/3：无"
+        }
+      ],
+      "delivered_text": ""
+    }
+  }
+}

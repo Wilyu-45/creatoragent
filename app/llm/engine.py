@@ -12,6 +12,7 @@ import re
 import time
 
 from ..config import LLMSettings, get_config
+from ..core.tracing import tracer
 from ..logger import create_logger
 from .cache import response_cache
 from .cost import cost_guard
@@ -67,15 +68,30 @@ def current_provider_name() -> str:
 
 
 def chat(request: LLMRequest) -> LLMResponse:
+    """统一模型调用入口；每次调用都会产生一个 ``llm.<purpose>`` span。
+
+    span 上记录 provider / model / 命中缓存 / token / 成本 / 降级原因，
+    因此「这次任务的 6 秒花在哪、钱花在哪」可以直接从 trace 树读出来，
+    不需要再去日志里拼时间戳。
+    """
+    span = tracer.start_span(
+        f"llm.{request.purpose}",
+        kind="client",
+        attributes={"llm.purpose": request.purpose, "llm.json": request.json},
+    )
+
     # 1) 成本熔断：本任务已超预算，后续步骤一律走离线引擎，不再产生费用
     if cost_guard.should_cut():
         fallback = _mock.chat(request)
         fallback.degraded_reason = "成本熔断：本任务已达成本预算，后续步骤改用内置离线引擎"
+        _finish_llm_span(span, fallback, degraded="cost_cut")
         return fallback
 
     provider = resolve_provider()
     if getattr(provider, "simulated", False):
-        return _mock.chat(request)
+        response = _mock.chat(request)
+        _finish_llm_span(span, response, degraded="simulated")
+        return response
 
     cache_key: str | None = None
     if get_config().llm_cache:
@@ -86,11 +102,14 @@ def chat(request: LLMRequest) -> LLMResponse:
         if cached is not None:
             cached.latency_ms = 0
             log.info(f"[{request.purpose}] 命中响应缓存，跳过模型调用")
+            _finish_llm_span(span, cached, cache_hit=True)
             return cached
 
     last_error: Exception | None = None
     response: LLMResponse | None = None
+    attempts = 0
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        attempts = attempt
         try:
             response = provider.chat(request)
             break
@@ -118,13 +137,48 @@ def chat(request: LLMRequest) -> LLMResponse:
         )
         if cache_key is not None:
             response_cache.put(cache_key, response)
+        _finish_llm_span(span, response, attempts=attempts)
         return response
 
     reason = str(last_error)
     log.error(f"[{request.purpose}] 真实模型不可用，降级到内置离线引擎：{reason}")
     fallback = _mock.chat(request)
     fallback.degraded_reason = reason[:200]
+    _finish_llm_span(span, fallback, attempts=attempts, degraded="provider_error")
     return fallback
+
+
+def _finish_llm_span(
+    span,
+    response: LLMResponse,
+    *,
+    attempts: int = 1,
+    cache_hit: bool = False,
+    degraded: str = "",
+) -> None:
+    """把模型调用的关键信息写进 span。
+
+    降级与缓存命中都记为 ``ok`` 而不是 ``error``：它们是被设计出来的正常路径
+    （plan.md D10/D12），记成错误会让错误率失去意义。
+    """
+    usage = response.usage
+    tracer.finish_span(
+        span,
+        status="ok",
+        attributes={
+            "llm.provider": response.provider,
+            "llm.model": response.model,
+            "llm.prompt_tokens": usage.prompt_tokens,
+            "llm.completion_tokens": usage.completion_tokens,
+            "llm.cached": cache_hit or response.cached,
+            "llm.simulated": response.simulated,
+            "llm.attempts": attempts,
+            "llm.degraded": degraded or (response.degraded_reason or ""),
+            "llm.cost_usd": round(
+                cost_of(response.model, usage.prompt_tokens, usage.completion_tokens), 6
+            ),
+        },
+    )
 
 
 mock_provider = _mock

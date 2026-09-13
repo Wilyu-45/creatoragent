@@ -22,6 +22,14 @@
 ----------
 ``MAX_CARDS`` 限制库容量，超出后淘汰最久未更新的卡片；``MAX_AGE_DAYS`` 让超过半年的
 知识「过期下线」，避免长期运行后检索被陈年噪声淹没（creator.md A11「管理版本、过期知识」）。
+
+多租户隔离（plan.md D17 / creator.md A11「管理权限」）
+----------------------------------------------------
+每张卡片带 ``tenant`` 归属，检索、列表与统计均可按租户过滤，避免 A 品牌的调性基线
+被 B 品牌的智能体当作「团队资产」复用。同一租户内的去重键是
+``sha1(tenant|kind|title|content)``——不同租户的相同标题不会互相顶替，
+因此「各租户各自沉淀一份」是期望行为，而不是重复数据。
+未启用 ``CREATOR_API_TOKENS`` 时全部归属 ``default``，行为与历史版本一致。
 """
 
 from __future__ import annotations
@@ -80,6 +88,9 @@ _W_INDUSTRY = 0.05
 #: 向量余弦超过该值即认为是「语义相近」，写进命中理由
 _VECTOR_REASON = 0.35
 
+#: 未启用鉴权时的默认租户（与 ``TaskRecord.tenant`` 口径一致）
+DEFAULT_TENANT = "default"
+
 
 def _tokens(text: str) -> set[str]:
     """中文取 2-gram（不足 2 字时退回单字），英文/数字取词（与向量口径一致）。"""
@@ -101,6 +112,27 @@ def _digest(*parts: str) -> str:
     return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:16]
 
 
+def _card_key(card: MemoryCard) -> str:
+    """租户内的内容指纹：租户隔离后，不同租户的同名知识必须各自存活。"""
+    return _digest(card.tenant or DEFAULT_TENANT, card.kind, card.title, card.content)
+
+
+#: 记忆库默认语言（与 ``language.DEFAULT_LANGUAGE`` 一致；此处独立定义避免循环导入）
+DEFAULT_MEMORY_LANGUAGE = "zh"
+
+
+def _language_key(value: str | None) -> str:
+    """记忆库的语言分区键（plan.md v2.0「多语言本地化」）。
+
+    英文资产**不该**被中文任务当作「品牌调性基线」复用 ——
+    复用一份语言不对的资产比不复用更糟（会被模型当成本次任务的语气参照）。
+    旧卡片没有该字段时按 ``zh`` 读取，与历史行为一致。
+    """
+    from .language import normalize_language
+
+    return normalize_language(value or DEFAULT_MEMORY_LANGUAGE)
+
+
 @dataclass
 class MemoryCard:
     """一条可跨任务复用的知识。"""
@@ -119,6 +151,11 @@ class MemoryCard:
     created_at: str = ""
     #: 同一条知识被多次命中时累加，用于「复用率」统计
     hits: int = 0
+    #: 归属租户（plan.md D17）。旧数据缺该字段时按 ``default`` 处理。
+    tenant: str = DEFAULT_TENANT
+    #: 内容语言（plan.md v2.0）。旧数据缺该字段时按 ``zh`` 处理，
+    #: 因此英文资产不会与中文资产互相召回。
+    language: str = DEFAULT_MEMORY_LANGUAGE
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -165,6 +202,7 @@ class MemoryHit:
             "tags": list(self.card.tags),
             "reuse_hint": self.card.reuse_hint,
             "created_at": self.card.created_at,
+            "tenant": self.card.tenant or DEFAULT_TENANT,
             "score": round(self.score, 4),
             "vector_score": round(self.vector, 4),
             "reasons": list(self.reasons),
@@ -201,8 +239,10 @@ class MemoryStore:
                         continue
                     if card.kind not in CARD_KINDS:
                         card.kind = "lesson"
+                    card.tenant = (card.tenant or DEFAULT_TENANT).strip() or DEFAULT_TENANT
+                    card.language = _language_key(getattr(card, "language", None))
                     self._cards.append(card)
-                    self._index[_digest(card.kind, card.title, card.content)] = card
+                    self._index[_card_key(card)] = card
                 if self._cards:
                     log.info(f"已加载 {len(self._cards)} 条跨任务知识卡片")
                     # 启动即清理过期知识，避免旧卡片参与本轮召回
@@ -241,10 +281,14 @@ class MemoryStore:
         cards: list[dict[str, Any]],
         templates: list[dict[str, Any]] | None = None,
         revision: int = 0,
+        tenant: str = DEFAULT_TENANT,
+        language: str = DEFAULT_MEMORY_LANGUAGE,
     ) -> int:
-        """写入一批知识卡片，返回新增条数（重复内容自动跳过）。"""
+        """写入一批知识卡片，返回新增条数（租户内重复内容自动跳过）。"""
         self.load()
         stamp = now_iso()
+        owner = (tenant or DEFAULT_TENANT).strip() or DEFAULT_TENANT
+        lang = _language_key(language)
         drafts: list[dict[str, Any]] = []
 
         for item in cards:
@@ -281,7 +325,7 @@ class MemoryStore:
                     draft["kind"] = "lesson"
                 if not draft["title"] or not draft["content"]:
                     continue
-                key = _digest(draft["kind"], draft["title"], draft["content"])
+                key = _digest(owner, draft["kind"], draft["title"], draft["content"])
                 if key in self._index:
                     continue
                 card = MemoryCard(
@@ -297,31 +341,41 @@ class MemoryStore:
                     reuse_hint=draft["reuse_hint"],
                     revision=revision,
                     created_at=stamp,
+                    tenant=owner,
+                    language=lang,
                 )
                 self._cards.append(card)
                 self._index[key] = card
                 added += 1
 
             if added:
-                self._evict()
+                self._evict(owner)
                 self._sweep_expired()
 
         if added:
             self.flush()
-            log.info(f"任务 {task_id} 沉淀 {added} 条新知识（库容量 {len(self._cards)}）")
+            log.info(
+                f"任务 {task_id}（租户 {owner}）沉淀 {added} 条新知识（库容量 {len(self._cards)}）"
+            )
         return added
 
-    def _evict(self) -> None:
-        """超出容量上限时淘汰最早的卡片（调用方需持锁）。"""
-        overflow = len(self._cards) - MAX_CARDS
+    def _evict(self, tenant: str) -> None:
+        """超出容量上限时淘汰最早的卡片（调用方需持锁）。
+
+        **按租户计量**：容量是「每个租户各自 500 条」，否则多租户下先入库的租户
+        会把后入库租户的名额挤掉（creator.md A11 要求管理权限与容量）。
+        """
+        scoped = [card for card in self._cards if card.tenant == tenant]
+        overflow = len(scoped) - MAX_CARDS
         if overflow <= 0:
             return
-        dropped = self._cards[:overflow]
-        self._cards = self._cards[overflow:]
+        dropped = scoped[:overflow]
+        dropped_ids = {card.id for card in dropped}
+        self._cards = [card for card in self._cards if card.id not in dropped_ids]
         for card in dropped:
-            self._index.pop(_digest(card.kind, card.title, card.content), None)
+            self._index.pop(_card_key(card), None)
             self._vectors.pop(card.id, None)
-        log.warn(f"记忆库超出上限，淘汰 {len(dropped)} 条最旧知识")
+        log.warn(f"租户 {tenant} 记忆库超出上限，淘汰 {len(dropped)} 条最旧知识")
 
     def _sweep_expired(self) -> int:
         """下线超过 ``MAX_AGE_DAYS`` 的过期知识，返回下线条数（调用方需持锁）。
@@ -338,7 +392,7 @@ class MemoryStore:
             return 0
         self._cards = kept
         for card in dropped:
-            self._index.pop(_digest(card.kind, card.title, card.content), None)
+            self._index.pop(_card_key(card), None)
             self._vectors.pop(card.id, None)
         log.warn(f"记忆库下线 {len(dropped)} 条超过 {MAX_AGE_DAYS} 天的过期知识")
         return len(dropped)
@@ -346,7 +400,13 @@ class MemoryStore:
     # ---------------------------- 检索 ---------------------------- #
 
     def _ensure_vectors(self, cards: list[MemoryCard]) -> None:
-        """懒计算并缓存卡片向量；提供方 / 模型 / 维度变更时整体失效重算。"""
+        """懒计算并缓存卡片向量；提供方 / 模型 / 维度变更时整体失效重算。
+
+        只计算**传入的这一批**卡片（调用方已按租户过滤）：多租户部署下，
+        给 A 租户做一次检索不应该替 B/C/D 租户把向量也算一遍。
+        """
+        if not cards:
+            return
         cfg = get_config().embedding
         key = (cfg.provider, cfg.model if cfg.provider == "openai" else "local", cfg.dim)
         with self._lock:
@@ -371,11 +431,17 @@ class MemoryStore:
         industry: str = "",
         top_k: int = 5,
         exclude_task: str | None = None,
+        tenant: str | None = None,
+        language: str | None = None,
     ) -> list[MemoryHit]:
         """按相关度召回知识卡片。
 
         ``exclude_task`` 用于排除当前任务自己刚写入的卡片，
         保证「召回的是历史资产」而不是自我循环。
+        ``tenant`` 非空时只在该租户的卡片中召回（plan.md D17「数据隔离」）；
+        传 ``None`` 表示不限租户（供离线自检等场景使用）。
+        ``language`` 非空时只召回该语言的卡片：**英文资产不该被中文任务
+        当作语气基线**，反之亦然。
         """
         self.load()
         query_tokens = _tokens(query)
@@ -384,8 +450,15 @@ class MemoryStore:
         if weight > 0 and query.strip():
             query_vector = embed_texts([query])[0]
 
+        owner = (tenant or "").strip()
+        lang = _language_key(language) if language else ""
         with self._lock:
-            cards = list(self._cards)
+            cards = [
+                card
+                for card in self._cards
+                if (not owner or card.tenant == owner)
+                and (not lang or _language_key(card.language) == lang)
+            ]
         if query_vector is not None:
             self._ensure_vectors(cards)
 
@@ -450,27 +523,46 @@ class MemoryStore:
     # ---------------------------- 查询 ---------------------------- #
 
     def list_cards(
-        self, *, kind: str | None = None, brand: str | None = None, limit: int = 50
+        self,
+        *,
+        kind: str | None = None,
+        brand: str | None = None,
+        limit: int = 50,
+        tenant: str | None = None,
     ) -> list[MemoryCard]:
         self.load()
+        owner = (tenant or "").strip()
         with self._lock:
-            cards = list(self._cards)
+            cards = [
+                card for card in self._cards if not owner or card.tenant == owner
+            ]
         if kind:
             cards = [card for card in cards if card.kind == kind]
         if brand:
             cards = [card for card in cards if card.brand == brand]
         return sorted(cards, key=lambda card: card.created_at, reverse=True)[: max(0, limit)]
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self, tenant: str | None = None) -> dict[str, Any]:
+        """库统计。
+
+        ``tenant`` 非空时只统计该租户的卡片，并额外给出全局容量占用
+        （``global_total``）——「我的库还剩多少额度」是租户最关心的信息，
+        而全局总量不构成数据泄露（只有数量）。
+        """
         self.load()
+        owner = (tenant or "").strip()
         with self._lock:
-            cards = list(self._cards)
+            all_cards = list(self._cards)
+        cards = [card for card in all_cards if not owner or card.tenant == owner]
         by_kind: dict[str, int] = {}
         for card in cards:
             by_kind[card.kind] = by_kind.get(card.kind, 0) + 1
         return {
             "total": len(cards),
+            "global_total": len(all_cards),
             "capacity": MAX_CARDS,
+            "tenant": owner or None,
+            "tenants": sorted({card.tenant or DEFAULT_TENANT for card in all_cards}),
             "by_kind": [
                 {"kind": kind, "label": KIND_LABEL[kind], "count": by_kind.get(kind, 0)}
                 for kind in CARD_KINDS
@@ -484,9 +576,11 @@ class MemoryStore:
             "oldest_days": max((_age_days(card) for card in cards), default=0),
             "fresh": sum(1 for card in cards if _age_days(card) <= FRESH_DAYS),
             "stale": sum(1 for card in cards if _age_days(card) > STALE_DAYS),
-            # 检索方式：纯关键词（weight=0）还是关键词 + 向量混合
+            # 检索方式：纯关键词（weight=0）还是关键词 + 向量混合。
+            # 索引条数是**懒计算**的结果：只统计本租户里真正被检索过（因而建过向量）
+            # 的卡片，因此刚启动时为 0 是正常的，首次检索后才会涨上来。
             "embedding": describe_embedding(),
-            "vector_indexed": len(self._vectors),
+            "vector_indexed": sum(1 for card in cards if card.id in self._vectors),
         }
 
 
@@ -494,8 +588,11 @@ def render_hits(hits: list[dict[str, Any]], *, limit: int = 5) -> str:
     """把召回结果渲染成提示词片段；无召回时返回空串。
 
     真实模型与离线引擎共用同一段文案，保证「有记忆」这件事对两条路径可见。
+    多租户下会标注资产归属租户，便于排查「为什么召回了这条」。
     """
     lines: list[str] = []
+    owners = {str(hit.get("tenant") or DEFAULT_TENANT) for hit in (hits or [])[:limit]}
+    multi_tenant = len(owners) > 1
     for index, hit in enumerate((hits or [])[:limit], start=1):
         title = str(hit.get("title") or "").strip()
         content = str(hit.get("content") or "").strip()
@@ -503,8 +600,17 @@ def render_hits(hits: list[dict[str, Any]], *, limit: int = 5) -> str:
             continue
         label = str(hit.get("kind_label") or KIND_LABEL.get(str(hit.get("kind")), "历史资产"))
         task_id = str(hit.get("task_id") or "")
+        owner = str(hit.get("tenant") or DEFAULT_TENANT)
         reasons = "、".join(str(reason) for reason in (hit.get("reasons") or []))
-        meta = "｜".join(part for part in (f"来源任务 {task_id}" if task_id else "", reasons) if part)
+        meta = "｜".join(
+            part
+            for part in (
+                f"来源任务 {task_id}" if task_id else "",
+                f"租户 {owner}" if multi_tenant else "",
+                reasons,
+            )
+            if part
+        )
         block = f"{index}. [{label}] {title}"
         if meta:
             block += f"（{meta}）"
@@ -545,6 +651,7 @@ memory_store = MemoryStore()
 
 __all__ = [
     "CARD_KINDS",
+    "DEFAULT_TENANT",
     "KIND_LABEL",
     "MAX_CARDS",
     "MemoryCard",

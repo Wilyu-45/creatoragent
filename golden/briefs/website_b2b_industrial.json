@@ -1,0 +1,31 @@
+{
+  "id": "website_b2b_industrial",
+  "note": "工业 B2B 分支：官网渠道（20 字标题上限）+ 长决策链受众。这类内容不追求种草，验证「专业口径」下评估器的需求契合与结构维度是否稳定。",
+  "brief": {
+    "brand": "重工智造",
+    "product": "工业设备预测性维护系统",
+    "objective": "教育",
+    "audience": "制造业工厂的设备科与生产负责人",
+    "channel": "官网",
+    "tone": "务实、以产能与停机时长说话",
+    "industry": "工业制造",
+    "keywords": ["预测性维护", "降低停机"],
+    "constraints": ["效果数据需标注适用工况", "不得承诺具体降本比例"],
+    "deliverables": ["官网落地页文案 1 套"],
+    "priority": "normal"
+  },
+  "expect": {
+    "min_quality": 85,
+    "min_judge": 74,
+    "max_revisions": 2,
+    "min_keyword_hits": 1,
+    "max_title_length": 20,
+    "must_not_contain": ["必定降本", "保证翻倍", "零风险", "国家级", "最佳"],
+    "reference_points": [
+      "官网标题 20 字以内",
+      "以产能与停机时长等可核对的指标说话，不用形容词堆砌",
+      "效果数据必须标注适用工况",
+      "不得承诺具体降本比例"
+    ]
+  }
+}

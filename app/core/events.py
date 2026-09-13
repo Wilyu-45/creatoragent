@@ -3,6 +3,7 @@
 所有智能体的动作都会变成事件：
 - 写入环形缓冲，供 SSE 客户端「断线重连 + 回放」
 - 广播给所有订阅者（Web 界面实时进度）
+- **自动关联当前 trace / span**（见 ``core/tracing.py``），使事件与 span 树天然对齐
 
 与 TS 版的差异：编排图跑在工作线程、SSE 跑在事件循环，因此这里加锁保证并发安全。
 """
@@ -15,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from .clock import now_iso
+from .tracing import tracer
 from .types import AgentEvent
 
 Listener = Callable[[AgentEvent], None]
@@ -40,6 +42,10 @@ class EventBus:
         level: str = "info",
         payload: dict[str, Any] | None = None,
     ) -> AgentEvent:
+        # 自动关联当前 trace / span：调用方无需逐个传参，事件与 span 树天然对齐。
+        # 这也让「同一条事件属于哪个 span」在排查时不需要靠时间戳猜。
+        trace_id = tracer.current_trace_id()
+        span_id = tracer.current_span_id()
         with self._lock:
             self._seq += 1
             event = AgentEvent(
@@ -52,6 +58,8 @@ class EventBus:
                 level=level,  # type: ignore[arg-type]
                 message=message,
                 payload=payload,
+                trace_id=trace_id,
+                span_id=span_id,
             )
             self._append(event)
             return event

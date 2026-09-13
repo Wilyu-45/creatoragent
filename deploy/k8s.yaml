@@ -1,0 +1,161 @@
+# Kubernetes 部署清单（单文件，namespace 级）
+#
+#   kubectl apply -f deploy/k8s.yaml
+#   kubectl -n creator port-forward svc/creator 8787:8787
+#
+# 设计取舍（单机/小集群取向）：
+# * **单副本 + Recreate**：当前持久化是本地 JSON + SQLite 检查点，
+#   多副本会各写各的导致状态分裂。要横向扩展必须先换掉存储层
+#   （PostgreSQL + Redis，见 plan.md 5.1 的替换路径），因此这里刻意不假装支持。
+# * **镜像用占位名**：CI 推镜像时替换 `image:`（或用 kustomize/helm 覆盖）。
+# * Secret 与 ConfigMap 分离：令牌、模型密钥进 Secret，其余进 ConfigMap。
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: creator
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: creator-config
+  namespace: creator
+data:
+  PORT: "8787"
+  CREATOR_DATA_DIR: "/data"
+  LLM_PROVIDER: "mock"
+  OPENAI_BASE_URL: "https://api.openai.com/v1"
+  OPENAI_MODEL: "gpt-4o-mini"
+  TURN_BUDGET: "25"
+  MAX_REVISIONS: "2"
+  QUALITY_THRESHOLD: "75"
+  AUTO_APPROVE: "false"
+  COST_BUDGET_USD: "0.5"
+  TOKEN_BUDGET: "50000"
+  JUDGE_MODE: "advisory"
+  JUDGE_PROVIDER: "offline"
+  EMBEDDING_PROVIDER: "local"
+  EMBEDDING_WEIGHT: "0.35"
+  # 指向集群内的 OTel collector；不配也不影响应用（进程内追踪照常工作）
+  OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
+  OTEL_SERVICE_NAME: "creator-agent-studio"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: creator-secrets
+  namespace: creator
+type: Opaque
+stringData:
+  # 生产环境请替换：令牌决定租户隔离边界，为空则完全不鉴权
+  CREATOR_API_TOKENS: ""
+  OPENAI_API_KEY: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: creator-data
+  namespace: creator
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: creator
+  namespace: creator
+  labels: { app: creator }
+spec:
+  # 见文件头说明：存储层未支持共享前，副本数必须为 1
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: creator }
+  template:
+    metadata:
+      labels: { app: creator }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: app
+          image: creator-agent-studio:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8787
+          envFrom:
+            - configMapRef: { name: creator-config }
+            - secretRef: { name: creator-secrets }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # 就绪：可以接流量（/api/health 免鉴权，因此开了令牌也能探）
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          # 存活：进程卡死时重启（给足冷启动时间，避免启动期被误杀）
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "2", memory: "2Gi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # 需要写 /tmp 与 /data
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: creator-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: creator
+  namespace: creator
+  labels: { app: creator }
+spec:
+  type: ClusterIP
+  selector: { app: creator }
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
+---
+# 可选：对外暴露（按需启用；SSE 需要较长的读超时与关闭缓冲）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: creator
+  namespace: creator
+  annotations:
+    # SSE 是长连接：缓冲会让事件「攒着不发」，必须关掉
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: creator.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: creator
+                port: { number: 8787 }

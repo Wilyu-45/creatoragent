@@ -1,0 +1,18 @@
+# 构建产物与运行期数据不进构建上下文，能显著加快 docker build 并避免把
+# 宿主机的 data/、node_modules/ 拷进镜像（后者会在 COPY 时覆盖镜像内的正确内容）
+.git
+.gitignore
+node_modules
+dist
+data
+.doctor-data
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.env
+.env.local
+*.log
+.DS_Store
+.venv
+venv

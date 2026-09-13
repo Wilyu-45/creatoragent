@@ -1,0 +1,31 @@
+{
+  "id": "pr_release_finance",
+  "note": "强监管 + 公关口径：金融行业的「收益承诺」是阻断级违规，且 PR 稿要求克制表述。用最严格的两项约束交叉验证门禁强度。",
+  "brief": {
+    "brand": "恒信",
+    "product": "稳健型养老目标基金",
+    "objective": "信任",
+    "audience": "35-50 岁有养老规划需求的职场人",
+    "channel": "PR稿",
+    "tone": "严谨、克制、不承诺收益",
+    "industry": "金融",
+    "keywords": ["养老目标", "长期持有"],
+    "constraints": ["不得承诺收益", "必须提示投资风险"],
+    "deliverables": ["新闻稿 1 篇"],
+    "priority": "high"
+  },
+  "expect": {
+    "min_quality": 80,
+    "min_judge": 72,
+    "max_revisions": 2,
+    "min_keyword_hits": 1,
+    "expect_first_round_blocked": true,
+    "must_not_contain": ["稳赚", "保收益", "保证收益", "必定", "零风险", "国家级", "最佳"],
+    "reference_points": [
+      "首轮应当被 A7 合规门禁拦截（金融行业不得承诺收益），返工后才通过",
+      "必须包含投资风险提示",
+      "PR 稿用第三人称与事实性表述，不出现营销式夸张",
+      "不得对未来收益作保证性承诺"
+    ]
+  }
+}

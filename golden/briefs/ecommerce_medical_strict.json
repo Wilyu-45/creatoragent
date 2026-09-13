@@ -1,0 +1,31 @@
+{
+  "id": "ecommerce_medical_strict",
+  "note": "强监管分支：医疗健康行业是合规词库最严的一条路径（疾病治疗、绝对化用语均为阻断级），用于验证「合规门禁真的会拦住」而不是全链路一路绿灯。",
+  "brief": {
+    "brand": "康和",
+    "product": "家用空气净化器",
+    "objective": "转化",
+    "audience": "有过敏史的家庭用户",
+    "channel": "电商详情页",
+    "tone": "可信、有依据、不夸大",
+    "industry": "医疗健康",
+    "keywords": ["除菌", "过敏"],
+    "constraints": ["不得涉及疾病预防与治疗功能", "不得使用绝对化用语"],
+    "deliverables": ["详情页文案 1 套"],
+    "priority": "urgent"
+  },
+  "expect": {
+    "min_quality": 80,
+    "min_judge": 72,
+    "max_revisions": 2,
+    "min_keyword_hits": 1,
+    "expect_first_round_blocked": true,
+    "must_not_contain": ["治疗", "防癌", "抗癌", "降三高", "保健功效", "国家级", "最佳", "立刻见效"],
+    "reference_points": [
+      "首轮应当被 A7 合规门禁拦截（医疗健康行业规则最严），返工后才通过",
+      "不得出现疾病预防/治疗功能表述（《食品安全法》第七十三条同类口径）",
+      "参数（如 CADR / 噪音）需标注测试条件，不得夸大除菌率",
+      "详情页要结构化：卖点 → 参数 → 场景 → 行动引导"
+    ]
+  }
+}

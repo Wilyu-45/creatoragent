@@ -10,6 +10,9 @@
 3. docker-compose 传递的环境变量名同样有效
 4. k8s 清单里的 ConfigMap / Secret 键同样有效
 5. compose 与 k8s 的探针路径确实是免鉴权端点（否则开了令牌容器永远不健康）
+6. k8s 必须 ``replicas: 1`` 且发布策略为 ``Recreate`` —— 共享黑板 / 检查点 / 记忆库
+   都在本地 JSON + SQLite，多副本或滚动更新会状态分裂；这条约束此前只写在清单注释里，
+   改动者不一定看注释，所以升级为断言
 """
 
 from __future__ import annotations
@@ -159,11 +162,27 @@ def main() -> int:
         "k8s 探针路径与免鉴权路径不一致",
     )
 
+    print("\n[6] k8s 单副本约束（当前存储层不支持多副本）")
+    # 只截取 Deployment 这一段，避免匹配到后面 Service 的 spec
+    deployment = k8s_text.split("kind: Deployment", 1)[1].split("\nkind:", 1)[0]
+    replicas = re.search(r"replicas:\s*(\d+)", deployment)
+    check(
+        "k8s replicas: 1",
+        bool(replicas) and replicas.group(1) == "1",
+        "本地 JSON + SQLite 存储不支持多副本，必须 replicas: 1；横向扩展需先换 PostgreSQL + Redis",
+    )
+    strategy = re.search(r"strategy:\s*\n\s*type:\s*(\w+)", deployment)
+    check(
+        "k8s strategy: Recreate",
+        bool(strategy) and strategy.group(1) == "Recreate",
+        "滚动更新会出现新旧副本并存，必须用 Recreate 避免状态分裂",
+    )
+
     print()
     if failures:
         print(f"容器化清单核验未通过：{len(failures)} 项 → {'、'.join(failures)}")
         return 1
-    print("容器化清单核验通过：COPY 路径、环境变量、探针均与代码一致。")
+    print("容器化清单核验通过：COPY 路径、环境变量、探针、单副本约束均与代码一致。")
     return 0
 
 

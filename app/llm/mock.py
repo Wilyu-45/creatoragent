@@ -33,7 +33,7 @@ from ..knowledge.industry import (
     seo_pattern,
     title_limit,
 )
-from ..knowledge.language import normalize_language
+from ..knowledge.language import normalize_language, title_limit_for
 from ..knowledge.memory import evidence_from_hits
 from ..knowledge.visual import channel_visual_spec, visual_styles_for
 from ..knowledge.video import script_skeleton, video_spec
@@ -174,7 +174,7 @@ def _english_strategy(brief: Brief, keyword: str, seed: int) -> dict[str, Any]:
             ],
         },
         "objectives": [
-            {"type": brief.objective, "metric": "reach", "target": "baseline+30%"},
+            {"type": _english_objective(brief.objective), "metric": "reach", "target": "baseline+30%"},
             {"type": "trust", "metric": "save_rate", "target": "baseline+15%"},
         ],
         "channel_priority": [
@@ -290,9 +290,113 @@ def generate_strategy(ctx: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------ #
 
 
+def _english_creative(brief: Brief, strategy: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    """英文创意概念（mock 本地化分支，A2）。
+
+    与 ``_english_strategy`` 同一原则：行业方法论/案例库是中文语料，
+    直接复用会把中文漏进英文支撑产物。这里用 Brief 与上游英文策略产出
+    结构完全一致的英文内容 —— 离线环境下目标不是洞察深度，而是
+    「整条链路在目标语言下自洽」。
+    """
+    audience = rec(strategy.get("audience_profile"))
+    house = rec(strategy.get("message_house"))
+    pain = (as_str_array(audience.get("pain_points")) or ["too many options, not enough signal"])[0]
+    scenario = (as_str_array(audience.get("scenarios")) or ["a normal weekday"])[0]
+    proposition = as_str(house.get("proposition"), f"{brief.brand} {brief.product}")
+    keyword = brief.keywords[0] if brief.keywords else brief.industry
+
+    return {
+        "big_idea": {
+            "title": f"{brief.brand} · {pick(['Make the choice easy', 'Right the first time', 'Less deciding, more doing'], 7)}",
+            "statement": (
+                f"{proposition}. Not about how great we are — it is about {brief.audience} "
+                "seeing a calmer version of their own routine."
+            ),
+            "rationale": "Anchor the brand promise in the user's own state change, not in product specs.",
+        },
+        "directions": [
+            {
+                "id": "D1",
+                "name": "First-hand testimony",
+                "angle": (
+                    f"Follow one specific person through {scenario} with real usage details; "
+                    "persuade with specifics, not adjectives"
+                ),
+                "hook": f"I dealt with '{pain}' for three months before finding this",
+                "sample_headline": f"Day 30 of {scenario}: {brief.product} stayed",
+                "rationale": "Authenticity counters ad defensiveness and builds long-term trust",
+                "risk": "Needs real material; invented details will backfire",
+                "fit_score": 88,
+            },
+            {
+                "id": "D2",
+                "name": "Counter-intuitive question",
+                "angle": "Name the common misconception first, then offer the product capability as the new answer",
+                "hook": f"'{pain}' is probably not about effort",
+                "sample_headline": f"We may have been getting {brief.product} wrong all along",
+                "rationale": "A knowledge gap drives read-through and a professional image",
+                "risk": "Argument-heavy; weak evidence invites pushback",
+                "fit_score": 81,
+            },
+            {
+                "id": "D3",
+                "name": "Concrete number anchor",
+                "angle": (
+                    f"Quantify the value in verifiable time/count units, landing on '{keyword}'"
+                ),
+                "hook": f"Turn '{pain}' into a {30 + (7 % 40)}-second task",
+                "sample_headline": f"{brief.product}: give the saved time back",
+                "rationale": "Quantified claims lower comprehension cost and suit conversion goals",
+                "risk": "Numbers must have sources, or A6 fact-check and compliance will block them",
+                "fit_score": 84,
+            },
+        ],
+        "tone_guide": {
+            "voice": brief.tone,
+            "dos": [
+                "talk in second person",
+                "one idea per paragraph",
+                "empathize before offering the solution",
+                "concrete details over adjectives",
+            ],
+            "donts": [
+                "no absolute claims",
+                "no effect or income promises",
+                "no disparaging other brands",
+                "no jargon pile-up",
+            ],
+            "visual_suggestion": "Real usage scenes over studio polish; avoid over-retouched, staged looks",
+        },
+        # 爆款案例库是中文语料：英文分支不引用，宁可留空也不夹中文
+        "reference_cases": [],
+        "recommended_direction": "D1",
+        "recommendation_reason": (
+            f"Closest to the '{brief.tone}' voice with a controllable material bar; "
+            f"lowest read-through risk in {brief.channel}'s feed"
+        ),
+        "confidence": 0.79,
+        "risks": [
+            "Direction D3 involves quantified claims; A6 must verify sources before use",
+            "Direction D2 may draw negative comments if the argument is under-evidenced",
+            "The reference case library is Chinese-only; cases were skipped for this brief",
+        ],
+        "evidence": [
+            {
+                "claim": "Scene-anchored content holds attention better than generic claims",
+                "source": "content methodology (public retros)",
+                "reliability": 0.75,
+            },
+            *memory_evidence(ctx),
+        ],
+    }
+
+
 def generate_creative(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = as_brief(ctx)
     strategy = rec(ctx.get("strategy"))
+    # 非中文 Brief：方法论与案例库是中文语料，改走英文模板（同 _english_strategy）
+    if normalize_language(brief.language) == "en":
+        return _english_creative(brief, strategy, ctx)
     house = rec(strategy.get("message_house"))
     audience = rec(strategy.get("audience_profile"))
     seed = fnv1a(f"{brief.brand}{brief.channel}{brief.tone}{brief.product}")
@@ -377,9 +481,176 @@ def generate_creative(ctx: dict[str, Any]) -> dict[str, Any]:
 # A3 内容策划                                                         #
 # ------------------------------------------------------------------ #
 
+# 英文分支共用的渠道形态描述（中文 CHANNEL_RULES 是中文平台语料，直接引用会夹中文）
+_ENGLISH_FORMAT_HINTS: dict[str, str] = {
+    "instagram": "caption + carousel",
+    "tiktok": "short video script",
+    "youtube": "video script + description",
+    "email": "newsletter",
+    "twitter": "thread",
+    "x": "thread",
+    "facebook": "feed post",
+    "linkedin": "professional post",
+    "blog": "long-form article",
+}
+
+_ENGLISH_OBJECTIVES: dict[str, str] = {
+    "转化": "conversion",
+    "种草": "seeding",
+    "教育": "education",
+    "曝光": "awareness",
+    "信任": "trust",
+}
+
+
+def _english_format(channel: str) -> str:
+    """英文 Brief 的渠道形态描述；未知渠道回落到通用表述而非中文规则库。"""
+    low = (channel or "").lower()
+    for key, hint in _ENGLISH_FORMAT_HINTS.items():
+        if key in low:
+            return hint
+    return "native post"
+
+
+def _english_objective(objective: str) -> str:
+    """Brief 的 objective 允许中文（如「转化」），英文产物里映射为英文词。"""
+    return _ENGLISH_OBJECTIVES.get((objective or "").strip(), objective)
+
+
+def _compress_title_words(title: str, limit: int) -> str:
+    """英文标题按「词」压缩（中文 _compress_title 按字符，口径不通用）。"""
+    words = [w for w in (title or "").split() if w]
+    return " ".join(words[:limit]) if len(words) > limit else (title or "")
+
+
+def _english_plan(brief: Brief, ctx: dict[str, Any]) -> dict[str, Any]:
+    """英文内容策划（A3）：结构同中文分支，选题/大纲/节奏全部英文原生。"""
+    strategy = rec(ctx.get("strategy"))
+    creative = rec(ctx.get("creative"))
+    audience = rec(strategy.get("audience_profile"))
+    house = rec(strategy.get("message_house"))
+
+    pain = (as_str_array(audience.get("pain_points")) or ["choosing is exhausting"])[0]
+    benefit = (as_str_array(house.get("benefits")) or ["less to think about"])[0]
+    scenario = (as_str_array(audience.get("scenarios")) or ["a normal weekday"])[0]
+    directions = as_obj_array(creative.get("directions"))
+    chosen = next(
+        (d for d in directions if as_str(d.get("id")) == as_str(creative.get("recommended_direction"))),
+        None,
+    ) or (directions[0] if directions else {})
+    chosen_name = as_str(chosen.get("name"), "First-hand testimony")
+    keyword = brief.keywords[0] if brief.keywords else brief.product
+    content_format = _english_format(brief.channel)
+
+    topics = [
+        {
+            "id": "T1",
+            "title": f"Still {pain.lower()}? I used {brief.product} for 30 days",
+            "angle": chosen_name,
+            "format": content_format,
+            "outline": [
+                f"Hook: open with '{pain}' so {brief.audience} recognize themselves in one line",
+                f"Scene: the concrete details of {scenario}",
+                f"Solution: how {brief.product} addresses '{pain}' — three points only",
+                "Evidence: the testing process and verifiable material",
+                "Action: one low-effort next step",
+            ],
+            "cta": "If you want to try it, the link is in the comments",
+            "estimated_words": 420,
+        },
+        {
+            "id": "T2",
+            "title": f"About '{keyword}': three counter-intuitive things first",
+            "angle": "Counter-intuitive question",
+            "format": content_format,
+            "outline": [
+                "Conclusion first: state the view that contradicts the default",
+                "Argument 1: where the common approach quietly costs more",
+                f"Argument 2: how {brief.product}'s difference is actually built",
+                "Argument 3: verifiable data or a case",
+                "Close: offer a decision standard instead of a hard sell",
+            ],
+            "cta": "Which approach do you side with? Tell me in the comments",
+            "estimated_words": 520,
+        },
+        {
+            "id": "T3",
+            "title": f"Cutting through '{pain}': {max(3, len(brief.keywords))} things that matter",
+            "angle": "Concrete number anchor",
+            "format": content_format,
+            "outline": [
+                "Open with one set of numbers that frames the value",
+                "Break down the key points, each with a usage scene",
+                "Contrast: the cost of not doing this",
+                "Trust: sources and how to verify",
+                "Call to action",
+            ],
+            "cta": "Save this for your next purchase decision",
+            "estimated_words": 380,
+        },
+    ]
+
+    keyword_short = keyword if len(keyword) <= 20 else keyword[:20]
+    return {
+        "topics": topics,
+        "selected_topic": "T1",
+        "selection_reason": (
+            f"Matches the creative direction '{chosen_name}' and fits how {brief.channel} distributes content"
+        ),
+        "headline_candidates": [
+            f"Still {pain.lower()}? I switched to {brief.product}",
+            f"30 days with {brief.product}",
+            f"The {brief.product} my coworkers keep asking about",
+            f"Stop powering through '{pain}' — there is a fix",
+            f"Is {keyword_short} worth it? Read this first",
+        ],
+        "structure": [
+            {"section": "Opening hook", "goal": "Establish identity recognition in 3 seconds", "words": 60},
+            {"section": "Pain empathy", "goal": f"Make {brief.audience} think 'this is me'", "words": 80},
+            {"section": "Solution", "goal": f"Present '{benefit}'", "words": 160},
+            {"section": "Evidence", "goal": "Defuse the 'is this a scam' doubt", "words": 80},
+            {"section": "Call to action", "goal": "One clear next step", "words": 40},
+        ],
+        "channel_adaptation": [
+            {"channel": brief.channel, "format": content_format, "notes": "primary channel from the brief"},
+            {"channel": "Short video", "format": "storyboard script", "notes": "reuse the topic, rewrite as a 45-second voice-over"},
+        ],
+        "publishing_rhythm": [
+            {"slot": "T+0", "action": f"Publish the {brief.channel} primary post", "note": "pick the audience's active hours"},
+            {"slot": "T+2d", "action": "Second-round answers in the comments", "note": "harvest frequent questions as the next topic"},
+            {"slot": "T+7d", "action": "Performance review", "note": "compare headline A/B results"},
+        ],
+        "keywords": {
+            "primary": brief.keywords,
+            "long_tail": [
+                f"how to choose {keyword}",
+                f"{brief.product} honest review",
+                f"{brief.audience} {keyword}",
+            ],
+            "hashtags": f"#{brief.brand.replace(' ', '')} #{keyword.replace(' ', '')} #{brief.industry.replace(' ', '')}",
+        },
+        "confidence": 0.8,
+        "risks": ["Topic T1 depends on a real usage cycle; prepare verifiable material in advance"],
+        "evidence": [
+            {
+                "claim": f"{brief.channel} content format is '{content_format}'",
+                "source": "platform public rules",
+                "reliability": 0.85,
+            },
+            {
+                "claim": "Hook-solution-evidence structure fits feed-based discovery",
+                "source": "content operations practice",
+                "reliability": 0.75,
+            },
+        ],
+    }
+
 
 def generate_plan(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = as_brief(ctx)
+    # 非中文 Brief：渠道规则库与选题模板是中文语料，改走英文模板
+    if normalize_language(brief.language) == "en":
+        return _english_plan(brief, ctx)
     strategy = rec(ctx.get("strategy"))
     creative = rec(ctx.get("creative"))
     audience = rec(strategy.get("audience_profile"))
@@ -501,6 +772,9 @@ _PARAGRAPH_SPLIT_RE = re.compile(r"\n+")
 _SENTENCE_END_RE = re.compile(r"[。！？]")
 _LONG_SENTENCE_SPLIT_RE = re.compile(r"[。！？\n]")
 _COLLOQUIAL_RE = re.compile(r"(嗯|啊|吧|啦)+")
+# 英文侧口径：句子按 .!? 切分；「口语感」用缩写词近似（中文按 嗯/啊/吧/啦）
+_EN_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_EN_CONTRACTION_RE = re.compile(r"[a-z]'[a-z]", re.IGNORECASE)
 
 
 def build_hashtags(brief: Brief) -> list[str]:
@@ -823,8 +1097,178 @@ def generate_copy(ctx: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------ #
 
 
+def _english_clip(text: str, limit: int = 80) -> str:
+    """按词边界截断英文（中文 ``shorten`` 按字符截，会把英文截成半词）。"""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    return cut[:space] if space > 0 else cut
+
+
+def _english_edit(brief: Brief, ctx: dict[str, Any]) -> dict[str, Any]:
+    """英文审校（A5）：结构同中文分支，评审意见/修改建议全部英文原生。
+
+    中文分支的长句口径（60 字符 + 。！？切分）、口语词正则与标题上限都是中文
+    语料导向，直接复用会把中文评审意见漏进英文产物；标题上限换用语言画像的
+    词数口径（``title_limit_for``），长句按词数判定。
+    """
+    draft = rec(ctx.get("draft"))
+    versions = as_obj_array(draft.get("versions"))
+    recommended = as_str(draft.get("recommended_version"), "V1")
+    target = next((v for v in versions if as_str(v.get("id")) == recommended), None) or (
+        versions[0] if versions else {}
+    )
+    title = as_str(target.get("title"))
+    body = as_str(target.get("body"))
+    hashtags = as_str_array(target.get("hashtags"))
+    plain = _WHITESPACE_RE.sub("", f"{title}{body}")
+    paragraphs = [p for p in _PARAGRAPH_SPLIT_RE.split(body) if p.strip()]
+
+    word_limit = title_limit_for(brief.channel, brief.language)
+    title_words = len([w for w in title.split() if w])
+
+    issues: list[dict[str, Any]] = []
+    change_log: list[dict[str, str]] = []
+
+    structure = 90
+    clarity = 88
+    brand_voice = 86
+    appeal = 84
+
+    if title_words > word_limit:
+        issues.append(
+            {
+                "severity": "major",
+                "category": "Title",
+                "detail": f"Title runs {title_words} words, over the {brief.channel}"
+                f" recommended limit ({word_limit} words); feeds will truncate it",
+                "suggestion": f"Compress to {word_limit} words or fewer, keeping the"
+                " identity anchor and the emotional hook",
+                "location": "Title",
+            }
+        )
+        structure -= 12
+        appeal -= 8
+    if len(paragraphs) < 5:
+        issues.append(
+            {
+                "severity": "minor",
+                "category": "Structure",
+                "detail": f"Only {len(paragraphs)} paragraphs; mobile reading fatigue goes up",
+                "suggestion": "Split into hook / empathy / solution / evidence / action",
+                "location": "Body",
+            }
+        )
+        structure -= 10
+    if brief.brand not in body:
+        issues.append(
+            {
+                "severity": "major",
+                "category": "Brand",
+                "detail": "The brand name never appears in the body, so brand association cannot form",
+                "suggestion": f"Mention {brief.brand} once naturally in the solution section",
+                "location": "Body",
+            }
+        )
+        brand_voice -= 15
+    if not hashtags:
+        issues.append(
+            {
+                "severity": "minor",
+                "category": "Channel fit",
+                "detail": "No hashtags, losing search and recommendation traffic",
+                "suggestion": "Add 3-5 hashtags: 2 broad + 2 niche + 1 long-tail",
+                "location": "Footer",
+            }
+        )
+        appeal -= 6
+
+    # 英文长句按「词数 > 40」判定（中文按 60 字符），避免把整段正文当成一个长句
+    sentences = [s for s in _EN_SENTENCE_SPLIT_RE.split(body) if s.strip()]
+    long_sentence = next((s for s in sentences if len(s.split()) > 40), None)
+    if long_sentence:
+        change_log.append(
+            {
+                "type": "Sentence split",
+                "detail": "Split the 40+ word sentence into shorter ones for readability",
+                "before": shorten(long_sentence.strip(), 80),
+                "after": f"{_english_clip(long_sentence)}.",
+            }
+        )
+        clarity += 4
+    if not _EN_CONTRACTION_RE.search(body):
+        # 无缩写词则提示补口语连接词，模拟编辑对语气的建议
+        change_log.append(
+            {
+                "type": "Tone pass",
+                "detail": f"Add conversational connectors to match the '{brief.tone}' voice",
+                "before": "(original)",
+                "after": "(add transitions like 'honestly' or 'here is the thing')",
+            }
+        )
+        brand_voice += 3
+
+    revised_body = (
+        body.replace(long_sentence, f"{_english_clip(long_sentence)}.", 1)
+        if long_sentence
+        else body
+    )
+
+    revised = {
+        "title": _compress_title_words(title, word_limit) if title_words > word_limit else title,
+        "body": revised_body,
+        "cta": as_str(target.get("cta")),
+        "hashtags": hashtags,
+    }
+
+    def score(value: float) -> int:
+        return max(40, min(98, js_round(value)))
+
+    scorecard = {
+        "structure": score(structure),
+        "clarity": score(clarity),
+        "brand_voice": score(brand_voice),
+        "appeal": score(appeal),
+    }
+    overall = js_round(
+        (scorecard["structure"] + scorecard["clarity"] + scorecard["brand_voice"] + scorecard["appeal"]) / 4
+    )
+
+    blockers = [i for i in issues if i["severity"] in ("blocker", "major")]
+    return {
+        "revised": revised,
+        "change_log": change_log,
+        "scorecard": {**scorecard, "overall": overall},
+        "issues": issues,
+        "verdict": "revise" if blockers else "pass",
+        "verdict_reason": (
+            f"{len(blockers)} issues need revision ({', '.join(b['category'] for b in blockers)})"
+            if blockers
+            else "Structure, clarity, and brand voice all meet the publish bar"
+        ),
+        "read_metrics": {
+            "char_count": len(plain),
+            "paragraph_count": len(paragraphs),
+            "avg_sentence_length": js_round(len(plain) / max(1, len(sentences))),
+        },
+        "confidence": 0.86,
+        "risks": [],
+        "evidence": [
+            {
+                "claim": f"Reviewed against the {brief.channel} native post format",
+                "source": "Platform content guidelines",
+                "reliability": 0.85,
+            }
+        ],
+    }
+
+
 def generate_edit(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = as_brief(ctx)
+    if normalize_language(brief.language) == "en":
+        return _english_edit(brief, ctx)
     draft = rec(ctx.get("draft"))
     versions = as_obj_array(draft.get("versions"))
     recommended = as_str(draft.get("recommended_version"), "V1")
@@ -1227,8 +1671,128 @@ def generate_compliance(ctx: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------ #
 
 
+def _english_analysis(brief: Brief, ctx: dict[str, Any]) -> dict[str, Any]:
+    """英文效果预估（A10）：区间数字与中文分支同口径，表述全部英文。"""
+    strategy = rec(ctx.get("strategy"))
+    audience = rec(strategy.get("audience_profile"))
+    objectives = as_obj_array(strategy.get("objectives"))
+    draft = rec(ctx.get("draft"))
+    seed = fnv1a(f"{brief.brand}{brief.channel}{brief.objective}")
+    # Brief 的 objective 允许中文（如「转化」）；英文产物里映射为英文词，避免夹中文
+    objective = _english_objective(
+        as_str(objectives[0].get("type") if objectives else None, brief.objective)
+    )
+    pains = as_str_array(audience.get("pain_points"))
+    secondary_pain = pains[1] if len(pains) > 1 else "the next-level pain point"
+    versions = as_obj_array(draft.get("versions"))
+    headlines = [as_str(v.get("title")) for v in versions if as_str(v.get("title"))]
+    primary_headline = headlines[0] if headlines else f"{brief.product} review"
+    content_format = _english_format(brief.channel)
+
+    def band(mid: float, spread: float, unit: str) -> dict[str, Any]:
+        return {
+            "low": js_round(mid - spread),
+            "mid": js_round(mid),
+            "high": js_round(mid + spread),
+            "unit": unit,
+        }
+
+    return {
+        "mode": "pre_publish_estimate",
+        "predicted": {
+            "exposure": band(10_000 + (seed % 8) * 5_000, 6_000, "views"),
+            "ctr": band(4 + (seed % 4), 1.5, "%"),
+            "engagement": band(3 + (seed % 3), 1.2, "%"),
+            "conversion": band(1 + (seed % 2), 0.6, "%"),
+            "basis": (
+                f"Range based on the account's history with '{content_format}' content; "
+                "not a promise"
+            ),
+        },
+        "objective_alignment": {
+            "objective": objective,
+            "score": 78 + (seed % 15),
+            "note": f"Structure aligns with the '{objective}' goal and the {brief.channel} format",
+        },
+        "attribution": [
+            {"factor": "Hook strength of the title", "impact": "high", "note": "The title drives most first-screen click decisions"},
+            {"factor": "Information density in the first 3 seconds", "impact": "high", "note": "Strongly correlated with read-through"},
+            {"factor": "Hashtag coverage", "impact": "medium", "note": "Keep 5+ relevant tags; avoid tag stuffing"},
+            {"factor": "Publishing time", "impact": "medium", "note": f"Align with when {brief.audience} are most active"},
+        ],
+        "optimizations": [
+            {
+                "priority": "high",
+                "action": "A/B test the title: keep two directions live for 24 hours each",
+                "expected_gain": "CTR +15%~30%",
+                "effort": "low",
+            },
+            {
+                "priority": "high",
+                "action": "Pre-seed official answers to frequent questions in the comments",
+                "expected_gain": "Engagement +10%",
+                "effort": "low",
+            },
+            {
+                "priority": "medium",
+                "action": "Recut the long-form into a 45-second short video on the same topic",
+                "expected_gain": "Reach +40%",
+                "effort": "medium",
+            },
+            {
+                "priority": "low",
+                "action": "Archive reusable material into the brand asset library",
+                "expected_gain": "Next production cost -30%",
+                "effort": "low",
+            },
+        ],
+        "ab_tests": [
+            {
+                "hypothesis": "Search-oriented titles beat emotion-led titles",
+                "variant_a": f"{brief.keywords[0] if brief.keywords else brief.industry} | {primary_headline}",
+                "variant_b": primary_headline,
+                "metric": "Search-driven share / CTR",
+            },
+            {
+                "hypothesis": "A concrete number on the cover improves save rate",
+                "variant_a": "Cover shows the number",
+                "variant_b": "Pure scene cover",
+                "metric": "Save rate",
+            },
+        ],
+        "next_brief_suggestions": [
+            f"Harvest frequent comment questions into the next topic (for {brief.audience})",
+            f"Test content around '{secondary_pain}'",
+            "If the first post overperforms, follow up within 48 hours to cluster the topic",
+        ],
+        "cautions": [
+            "These are range estimates, not effect promises; actual results depend heavily on platform traffic allocation"
+        ],
+        "confidence": 0.66,
+        "risks": [
+            "Estimates come from historical ranges with a limited sample",
+            "Platform algorithm changes can significantly shift actual exposure",
+        ],
+        "evidence": [
+            {
+                "claim": f"The content format is '{content_format}'",
+                "source": "platform public rules",
+                "reliability": 0.85,
+            },
+            {
+                "claim": "Titles have the largest impact on first-screen clicks",
+                "source": "content operations consensus",
+                "reliability": 0.7,
+            },
+        ],
+    }
+
+
 def generate_analysis(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = as_brief(ctx)
+    # 非中文 Brief：渠道规则与话术模板是中文语料，改走英文模板
+    if normalize_language(brief.language) == "en":
+        return _english_analysis(brief, ctx)
     strategy = rec(ctx.get("strategy"))
     audience = rec(strategy.get("audience_profile"))
     objectives = as_obj_array(strategy.get("objectives"))
@@ -1504,8 +2068,192 @@ _CLAIM_HINTS = ("秒", "分钟", "倍", "%", "0 糖", "无糖", "不含", "低�
 _EFFECT_HINTS = ("改善", "变好", "见效", "瘦", "修复", "治愈", "根治")
 
 
+# 英文分支的视觉风格（中文 VISUAL_STYLES 的 name/mood/palette 是中文语料，
+# prompt_fragments 本身是英文 SDXL 语句，可直接复用）
+_ENGLISH_VISUAL_STYLE: dict[str, str] = {
+    "style": "Clean documentary lifestyle",
+    "mood": "honest, everyday, understated",
+    "composition": "one subject per frame, generous negative space, natural hand-held feel",
+    "lighting": "soft natural daylight, no studio flash",
+}
+
+_ENGLISH_PALETTE: list[dict[str, str]] = [
+    {"name": "Oat", "hex": "#E8E0D4", "usage": "background"},
+    {"name": "Espresso", "hex": "#3B2A20", "usage": "headline text"},
+    {"name": "Sage", "hex": "#9CAF88", "usage": "accent"},
+]
+
+# 英文分镜场景：(用途, 场景模板)，{product}/{pain}/{benefit} 由上游英文产物填充
+_ENGLISH_SCENES: list[tuple[str, str]] = [
+    ("Cover", "Close-up of {product} in a real {pain} moment, authentic and un-staged"),
+    ("Scene", "{product} in hand during a normal weekday routine"),
+    ("Detail", "The concrete difference of {product}: texture, label, or interface close-up"),
+    ("Evidence", "Verifiable proof shot for {product}: label / test record / spec sheet"),
+    ("Scene", "After using {product}: the same routine with less friction, {benefit}"),
+]
+
+_ENGLISH_STORYBOARD_CHANNELS = ("TikTok", "Reels", "Shorts")
+
+_ENGLISH_CLAIM_HINTS = ("seconds", "minutes", "%", "0 sugar", "sugar-free", "zero sugar")
+_ENGLISH_EFFECT_HINTS = ("cure", "guaranteed", "miracle", "heal", "slimming", "anti-aging")
+
+
+def _english_visual(brief: Brief, ctx: dict[str, Any]) -> dict[str, Any]:
+    """英文视觉方案（A8）：结构同中文分支，风格/场景/校验全部英文。"""
+    draft = rec(ctx.get("draft"))
+    main_ratio, cover_ratio, shot_count = channel_visual_spec(brief.channel)
+
+    versions = as_obj_array(draft.get("versions"))
+    recommended = as_str(draft.get("recommended_version"), "V1")
+    target = next((v for v in versions if as_str(v.get("id")) == recommended), None) or (
+        versions[0] if versions else {}
+    )
+    title = as_str(target.get("title"))
+    body = as_str(target.get("body"))
+
+    strategy = rec(ctx.get("strategy"))
+    audience = rec(strategy.get("audience_profile"))
+    pain = (as_str_array(audience.get("pain_points")) or ["too many options"])[0]
+    house = rec(strategy.get("message_house"))
+    benefit = (as_str_array(house.get("benefits")) or ["less to think about"])[0]
+    visual_hint = as_str(rec(rec(ctx.get("creative")).get("tone_guide")).get("visual_suggestion"))
+    seed = fnv1a(f"{brief.brand}{brief.channel}{brief.industry}{brief.tone}")
+    style = _ENGLISH_VISUAL_STYLE
+    word_limit = title_limit_for(brief.channel, "en")
+
+    # --- 配图 Prompt ---
+    scenes = _ENGLISH_SCENES[: max(3, min(shot_count, len(_ENGLISH_SCENES)))]
+    image_prompts = []
+    for index, (usage, scene) in enumerate(scenes):
+        scene_text = scene.format(product=brief.product, pain=pain, benefit=benefit)
+        prompt = ", ".join(
+            [
+                scene_text,
+                style["mood"],
+                *pick_many(visual_styles_for(brief.industry)[0].prompt_fragments, 3, seed + index),
+                f"aspect ratio {main_ratio}",
+            ]
+        )
+        image_prompts.append(
+            {
+                "id": f"IMG{index + 1}",
+                "usage": usage,
+                "scene": scene_text,
+                "prompt": prompt,
+                "negative": "stiff stock-photo pose, HDR glow, exaggerated emotion",
+                "aspect_ratio": main_ratio,
+            }
+        )
+
+    # --- 分镜脚本（英文动态渠道） ---
+    storyboard: list[dict[str, str]] = []
+    if any(key in brief.channel for key in _ENGLISH_STORYBOARD_CHANNELS):
+        beats = [
+            ("0-3s", "Subject looks up at the camera", shorten(pain, 30), "hard cut"),
+            ("3-10s", "Close-up of the pain-point scene, ambient sound kept", pain, "dissolve"),
+            ("10-30s", f"{brief.brand} {brief.product} in real use, details shown", benefit, "push in"),
+            ("30-45s", "Verifiable proof on camera: label / test record", "(1s hold, no voice-over)", "hard cut"),
+            ("45-50s", "Product freeze-frame + on-screen call to action", "See the comments", "fade out"),
+        ]
+        storyboard = [
+            {
+                "shot": f"Shot {index + 1}",
+                "duration": duration,
+                "visual": visual,
+                "copy_overlay": overlay,
+                "transition": transition,
+            }
+            for index, (duration, visual, overlay, transition) in enumerate(beats)
+        ]
+
+    # --- 版式建议 ---
+    layout = {
+        "cover": (
+            f"{cover_ratio} cover: keep the main title within {word_limit} words, "
+            "clear font-weight contrast, avoid matching the background luminance"
+        ),
+        "body": "Arrange inner pages as '" + " → ".join(usage for usage, _ in scenes) + "', one message per frame",
+        "typography": (
+            f"Bold sans-serif in the '{style['style']}' mood, body line-height at least 1.6, "
+            "use the top two palette colors to separate hierarchy"
+        ),
+    }
+
+    # --- 图文一致性校验（英文口径的提示词表） ---
+    text = f"{title}\n{body}"
+    conflicts: list[str] = []
+    has_evidence = any(item["usage"] == "Evidence" for item in image_prompts)
+    has_before_after = any("After" in item["usage"] for item in image_prompts)
+    if any(hint in text.lower() for hint in _ENGLISH_CLAIM_HINTS) and not has_evidence:
+        conflicts.append(
+            "Copy contains verifiable claims (time/ingredients); no evidence frame is planned — copy and visuals disagree"
+        )
+    if has_before_after and any(hint in text.lower() for hint in _ENGLISH_EFFECT_HINTS):
+        conflicts.append(
+            "A before/after frame is planned while the copy makes effect claims; this may read as an effect promise"
+        )
+    if brief.brand.lower() not in text.lower():
+        conflicts.append(
+            "The brand name never appears in the copy, yet visuals end on a brand freeze-frame — brand association breaks"
+        )
+
+    notes = [
+        f"{len(image_prompts)} images mapped to the outer structure ('" + " / ".join(usage for usage, _ in scenes[:3]) + "')",
+        f"Write a separate short cover title (within {word_limit} words); do not reuse the body title directly",
+    ]
+    if visual_hint:
+        notes.append(f"Carry over the creative-stage visual direction: {visual_hint}")
+    if storyboard:
+        notes.append(f"Storyboard totals about {_storyboard_seconds(storyboard)} seconds; voice-over at 3 words/second")
+
+    return {
+        "channel": brief.channel,
+        "visual_direction": {
+            "style": style["style"],
+            "mood": style["mood"],
+            "composition": style["composition"],
+            "lighting": style["lighting"],
+            "palette": _ENGLISH_PALETTE,
+            "rationale": (
+                f"Matches how '{brief.industry}' brands communicate visually and the '{brief.tone}' voice; "
+                f"stays recognizable in {brief.channel}'s feed"
+            ),
+        },
+        "assets": {
+            "main_ratio": main_ratio,
+            "cover_ratio": cover_ratio,
+            "shot_count": len(image_prompts),
+        },
+        "image_prompts": image_prompts,
+        "storyboard": storyboard,
+        "layout": layout,
+        "copy_visual_check": {
+            "aligned": not conflicts,
+            "conflicts": conflicts,
+            "notes": notes,
+        },
+        "confidence": 0.83,
+        "risks": (["Copy-visual check failed: align the visual plan with the final copy before publishing"] if conflicts else []),
+        "evidence": [
+            {
+                "claim": f"{brief.channel} visual spec is '{main_ratio}' with about {shot_count} frames",
+                "source": "platform media specs and operations practice",
+                "reliability": 0.8,
+            },
+            {
+                "claim": f"'{brief.industry}' favors a '{style['style']}' visual direction",
+                "source": "category visual communication practice",
+                "reliability": 0.7,
+            },
+        ],
+    }
+
+
 def generate_visual(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = as_brief(ctx)
+    # 非中文 Brief：视觉风格库/场景模板是中文语料，改走英文模板
+    if normalize_language(brief.language) == "en":
+        return _english_visual(brief, ctx)
     creative = rec(ctx.get("creative"))
     strategy = rec(ctx.get("strategy"))
     draft = rec(ctx.get("draft"))
@@ -1699,8 +2447,263 @@ def _parse_length_range(hint: str) -> tuple[int, int] | None:
     return None
 
 
+_ENGLISH_PUBLISH_SLOTS: list[str] = [
+    "8:00-9:30 AM local",
+    "12:00-1:00 PM local",
+    "6:00-8:00 PM local",
+]
+
+
+def _english_channel(brief: Brief, ctx: dict[str, Any]) -> dict[str, Any]:
+    """英文渠道适配（A9）：标题按「词」计上限，规则/SEO/排期全部英文。
+
+    中文分支的 ``title_limit`` 是字符口径，对英文是错的（12 词早已超信息流
+    截断点）；这里统一走 ``title_limit_for(channel, 'en')`` 的词数口径，
+    与 A5 英文审校一致。
+    """
+    strategy = rec(ctx.get("strategy"))
+    plan = rec(ctx.get("plan"))
+    draft = rec(ctx.get("draft"))
+
+    versions = as_obj_array(draft.get("versions"))
+    recommended = as_str(draft.get("recommended_version"), "V1")
+    target = next((v for v in versions if as_str(v.get("id")) == recommended), None) or (
+        versions[0] if versions else {}
+    )
+    base_title = as_str(target.get("title"))
+    body = as_str(target.get("body"))
+    base_tags = as_str_array(target.get("hashtags"))
+    keyword = brief.keywords[0] if brief.keywords else brief.industry
+
+    # --- 目标平台：主渠道 + 策略给出的次要渠道 ---
+    targets: list[str] = []
+    for candidate in [
+        brief.channel,
+        *(as_str(item.get("channel")) for item in as_obj_array(strategy.get("channel_priority"))),
+    ]:
+        if candidate and candidate not in targets:
+            targets.append(candidate)
+    targets = targets[:3]
+
+    default_tags = [
+        *(f"#{kw.replace(' ', '')}" for kw in brief.keywords),
+        f"#{brief.brand.replace(' ', '')}",
+        "#ad",
+        "#review",
+    ]
+
+    platforms: list[dict[str, Any]] = []
+    for index, channel in enumerate(targets):
+        platform_format = _english_format(channel)
+        limit = title_limit_for(channel, brief.language)
+        # 搜索导向标题：前置主关键词（ASCII 分隔），与情绪型标题形成 A/B 对照
+        variant = (
+            f"{keyword} | {base_title}" if keyword and keyword not in base_title else base_title
+        )
+        title = _compress_title_words(variant, limit)
+        words = len([w for w in title.split() if w])
+        variant_words = len([w for w in variant.split() if w])
+        platforms.append(
+            {
+                "channel": channel,
+                "format": platform_format,
+                "title": title,
+                "title_original": base_title,
+                "title_length": words,
+                "title_limit": limit,
+                "title_ok": words <= limit,
+                "seo_variant": variant,
+                "seo_variant_ok": variant_words <= limit,
+                "body": body,
+                "hashtags": base_tags if index == 0 else default_tags,
+                "keywords": [keyword, *(brief.keywords[1:])],
+                "publish_slot": _ENGLISH_PUBLISH_SLOTS[min(index, len(_ENGLISH_PUBLISH_SLOTS) - 1)],
+                "notes": (
+                    f"Reuses the A5 final body; only title and tags change. Format: '{platform_format}'"
+                    if index == 0
+                    else (
+                        f"Needs restructuring for '{platform_format}'; reuse cover and evidence frames; "
+                        "facts and compliance wording stay unchanged"
+                    )
+                ),
+            }
+        )
+
+    # --- SEO（英文搜索口径；seo_pattern 是中文平台语料，不直接引用） ---
+    long_tail = [
+        f"best {keyword}",
+        f"{keyword} review",
+        f"how to choose {keyword}",
+        f"{keyword} vs alternatives",
+    ]
+    placement = [
+        {"position": "Title", "keyword": keyword, "note": "mention the keyword once, naturally"},
+        {"position": "Body / caption", "keyword": keyword, "note": "one mention in the first paragraph"},
+        {"position": "Hashtags", "keyword": keyword, "note": "reflect it in 1-2 tags"},
+    ]
+    seo = {
+        "primary_keywords": [keyword, *brief.keywords[1:]],
+        "long_tail": long_tail,
+        "search_intent": "discovery + comparison",
+        "difficulty": "medium",
+        "placement": placement,
+        "density_hint": (
+            f"Use '{keyword}' once in the title and 1-2 times in the body; stuffing triggers feed throttling"
+        ),
+    }
+
+    # --- 发布计划 ---
+    _english_actions = [
+        ("Publish the primary post", "target the audience's active hours"),
+        ("Second-round comment replies", "harvest frequent questions as the next topic"),
+        ("Performance review", "compare headline A/B results"),
+    ]
+    publish_plan = [
+        {"slot": slot, "action": action, "note": note}
+        for slot, (action, note) in zip(_ENGLISH_PUBLISH_SLOTS, _english_actions)
+    ]
+    known_slots = {item["slot"] for item in publish_plan}
+    for item in as_obj_array(plan.get("publishing_rhythm")):
+        slot = as_str(item.get("slot"))
+        if slot and slot not in known_slots:
+            publish_plan.append(
+                {
+                    "slot": slot,
+                    "action": as_str(item.get("action")),
+                    "note": as_str(item.get("note")),
+                }
+            )
+            known_slots.add(slot)
+
+    # --- A/B 方案 ---
+    ab_tests = [
+        {
+            "hypothesis": "A search-oriented title (keyword first) beats an emotion-led title",
+            "variant_a": platforms[0]["seo_variant"],
+            "variant_b": platforms[0]["title"],
+            "metric": "Search-driven share / CTR",
+        },
+        {
+            "hypothesis": f"A concrete number on the cover improves save rate ({brief.channel})",
+            "variant_a": "Cover shows the number",
+            "variant_b": "Pure scene cover",
+            "metric": "Save rate",
+        },
+    ]
+
+    # --- 渠道规范核对（可测量的信号；口径与中文分支一致，表述英文） ---
+    checklist: list[dict[str, str]] = [
+        {
+            "rule": f"Content format: {platforms[0]['format']}",
+            "status": "pass",
+            "note": "adapted to this channel's format",
+        },
+    ]
+
+    over_limit = [item for item in platforms if not item["title_ok"]]
+    checklist.append(
+        {
+            "rule": f"Title length: {brief.channel} <= {title_limit_for(brief.channel, brief.language)} words",
+            "status": "warn" if over_limit else "pass",
+            "note": (
+                "; ".join(
+                    f"{item['channel']} {item['title_length']}/{item['title_limit']} words"
+                    for item in over_limit
+                )
+                if over_limit
+                else f"Publishing title is {platforms[0]['title_length']} words, within the limit"
+            ),
+        }
+    )
+
+    body_words = len([w for w in body.split() if w])
+    low, high = 60, 250
+    in_range = low <= body_words <= high
+    checklist.append(
+        {
+            "rule": f"Body length: {low}-{high} words",
+            "status": "pass" if in_range else "warn",
+            "note": (
+                f"Body is {body_words} words, inside the recommended range"
+                if in_range
+                else f"Body is {body_words} words, outside the {low}-{high} range; add detail or trim"
+            ),
+        }
+    )
+
+    tag_count = len(platforms[0]["hashtags"])
+    checklist.append(
+        {
+            "rule": "Hashtag strategy: 5+ relevant tags",
+            "status": "pass" if tag_count >= 5 else "warn",
+            "note": f"Currently {tag_count} tags",
+        }
+    )
+
+    cta = as_str(target.get("cta"))
+    cta_present = bool(cta) and cta.split()[0].lower() in body.lower()
+    checklist.append(
+        {
+            "rule": "Structure: call to action present",
+            "status": "pass" if cta_present else "warn",
+            "note": f"Call to action: {cta}" if cta_present else "No explicit call to action found in the body; conversion path incomplete",
+        }
+    )
+
+    checklist.append(
+        {
+            "rule": "Channel compliance: paid-partnership disclosure",
+            "status": "pass",
+            "note": "Covered by the A7 compliance report; non-Chinese markets need manual review (no local lexicon)",
+        }
+    )
+
+    return {
+        "primary_channel": brief.channel,
+        "platforms": platforms,
+        "seo": seo,
+        "publish_plan": publish_plan,
+        "ab_tests": ab_tests,
+        "channel_checklist": checklist,
+        "confidence": 0.85,
+        "risks": [
+            *(
+                [
+                    f"{item['channel']} title compressed to {item['title_limit']} words; confirm no information was lost before publishing"
+                    for item in over_limit
+                ]
+            ),
+            *(
+                [
+                    f"{item['rule']} not met: {item['note']}"
+                    for item in checklist
+                    if item["status"] != "pass"
+                ][:2]
+            ),
+        ],
+        "evidence": [
+            {
+                "claim": (
+                    f"{brief.channel} title limit is {title_limit_for(brief.channel, brief.language)} words "
+                    "(word-based, per language profile)"
+                ),
+                "source": "platform media specs and language profile",
+                "reliability": 0.85,
+            },
+            {
+                "claim": f"{brief.channel} search intent is discovery + comparison",
+                "source": "platform search behavior observation",
+                "reliability": 0.7,
+            },
+        ],
+    }
+
+
 def generate_channel(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = as_brief(ctx)
+    # 非中文 Brief：渠道规则/SEO 模式/排期语料是中文的，改走英文模板（标题按词计上限）
+    if normalize_language(brief.language) == "en":
+        return _english_channel(brief, ctx)
     strategy = rec(ctx.get("strategy"))
     plan = rec(ctx.get("plan"))
     draft = rec(ctx.get("draft"))
@@ -1927,8 +2930,185 @@ def generate_channel(ctx: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------ #
 
 
+def _english_memory(brief: Brief, ctx: dict[str, Any]) -> dict[str, Any]:
+    """英文知识卡片（A11）：卡片/模板/缺口全部英文，供后续英文任务召回。"""
+    strategy = rec(ctx.get("strategy"))
+    creative = rec(ctx.get("creative"))
+    plan = rec(ctx.get("plan"))
+    edit = rec(ctx.get("edit"))
+    compliance = rec(ctx.get("compliance"))
+    visual = rec(ctx.get("visual"))
+    channel = rec(ctx.get("channel"))
+
+    revision = int(as_num(ctx.get("revision"), 0))
+    artifact_count = int(as_num(ctx.get("artifact_count"), 0))
+    recalled = memory_hits(ctx)
+    keyword = brief.keywords[0] if brief.keywords else brief.industry
+
+    style = as_str(rec(visual.get("visual_direction")).get("style"), "Clean documentary lifestyle")
+    big_idea = as_str(rec(creative.get("big_idea")).get("title"), brief.brand)
+    proposition = as_str(rec(strategy.get("message_house")).get("proposition"))
+    sections = [as_str(item.get("section")) for item in as_obj_array(plan.get("structure"))]
+    platforms = [as_str(item.get("channel")) for item in as_obj_array(channel.get("platforms"))]
+    overall = rec(edit.get("scorecard")).get("overall")
+
+    hits = as_obj_array(compliance.get("hits"))
+    blockers = [h for h in hits if as_str(h.get("severity")) == "blocker"]
+    majors = [h for h in hits if as_str(h.get("severity")) == "major"]
+    structure = " → ".join(sections) if sections else _english_format(brief.channel)
+
+    cards: list[dict[str, Any]] = [
+        {
+            "type": "brand",
+            "title": f"{brief.brand} | {brief.channel} voice and proposition baseline",
+            "content": (
+                f"For '{brief.audience}', {brief.brand}'s voice is '{brief.tone}': "
+                "second person, empathize before offering the solution, concrete details over adjectives. "
+                f"The proposition validated this round: '{proposition}'. "
+                "Absolute claims and effect promises are banned; they collide with the A7 gate."
+            ),
+            "tags": ["brand voice", brief.tone, brief.channel],
+            "reuse_hint": "Feed to A4 as a supplementary system prompt before drafting; saves a tone revision round",
+        },
+        {
+            "type": "case",
+            "title": f"{brief.industry} · {brief.channel} content structure sample",
+            "content": (
+                f"Topic '{big_idea}' used the '{structure}' structure, "
+                f"matching the platform format '{_english_format(brief.channel)}', "
+                f"final quality score {overall if overall is not None else '(not scored)'}, "
+                f"adapted platforms: {', '.join(platforms) or brief.channel}."
+            ),
+            "tags": ["content structure", brief.industry, brief.channel],
+            "reuse_hint": "New topics in the same industry and channel can reuse this structure; swap scenes and evidence",
+        },
+        {
+            "type": "template",
+            "title": f"Headline formula ({brief.channel})",
+            "content": (
+                f"'{keyword}' + identity anchor + emotion word, within "
+                f"{title_limit_for(brief.channel, 'en')} words; "
+                f"the search-oriented variant front-loads the keyword as '{keyword} | proposition'."
+            ),
+            "tags": ["headline", "template", brief.channel],
+            "reuse_hint": "Generate five candidates per drafting round, then filter by the platform limit",
+        },
+        {
+            "type": "lesson",
+            "title": "High-risk phrasing and safe rewrites",
+            "content": (
+                (
+                    f"This round hit {len(blockers)} blocker and {len(majors)} major compliance issues; "
+                    f"e.g. '{as_str(blockers[0].get('term')) if blockers else as_str(majors[0].get('term')) if majors else 'subjective superlatives'}'; "
+                    "safe direction: rewrite as a verifiable, bounded statement or add a source note."
+                    if hits
+                    else (
+                        "No lexicon hits this round, but subjective superlatives ('the best', '#1') remain high-risk "
+                        "and must be avoided."
+                    )
+                )
+                + (
+                    f" The task went through {revision} revision round(s), mostly for source notes and absolute claims."
+                    if revision
+                    else ""
+                )
+            ),
+            "tags": ["compliance", "revision", "risk phrasing"],
+            "reuse_hint": "Use as a negative-example list before A4 drafts to pre-empt most revision loops",
+        },
+    ]
+
+    templates = [
+        {
+            "name": f"{brief.channel} content skeleton",
+            "usage": "Reuse this structure and rhythm for new topics",
+            "body": structure,
+        },
+        {
+            "name": "Headline candidate formula",
+            "usage": "Batch-produce headline candidates and filter by the platform limit",
+            "body": f"{keyword} + identity anchor + emotion word (<= {title_limit_for(brief.channel, 'en')} words)",
+        },
+        {
+            "name": "Copy-visual consistency checklist",
+            "usage": "Self-check after A8 produces the visual plan",
+            "body": "Do quantified claims have an evidence frame / is a before-after frame planned / does the copy mention the brand",
+        },
+    ]
+
+    key_decisions = [
+        f"Creative direction set to '{big_idea}'",
+        f"Publishing title compressed to within {title_limit_for(brief.channel, 'en')} words to survive the feed",
+        f"Visual direction set to '{style}'; image prompts share one style",
+        *(
+            f"Compliance term '{as_str(item.get('term'))}' rewritten as a bounded description"
+            for item in (blockers or majors)[:2]
+        ),
+    ]
+
+    gaps: list[str] = []
+    if not brief.keywords:
+        gaps.append("The brief has no keywords; SEO layout leans on industry-inferred terms")
+    gaps.append("No first-hand user research; audience pains still come from templates — add interviews or surveys")
+    if hits:
+        gaps.append("The safe-rewrite library should absorb this round's industry-specific terms to avoid repeat loops")
+    gaps.append("No publish-side data feedback yet; effect estimates remain range guesses, not a closed loop")
+
+    return {
+        "knowledge_cards": cards,
+        "templates": templates,
+        "archive": {
+            "artifact_count": artifact_count,
+            "artifact_types": [],
+            "revision_rounds": revision,
+            "key_decisions": [item for item in key_decisions if item],
+            "reusable_assets": [
+                f"Visual style: {style}",
+                f"Platform list: {', '.join(platforms) or brief.channel}",
+                f"Content skeleton: {len(sections) if sections else 0} sections",
+            ],
+        },
+        # artifact_types 由 A11 节点按黑板真实产物回填，此处留空避免与系统数据不一致
+        "reuse_suggestions": [
+            *(
+                [
+                    f"Recalled {len(recalled)} historical asset(s) such as '{as_str(recalled[0].get('title'))}'; "
+                    "align voice and phrasing to cut cold-start trial costs"
+                ]
+                if recalled
+                else []
+            ),
+            f"Tasks in '{brief.industry}' can reuse the '{style}' visual direction and prompt structure",
+            f"Tasks on '{brief.channel}' can reuse the headline formula and tag strategy to skip a trial round",
+            "Register frequent comment questions as the next topic to build a content flywheel",
+        ],
+        "gaps": gaps,
+        "confidence": 0.86,
+        "risks": (
+            ["Historical assets were reused, but the cards still summarize a single task; validate across more tasks"]
+            if recalled
+            else ["Knowledge cards come from one task (sample size 1); validate across more tasks before treating as rules"]
+        ),
+        "evidence": [
+            {
+                "claim": f"Final quality score {overall if overall is not None else '(not scored)'}; {len(hits)} compliance hits",
+                "source": "this task's blackboard record",
+                "reliability": 0.9,
+            },
+            {
+                "claim": f"The {brief.channel} skeleton follows '{structure}'",
+                "source": "platform format spec",
+                "reliability": 0.8,
+            },
+        ],
+    }
+
+
 def generate_memory(ctx: dict[str, Any]) -> dict[str, Any]:
     brief = as_brief(ctx)
+    # 非中文 Brief：卡片/模板/缺口话术是中文语料，改走英文模板
+    if normalize_language(brief.language) == "en":
+        return _english_memory(brief, ctx)
     strategy = rec(ctx.get("strategy"))
     creative = rec(ctx.get("creative"))
     plan = rec(ctx.get("plan"))

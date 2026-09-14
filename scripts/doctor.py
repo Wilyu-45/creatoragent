@@ -29,6 +29,10 @@
     样例引擎按流逝时间的惰性推进（排队 → 渲染 → 完成）、租户隔离、
     http 适配样例在未配置网关时的显式失败路径与任务删除时的作业回收
 
+检查项的**计数会随合并/拆分变化**（第十轮新增「视频脚本」时是 17 项；第十二轮把
+传播/采样与数字人样例并入既有项后回到 16 项），因此文档统一写
+「16 项（含传播/采样与数字人样例）」，最终以本脚本实际输出的清单为准。
+
 注意：本脚本默认写入**项目内**的 ``.doctor-data/`` 临时目录，避免自检污染开发环境的
 ``data/``；如需指定，可显式设置 ``CREATOR_DATA_DIR``。刻意不用系统 temp 目录 ——
 Windows 沙箱下 ``sqlite3`` 在 ``%TEMP%`` 里会打不开数据库文件，检查点会静默退化，
@@ -1243,9 +1247,69 @@ def check_multilingual() -> bool:
     zh_ok = len(cjk.findall(zh_title)) > 0
     print(f"    中文回归：标题={zh_title!r}｜含中文={zh_ok}")
 
+    # 7) 英文全链路：交付物 + 六个支撑产物的中文残留必须为 0。
+    #    第九轮时支撑产物仍是中文模板（creative_concept 558 个中文等），
+    #    降级到 mock 的英文任务会被用户误判为「不可用」；现在统一走 _english_* 模板。
+    brief_en_full = {
+        "brand": "Morning Field",
+        "product": "Cold Brew Coffee",
+        "objective": "转化",
+        "audience": "busy commuters in their 20s and 30s",
+        "channel": "Instagram",
+        "tone": "casual, honest, no hype",
+        "industry": "Food & Beverage",
+        "language": "en",
+        "keywords": ["cold brew", "morning routine"],
+        "constraints": ["no health claims", "must disclose paid partnership"],
+        "deliverables": ["1 Instagram caption", "5 headline options"],
+        "notes": "",
+        "priority": "normal",
+        "deadline": None,
+    }
+    en_ctx: dict = {"brief": brief_en_full, "revision": 0}
+    for purpose, key in (
+        ("A1.strategy", "strategy"),
+        ("A2.creative", "creative"),
+        ("A3.plan", "plan"),
+        ("A4.copy", "draft"),
+        ("A5.edit", "edit"),
+        ("A6.factcheck", "fact"),
+        ("A7.compliance", "compliance"),
+        ("A8.visual", "visual"),
+        ("A9.channel", "channel"),
+        ("A10.analyze", "analysis"),
+        ("A11.memory", "memory"),
+    ):
+        en_ctx[key] = GENERATORS[purpose](en_ctx)
+
+    #（key, 产物类型）：覆盖交付物 + 六个支撑产物 + 策略简报；
+    # A6/A7 的门禁报告文案是内部评审语言，不在多语言范围内（已如实记入文档）
+    support_types = (
+        ("strategy", "strategy_brief"),
+        ("creative", "creative_concept"),
+        ("plan", "content_plan"),
+        ("draft", "copy_draft"),
+        ("edit", "edited_copy"),
+        ("visual", "visual_brief"),
+        ("channel", "channel_adaptation"),
+        ("analysis", "effect_report"),
+        ("memory", "knowledge_card"),
+    )
+    support_ok = True
+    for key, artifact_type in support_types:
+        leaked = len(cjk.findall(str(en_ctx.get(key) or "")))
+        if leaked:
+            support_ok = False
+            print(f"    ! {artifact_type} 含 {leaked} 个中文字符（英文 Brief 不应夹中文）")
+    print(
+        f"    英文支撑产物：{len(support_types)} 类中文残留"
+        f"={'0' if support_ok else '>0（异常）'}"
+    )
+
     ok = (
         alias_ok and unit_ok and directive_ok and zh_directive_empty
         and coverage_ok and zh_coverage_ok and native_ok and zh_ok
+        and support_ok
     )
     if not ok:
         print("    ! 多语言异常：可能出现「英文 Brief 产出中文」或字数口径用错")

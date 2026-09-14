@@ -434,6 +434,194 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
   `public_config()` 新增 `tracing`；`/api/health` 新增 `otlp` 状态；
   `.env.example` 补齐全部配置项（此前缺 embedding / publish / judge 等）。
 
+### 4.1h 后端 · 第九轮：多语言本地化 + README + 人工事项清单（2026-09-13，已完成）
+
+- **多语言本地化（plan.md v2.0 的第一项）**：
+  - 新增 `app/knowledge/language.py`：**语言画像**（中/英/日/韩/西），每个语言包含
+    本地渠道、标题口径与上限、正文长度建议、表达惯例、合规红线、度量与日期格式、
+    广告披露要求、以及**是否已接入可执行词库**。
+  - `Brief` 新增 `language` 字段；`parse_brief()` 做**归一化**
+    （`en-US` / `English` / `英文` → `en`），无法识别时回落 `zh`。
+  - **原生创作而非翻译**：`localization_block(ctx)` 把本地化指令注入 A4 等创作智能体，
+    明确要求「用目标语言原生创作，不要先写中文再翻译」。
+  - **字数口径按语言**：`title_measure()` 英文按**词**、中日韩按**字**；
+    `title_limit_for()` 非中文用语言画像的上限。交付标题压缩也改用该口径 ——
+    Instagram 的 12 **词**上限若按字符算（60+ 字）会得出完全错误的结论。
+  - **记忆库按语言分区**：`MemoryCard.language` + `remember/retrieve` 的 `language` 参数；
+    英文资产不会被中文任务当语气基线复用（复用语言不对的资产比不复用更糟）。
+  - **合规诚实性**：非中文市场**没有自动词库**，A7 显式声明「需人工复核」、
+    写入当地红线（如 FTC 披露要求）并强制 `needs_human_review` —— 不假装检查过了。
+  - **离线链路也支持英文**：mock 引擎新增英文分支（`_english_strategy` / `_english_copy`），
+    否则默认 `LLM_PROVIDER=mock` 时「多语言」在离线环境就是假的。
+  - 接口：`/api/knowledge` 新增 `languages` 与 `language_compliance`（各语言的合规覆盖情况）。
+- **黄金数据集新增英文用例**：`instagram_en_multilingual`，
+  验证原生英文（正文中文字符数必须为 0）、标题按词计上限、非中文合规如实告知。
+  共 **11 条用例 / 147 项断言**。
+- **修复两个真实缺陷**：
+  1. `mock.as_brief()` **没有透传 `language`** —— 本地化分支永远走不到（静默回落 `zh`）。
+     这类「字段漏传」在只有单一语言时完全不可见。
+  2. 黄金数据集的标题断言用**字符数**度量，而交付层已按**词**处理，
+     导致 12 词上限的英文标题被判成「超出上限 12 字」。断言与被断言对象必须同口径。
+- **README.md**：新增项目门面文档（核心能力、快速开始、架构、智能体清单、门禁、
+  评估与回归、可观测性、多语言、部署、配置、接口、开发验证、项目状态、
+  **需要人工协助的事项**、文档导航）。
+- **需要人工协助的事项清单**（写进 README 与 `USER_GUIDE.md`）：
+  P0 四项（镜像实机验证、生产令牌、真实网关定基线、非中文合规人工审核）、
+  P1 四项（品牌资产、发布网关、行业用例、行业词库）、P2 四项（视频脚本/数字人形态、
+  横向扩展方案、Jaeger 生产实例、人工抽检机制）。
+
+### 4.1i 后端 · 第十轮：CI 修复 + 视频脚本 + 竞态修复（2026-09-13，已完成）
+
+- **修复 CI 失败（用户报障）**：GitHub 上 `verify_contracts.py` 报
+  `status` 与 `index.html 挂载点` 两项失败。根因是 **`dist/` 被 .gitignore 排除，
+  而 CI 的 backend job 只装了 Python 依赖、从没构建前端** →
+  后端只在 `dist/` 存在时才挂载静态托管与 SPA 回落路由 → `GET /` 返回 404。
+  本地复现：`mv dist dist_backup` 后跑契约核验，得到逐字相同的失败。
+  修法：CI backend job 增加 `actions/setup-node` + `npm ci && npm run build`
+  （排在契约核验之前）；核验脚本里补一条前置断言与可操作提示。
+- **视频脚本（plan.md v2.0 的最后一项功能）**：
+  - 新增 `app/knowledge/video.py`：`needs_video_script()`（短视频渠道 / 交付物点名 /
+    渠道形态含视频特征，任一命中才产出）、`video_spec()`（各渠道时长/画幅/镜头数）、
+    `script_skeleton()`（按时间占比生成分镜骨架）、`required_sections()`。
+  - 契约新增 `ArtifactType = "video_script"` + 标签；前端类型同步。
+  - A8 在产出 `visual_brief` 的同时追加 `video_script` 产物（同一智能体两项产物，
+    **不新增智能体**）：钩子 / 分镜（时长·画面·口播·字幕·机位）/ 口播表 / 字幕表 /
+    CTA / 拍摄要点 / 合规注意。
+  - `normalize_video_script()` 规整结构并保证时间轴单调、每镜时长 ≥ 1s。
+  - mock 新增 `A8.video_script` 生成器。
+  - 前端新增 `VideoScriptView`：以**时间轴**为主视图（比例条 + 分镜表 + 覆盖率 +
+    「存在无口播分镜」告警），而不是按字段平铺 —— 脚本可用性取决于时间轴连贯性。
+  - 黄金数据集：`douyin_short_video` 断言 `expect_video_script: true`
+    （并检查分镜/口播数量与时间轴有序），`xiaohongshu_food` 断言 `false`
+    （图文渠道不该被塞入无关脚本）。
+  - `doctor.py` 新增第 17 项「视频脚本」（判断口径 5 例 + 骨架时间轴 + 时长覆盖）。
+- **修复一个真实竞态**：自检与契约核验读取 trace 时，任务虽已是终态，
+  但编排线程可能仍在 `finally` 里收尾（`finish_trace` 才计算总耗时与 self-time）——
+  于是偶发看到 `duration=0ms` 与未收尾的 `unset` span 状态。
+  修法：自检**等待 trace 收尾**（duration > 0，上限 15s）；
+  同时把「span 状态必须全是 ok」放宽为「**不得有 error**」——
+  OTel 里 `unset` 是合法的「未显式设置状态」，要求全 ok 会在收尾边界上偶发失败。
+  连跑两轮确认不再抖动。
+- **修复一个自检脚本自身的缺陷**：`verify_contracts.check()` 只有
+  `(label, actual, expected)` 三个参数，我把「失败提示文案」传进了 `expected`，
+  于是断言变成「`True == '请先执行 npm run build'`」，必然失败 ——
+  即我新加的检查自己写错了。修法是给 `check()` 增加独立的 `detail` 参数。
+  **教训：给测试加检查时，检查本身也要先看到它「通过」与「失败」两种表现。**
+
+### 4.1j 后端 · 第十一轮：真实网关接入 + Docker 实机验证（2026-09-13，已完成）
+
+- **真实网关（DeepSeek）接入并跑通**：`.env`（已 gitignore）指向 `api.deepseek.com/v1`，
+  模型 `deepseek-flash`。首个真实任务**立即暴露一个致命缺陷**：
+  A3 的结构化输出被 `max_tokens` 截断，JSON 未闭合，`extract_json` 直接放弃解析，
+  整个智能体以「无法解析为 JSON」失败 —— 而内容其实已产出大半。
+  修法四件套：
+  1. `repair_truncated_json()`：按未闭合容器补全、丢弃不完整元素、截断字符串补引号；
+  2. `LLMResponse.finish_reason` 透传，**区分「被截断」与「模型胡说」**；
+  3. 新增 `TruncatedOutputError`，编排层**针对性地放大输出上限后重试**
+     （`boost_max_tokens`，thread-local，对智能体透明）；
+  4. 输出上限默认 4096 → 8192。
+- **成本口径修正（关键）**：DeepSeek 输入侧「缓存命中」比未命中便宜约 50 倍
+  （2026-09-10 定价：空闲时段命中 ¥0.02/M、未命中 ¥1/M、输出 ¥4/M）。
+  原先只按单一输入单价计费，会**高估成本 3.8 倍**（实测数字），
+  进而过早触发熔断、把本该走真实模型的任务降级到离线引擎。
+  现在 `price_of()` 返回 `(未命中, 命中, 输出)` 三档，`LLMUsage.cached_tokens`
+  从 `prompt_tokens_details.cached_tokens` 透传，账本新增 `providerCachedTokens`。
+  模型匹配改为**长名优先**，避免 `deepseek-v4-pro` 被前缀规则抢占（价差 3 倍）。
+- **输出膨胀治理**：实测单任务 completion 达 6.5–7 万 token，其中相当部分是
+  模型附送的 `reasoning` / `notes` 等**无人消费的字段**。
+  新增 `strip_unknown_keys()`：按各智能体的 SCHEMA 裁掉顶层多余字段
+  （`ALWAYS_KEEP_KEYS` 保证 `confidence` / `risks` / `evidence` 等契约字段永不被裁）。
+- **验证脚本必须强制离线**（本轮踩到的真实坑）：本机 `.env` 指向真实网关后，
+  `doctor.py` 与 `golden_eval.py` 跟着走真实模型 →
+  一条任务 5 分钟，自检超时失败；11 条黄金用例跑不完。**验证脚本断言的是契约与逻辑，
+  必须秒级、可复现、不花钱**。新增 `force_offline_provider()`，
+  在 doctor / golden / smoke / verify_contracts 里默认固定 `mock`
+  （`real_check.py` 才是量真实链路的入口）。
+  另外两个顺序错误也一并修掉：`force_offline_provider()` 写的是 `os.environ`，
+  而 env dict 由 `os.environ` 展开 —— **必须先调用再构造 env**，否则白设。
+- **Docker 实机验证（原 P0 事项，已完成）**：
+  - 标准 `Dockerfile` 走不通：`registry-1.docker.io` 不可达（连认证 token 都取不到）。
+  - 新增 `Dockerfile.offline`：只用**本地已有镜像**作底座
+    （dify-api 提供 Debian+Python3.12+pip，dify-web 提供 Node 22），
+    Python 依赖从**镜像源**装（实测容器内 PyPI 可达，只是 Docker Hub 不通）。
+  - 一路踩掉三个坑（都记在踩坑 74–76）：底座走 venv 的 python 没 pip、
+    底座预设 `NODE_ENV=production` 导致 npm 跳过 devDependencies（vite 找不到）、
+    底座自带 ENTRYPOINT 去启动 gunicorn。
+  - 实测通过：镜像构建成功 → 容器 `healthy` → `/` 返回前端（含 `<div id="root">`）
+    → 完整任务跑通（18 产物 / 质量分 94）→ **`/data` 卷跨容器删除重建后任务、
+    记忆库、评估历史、trace 全部保留** → compose（标准与离线两种 dockerfile）校验通过。
+- **动态端口**：Windows 保留成片端口区间，写死端口会 `WinError 10013`
+  （`free_port(8811)` 实测返回 10012，说明 8811 确实在排除区内）。
+  新增 `free_port()`，四个起服务的脚本改为动态取端口。
+- **新增 `scripts/real_check.py`**：真实链路核验（延迟 / token / 成本 /
+  提供方缓存命中率 / 门禁结论 / 交付文本预览），是量真实账的入口。
+
+### 4.1k 后端 · 第十二轮：数字人样例 + trace 传播/采样 + Prompt 收紧（2026-09-13，已完成）
+
+- **数字人渲染（开发样例，`app/core/digital_human.py`）**：
+  - **定位**：渲染本身**不在本系统内实现** —— HeyGen / D-ID / 腾讯智影等的授权、形象库、
+    计费与回调协议差异极大，「接哪家、要不要接」是产品形态决策。系统提供**可回归的接入样例**，
+    让 API / UI / 下游流程的联调在买任何服务之前就能发生。
+  - `sample` 内置引擎（默认，零依赖）：离线确定性模拟「排队 → 渲染 → 完成」，
+    并按 `video_script` 生成**渲染清单** `build_manifest()`（每镜台词 / 字幕 / 机位 /
+    起止时间 / 是否有口播；无口播分镜与总时长偏差**显式告警**，不假装没问题）。
+  - `http` 适配样例：对接「POST 建任务 → GET 查状态」最小契约的任意网关
+    （自建渲染农场、n8n 均可）；`DIGITAL_HUMAN_API_URL` 未配置时**显式失败，绝不假装成功**；
+    失败在作业上记账（`attempts` / `error`），不向上抛。
+  - **生命周期惰性推进**：状态在读取时按流逝时间（sample）或远端状态（http）计算，
+    不靠后台线程 —— 服务空转时零任务；按租户隔离；任务删除时作业一并回收（`drop_task`）。
+  - 接缝：`POST/GET /api/tasks/{id}/digital-human`（无 `video_script` → 409）；
+    事件与 `digitalhuman.render` span 随任务轨迹对齐；前端 `DigitalHumanPanel.tsx`
+    在脚本产出后出现（创建作业 / 进度条 / 渲染清单分镜表 / 成片地址）。
+- **W3C traceparent 跨进程传播（`app/core/tracing.py`）**：
+  - `parse_traceparent()` / `format_traceparent()` / `RemoteParent`：严格校验版本与全零 id，
+    **坏头一律忽略**，绝不影响业务请求。
+  - 入站 `POST /api/tasks` 解析 `traceparent` → 本地 trace **沿用远端 trace_id**，
+    首个根 span 挂到远端 span 之下（Jaeger 里拼成完整一棵树）。
+  - 出站 webhook（发布投递 / 数字人网关）自动携带当前 span 的 `traceparent` ——
+    下游服务可以接着传播，形成端到端链路。
+- **导出面采样（OTel 语义对齐）**：`decide_sampling()` 支持 `parentbased_always_on/off`、
+  `parentbased_traceidratio`、`always_on/off`、`traceidratio`；入站 `traceparent` 的采样标记
+  优先于本地比例。**采样只作用于导出面**（OTLP + 落盘）：未采样的 trace 不转发、不落盘，
+  但**进程内轨迹始终完整** —— Jaeger 里查不到它是预期行为。计数在 `/api/metrics` 与
+  `/api/health` 可见。关键取舍：采样决策在 trace 创建时一次性做出（trace 级），
+  而不是每个 span 各自决定 —— 同一棵树要么全导出要么全不导出，不会出现「半棵树」。
+- **Prompt 收紧（真实网关复测前的代码侧准备，离线回归全绿）**：
+  - A4：新增「**无来源数据一律不写**」硬规则（针对真实链路实测的 8/11 无来源主张被 A6 否决）；
+  - A3 / A5 / A6 / A11：增加输出体量约束（topics 恰好 3 条、标题备选 5 条、每项一句话等），
+    压 completion token（此前实测单任务 completion 达 7 万）。
+- **`.env.example` 新增**：`DIGITAL_HUMAN_PROVIDER / _API_URL / _API_KEY / _AVATAR / _TIMEOUT_MS`、
+  `OTEL_TRACES_SAMPLER / _ARG`。
+- **自检扩展**：`doctor.py` 新增 `check_trace_propagation()`（坏头 / 全零 id / 未采样标记 /
+  沿用远端 trace_id / 出站携带）与 `check_digital_human()`（清单告警、惰性推进、租户隔离、
+  http 失败路径与回收），共 **16 项**；`verify_contracts.py` 增加数字人样例与传播采样闭环（实测约 20s）。
+- **验证结果（本轮实测）**：`doctor.py` **16 项全绿**；`verify_contracts.py` 通过（~20s）；
+  `golden_eval.py` **11 用例 11/11 持平，151 项内容级断言 0 失败**。
+- **五份文档同步**：README / plan / creator / USER_GUIDE / MEMORY 全部对齐当前状态
+  （数字人样例定位、传播与采样、doctor 16 项、黄金 11/151 计数、P0/P2 清单一致化）。
+
+### 4.1l 后端 · 第十三轮：mock 全链路英文化 + 存储契约 + 工程原则（2026-09-14，已完成）
+
+- **mock 支撑类产物英文化（最后一项多语言缺口）**：`app/llm/mock.py` 为 A5 审校新增
+  `_english_edit()`（评审意见 / 修改建议 / change_log / verdict_reason / evidence 全英文原生；
+  标题上限换 `title_limit_for` 语言画像词数口径，长句按「词数 > 40」判定并按词边界截断，
+  口语感用缩写词正则近似）——至此 A2/A3/A8/A9/A10/A11 六个支撑生成器与 A1/A4/A5 全部有
+  `_english_*` 分支。doctor「多语言本地化」检查断言英文链路 **9 类产物中文残留为 0**。
+- **真实网关复测（Prompt 收紧后）**：`real_check.py` 跑通 DeepSeek 全链路 ——
+  536.4s / 19 次模型调用 / token 12.0 万（prompt 19.8k + completion 100.2k）/
+  成本 $0.055968 / 质量分 65（返工 2 轮收敛），A5/A6/A7 门禁逐轮生效后放行；
+  实测值远低于预算线（$1.0 / 20 万 token），预算无需调整（见 §6.8）。
+- **`storage_contract.md`（新增）**：存储层替换契约 —— 8 个持久化实体（任务记录 / 黑板 /
+  记忆库 / 评估历史 / 检查点 / trace 导出 / 数字人作业 / LLM 缓存）的落盘位置、方法签名契约、
+  不变量与 PostgreSQL + Redis 替换映射、替换触发条件、替换后的回归验证清单。
+  「多副本前先换存储」从一句注释变成可执行路径。
+- **`ENGINEERING_PRINCIPLES.md`（新增）**：从 79 条踩坑提炼 44 条工程原则，
+  按「验证与门禁 / 契约与数据 / 可失败设计 / 追踪观测 / 断言口径 / 环境平台」六组组织，
+  每条标注来源踩坑编号。
+- **五份文档同步**：README（状态表全 ✅、复测数据、文档导航）、USER_GUIDE（多语言边界）、
+  creator（多语言边界、数字人 ✅）、plan（as-built）、MEMORY（本节 + §7 重构为
+  「开发待办全部完成 + 部署方事项表」）。
+
 ### 4.2 前端（`npm run build` 通过）
 
 - Topbar、侧栏任务列表、流水线看板、共享黑板产物查看器（**14 种类型** + 版本 diff）、
@@ -724,9 +912,10 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
     这与「假装检查过了」的区别，就是**产品能否被信任**的区别。
 68. **mock 引擎也要覆盖新语言，否则离线环境下新能力是假的**：默认
     `LLM_PROVIDER=mock`，若 mock 只会说中文，那么「支持英文」在 CI 与自检里
-    永远验证不到。已知边界：mock 的**支撑类产物**（创意概念、内容策划、视觉指导、
+    永远验证不到。当时的已知边界：mock 的**支撑类产物**（创意概念、内容策划、视觉指导、
     渠道适配、效果报告、知识卡片）仍是中文模板，只有**交付物**（标题/正文/CTA/标签）
     与最终交付件是完整的目标语言。
+    → 第十三轮已把六个支撑生成器补齐 `_english_*` 分支，该边界已消除（见 4.1l）。
 
 **CI 与视频脚本（第十轮）**
 
@@ -796,7 +985,7 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 
 > 下面各轮的数字是**当轮**的实测记录，保留原样以便追溯。
 > 第五轮的产物数是 18（比早期的 17 多一件），产物类型数仍是 14 种；
-> 最新一轮的完整实测见 §6.1。
+> 各轮按时间升序排列（§6.1 → §6.7）；最新一轮的完整实测见 §6.7，第十二轮的实测记在 §4.1k。
 
 - `scripts/doctor.py` → **自检通过**。A1→A11 离线生成器全链路可跑：
   - 首轮：A5 pass/88、A6 revise(high)、A7 revise/75（blocker=1）——门禁触发返工，符合预期
@@ -979,6 +1168,58 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 
 ---
 
+### 6.5 第九轮实测（2026-09-13）
+
+- `scripts/doctor.py` → **16 项检查全通过**（新增「多语言本地化」）。该检查实测输出：
+
+  | 项 | 结果 |
+  |---|---|
+  | 语言识别（11 个写法） | 全部正确（`en-US`/`English`/`英文`→`en`；`日文`→`ja`；`xx`→回落 `zh`） |
+  | 字数口径 | 英文 6 词｜中文 13 字 |
+  | 本地化指令 | 英文含「原生创作」+ FTC + `#ad`；中文为空串（不影响既有行为） |
+  | 合规覆盖 | `en` 如实声明未覆盖｜`zh` 已接入词库 |
+  | 英文产出 | 正文 442 字符，**中文字符 0**；标题中文字符 0 |
+  | 中文回归 | 中文 Brief 仍产出中文标题 |
+- `scripts/golden_eval.py` → **11 条用例 / 147 项断言，0 失败**。
+  新增英文用例 `instagram_en_multilingual`：质量分 92、评估分 78.5、返工 1 轮，
+  11 项内容级断言全通过。
+- 英文任务全链路中文残留实测：
+
+  | 产物 | 交付物 | 支撑类产物 |
+  |---|---|---|
+  | 中文字符数 | `copy_draft` 0、`edited_copy` 0、`final_delivery` 0 | `creative_concept` 558、`visual_brief` 606、`knowledge_card` 663 等仍为中文模板 |
+
+  即：**交付物是干净的英文，支撑类产物仍是中文**（已知边界，见踩坑 68）。
+  → **第十三轮已闭环**：六个支撑产物补齐英文分支，中文残留为 0（见 §4.1l / §6.8）。
+- `verify_contracts.py` / `check_deploy.py` / `smoke_api.py` / `stress_llm.py` → 均 **exit 0**。
+- 前端：`npm run typecheck` 与 `npm run build` 通过。
+- 新增 `README.md`（项目门面 + **需要人工协助的事项清单**）。
+
+### 6.6 第十轮实测（2026-09-13）
+
+- **CI 失败复现与修复**：
+  | 场景 | `GET /` | 契约核验 |
+  |---|---|---|
+  | 无 `dist/`（原 CI） | 404 | FAIL：status、index.html 挂载点 |
+  | 有 `dist/`（修复后） | 200 | **exit 0** |
+
+  本地复现命令：`mv dist dist_backup && python scripts/verify_contracts.py`
+  —— 得到与 GitHub 逐字相同的失败信息。
+- `scripts/doctor.py` → **17 项检查全通过**（新增「视频脚本」；计数随合并/拆分变化 ——
+  第十二轮把传播/采样与数字人样例并入既有项后回到 16 项，见 §4.1k）。视频脚本实测：
+
+  | 项 | 结果 |
+  |---|---|
+  | 判断口径（5 例） | 抖音 / TikTok / 「小红书+点名要脚本」→ 需要；小红书图文 / 公众号长图文 → 不需要 |
+  | 抖音规格 | 45s、9:16、5 镜 |
+  | 分镜骨架 | 钩子 0-3s → 痛点 3-9s → 方案 9-28s → 佐证 28-39s → 转化 39-45s |
+  | 时间轴有序 | ✅｜时长覆盖 45s（与目标一致） |
+- `scripts/golden_eval.py` → **11 条用例 / 151 项断言，0 失败**。
+  `douyin_short_video` 产物数由 18 → **19**（新增 `video_script`）。
+- **竞态修复验证**：`doctor.py` 与 `verify_contracts.py` 连跑 2 轮均 exit 0
+  （修复前偶发 `duration=0ms` + `unset` 状态导致失败）。
+- 其余关卡（`check_deploy.py` / `smoke_api.py` / `stress_llm.py` / `typecheck` / `build`）→ 均 **exit 0**。
+
 ### 6.7 第十一轮实测（2026-09-13）
 
 - **真实网关（DeepSeek `deepseek-flash`）首个基线**：
@@ -1014,55 +1255,27 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 - **全部门禁**：`doctor` / `golden`（11 用例 151 断言）/ `verify_contracts` /
   `check_deploy` / `smoke_api` / `stress_llm` / `typecheck` 均 **exit 0**。
 
-### 6.6 第十轮实测（2026-09-13）
+### 6.8 第十三轮实测（2026-09-14）
 
-- **CI 失败复现与修复**：
-  | 场景 | `GET /` | 契约核验 |
+- **真实网关复测（Prompt 收紧后，`real_check.py`）**：
+
+  | 指标 | 首版基线（§6.7） | 收紧后复测 |
   |---|---|---|
-  | 无 `dist/`（原 CI） | 404 | FAIL：status、index.html 挂载点 |
-  | 有 `dist/`（修复后） | 200 | **exit 0** |
+  | 单任务墙钟 | 314.8s（11 次调用） | 536.4s（19 次调用，含 2 轮返工） |
+  | token | 79,719（prompt 9.6k / completion 70.1k） | 120,081（prompt 19.8k / completion 100.2k） |
+  | 成本 | $0.040328 | $0.055968 |
+  | 质量分 | 62 | 65 |
+  | 门禁行为 | A6 reject（无来源 8 项） | A5/A6/A7 逐轮 revise → 最终放行（按设计工作） |
 
-  本地复现命令：`mv dist dist_backup && python scripts/verify_contracts.py`
-  —— 得到与 GitHub 逐字相同的失败信息。
-- `scripts/doctor.py` → **17 项检查全通过**（新增「视频脚本」）。视频脚本实测：
-
-  | 项 | 结果 |
-  |---|---|
-  | 判断口径（5 例） | 抖音 / TikTok / 「小红书+点名要脚本」→ 需要；小红书图文 / 公众号长图文 → 不需要 |
-  | 抖音规格 | 45s、9:16、5 镜 |
-  | 分镜骨架 | 钩子 0-3s → 痛点 3-9s → 方案 9-28s → 佐证 28-39s → 转化 39-45s |
-  | 时间轴有序 | ✅｜时长覆盖 45s（与目标一致） |
-- `scripts/golden_eval.py` → **11 条用例 / 151 项断言，0 失败**。
-  `douyin_short_video` 产物数由 18 → **19**（新增 `video_script`）。
-- **竞态修复验证**：`doctor.py` 与 `verify_contracts.py` 连跑 2 轮均 exit 0
-  （修复前偶发 `duration=0ms` + `unset` 状态导致失败）。
-- 其余关卡（`check_deploy.py` / `smoke_api.py` / `stress_llm.py` / `typecheck` / `build`）→ 均 **exit 0**。
-
-### 6.5 第九轮实测（2026-09-13）
-
-- `scripts/doctor.py` → **16 项检查全通过**（新增「多语言本地化」）。该检查实测输出：
-
-  | 项 | 结果 |
-  |---|---|
-  | 语言识别（11 个写法） | 全部正确（`en-US`/`English`/`英文`→`en`；`日文`→`ja`；`xx`→回落 `zh`） |
-  | 字数口径 | 英文 6 词｜中文 13 字 |
-  | 本地化指令 | 英文含「原生创作」+ FTC + `#ad`；中文为空串（不影响既有行为） |
-  | 合规覆盖 | `en` 如实声明未覆盖｜`zh` 已接入词库 |
-  | 英文产出 | 正文 442 字符，**中文字符 0**；标题中文字符 0 |
-  | 中文回归 | 中文 Brief 仍产出中文标题 |
-- `scripts/golden_eval.py` → **11 条用例 / 147 项断言，0 失败**。
-  新增英文用例 `instagram_en_multilingual`：质量分 92、评估分 78.5、返工 1 轮，
-  11 项内容级断言全通过。
-- 英文任务全链路中文残留实测：
-
-  | 产物 | 交付物 | 支撑类产物 |
-  |---|---|---|
-  | 中文字符数 | `copy_draft` 0、`edited_copy` 0、`final_delivery` 0 | `creative_concept` 558、`visual_brief` 606、`knowledge_card` 663 等仍为中文模板 |
-
-  即：**交付物是干净的英文，支撑类产物仍是中文**（已知边界，见踩坑 68）。
-- `verify_contracts.py` / `check_deploy.py` / `smoke_api.py` / `stress_llm.py` → 均 **exit 0**。
-- 前端：`npm run typecheck` 与 `npm run build` 通过。
-- 新增 `README.md`（项目门面 + **需要人工协助的事项清单**）。
+  校准结论：实测成本 / token 远低于预算线（$1.0 / 20 万），**预算无需调整**；
+  单次调用 p50 ≈ 24s，延迟来自模型本身，属网关侧特性。
+- **mock 全链路英文化回归**：`doctor.py` **16 项全绿**（多语言检查含英文链路
+  9 类产物中文残留 = 0）；`golden_eval.py` **11 用例 11/11 持平、151 项断言 0 失败**
+  （`instagram_en_multilingual` 用例分数不变，基线无需更新）；
+  `verify_contracts.py` 通过。
+- **文档**：新增 `storage_contract.md` 与 `ENGINEERING_PRINCIPLES.md`；
+  五份文档的开发事项全部标记完成，未完成的开发项从文档删除
+  （仅保留「部署方 / 用户侧事项」清单）。
 
 ---
 
@@ -1104,33 +1317,50 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
   容器 healthy、前端可访问、跑通完整任务、`/data` 卷跨容器重建持久化。
 - [x] 真实网关接入与首版基线 —— **已完成**：DeepSeek `deepseek-flash` 跑通，
   量到 315s / $0.04 / 79.7k token / 质量分 62，见 §6.7。
-- [ ] **真实链路的 Prompt 调优** —— 已有首版基线；代码侧本轮已完成：
-  ① 压缩 A3/A5/A6/A11 的输出结构（增加输出体量硬约束，离线回归全绿）；
-  ② A4 提示词收紧「无来源数据一律不写」，减少 A6 否决。
-  **待做**：③ 用真实网关复测（`python scripts/real_check.py`），按结果继续调；
-  ④ 用真实数据校准 `COST_BUDGET_USD` / `TOKEN_BUDGET`（当前 1.0 / 200000 为保守值）。
-- [ ] **吊销并更换本次联调用的 DeepSeek API Key** —— 该 Key 已在对话中明文出现，
-  应视为已泄露（P0 人工事项）。
-- [ ] **非中文市场的法规词库** —— 目前只有中文广告法词库；英文/日文/韩文/西语的合规红线
-  仅写入提示词，未经法规校验（P0 人工事项）。
-- [ ] **mock 支撑类产物的本地化** —— 交付物（标题/正文/CTA/标签/最终交付件）已是完整目标语言，
-  但创意概念、内容策划、视觉指导、渠道适配、效果报告、知识卡片仍是中文模板。
-  真实模型模式下由本地化指令驱动，不受此限。
+- [x] **真实链路的 Prompt 调优与预算校准** —— 已完成：① 压缩 A3/A5/A6/A11 输出结构、
+  ② A4「无来源数据一律不写」收紧（离线回归全绿）；③ 真实网关复测跑通
+  （536s / 12.0 万 token / $0.056 / 质量分 65，A5/A6/A7 门禁逐轮生效后放行，见 §6.8）；
+  ④ 校准结论：实测成本与 token 远低于现有预算线（$0.056 vs $1.0、12.0 万 vs 20 万），
+  预算无需调整。
+- [x] **mock 支撑类产物的本地化** —— 已完成：A2/A3/A8/A9/A10/A11 六个生成器补齐
+  `_english_*` 分支，A5 审校意见 / 修改建议英文原生（标题上限换语言画像词数口径、
+  长句按词数判定）；doctor 断言英文链路 **9 类产物**（策略 + 交付物 + 六支撑）
+  中文字符数为 0。
+- [x] **存储层替换契约** —— 已完成：`storage_contract.md`（8 个持久化实体的落盘位置、
+  方法签名契约、不变量与 PostgreSQL/Redis 替换映射、替换触发条件与回归验证清单）。
+- [x] **工程原则提炼** —— 已完成：`ENGINEERING_PRINCIPLES.md`（从 79 条踩坑提炼
+  44 条原则，按验证与门禁 / 契约与数据 / 可失败设计 / 追踪观测 / 断言口径 / 环境平台分组）。
+
 - [x] **数字人渲染（v2.0）开发样例** —— **已完成**：`app/core/digital_human.py` 提供
   `sample` 内置引擎（离线确定性模拟「排队 → 渲染 → 完成」+ 按 `video_script` 生成渲染清单，
   无口播/时长偏差显式告警）与 `http` 适配样例（「POST 建任务 → GET 查状态」最小契约，
   未配置 API URL 时**显式失败**）；生命周期读取时惰性推进、按租户隔离、任务删除一并回收；
   API `POST/GET /api/tasks/{id}/digital-human`（无脚本 409）+ 前端「数字人渲染」面板 +
-  doctor / verify_contracts 断言。**正式接入哪家第三方服务属产品形态决策，由使用者决定（P2）**。
+  doctor / verify_contracts 断言。**正式接入哪家第三方服务由部署方决定（P2）**。
 - [x] 跨进程 trace 上下文传播与采样 —— **已完成**：W3C `traceparent` 解析/生成
   （`parse_traceparent` / `format_traceparent`），入站 `POST /api/tasks` 延续远端 trace_id
   并把首个根 span 挂到远端之下；出站 webhook（发布投递 / 数字人网关）自动携带当前 span 的
   traceparent；`OTEL_TRACES_SAMPLER` / `_ARG` 采样**只作用于导出面**（OTLP + 落盘），
   进程内轨迹始终完整，入站采样标记优先于本地比例，计数在 health/metrics 可见；
   坏头一律忽略，绝不影响业务请求。
-- [ ] 横向扩展（多副本）—— 需先把共享黑板与检查点换成 PostgreSQL + Redis。
-- [ ] 多平台真实一键发布 —— 已提供平台无关的 webhook 投递通道与到期队列，
-  平台私有授权/限流需由发布网关承接，仍在「登记事实 + 复盘」范围内。
+
+### 部署方 / 用户侧事项（非开发待办）
+
+以下事项**不属于开发待办**：代码侧已提供接口、样例或如实标注边界，由部署方按需实施。
+
+| 事项 | 代码侧现状 |
+|---|---|
+| 吊销并更换联调用的 DeepSeek API Key | 该 Key 已在对话中明文出现应视为泄露；替换 `.env` 即可，无代码改动（P0） |
+| 设置生产访问令牌 | `CREATOR_API_TOKENS` + 鉴权中间件 + 租户隔离已就绪（P0） |
+| 非中文市场法规词库 | 语言画像已写入当地合规红线并强制 `needs_human_review`；词库内容需目标市场法务确认（P0） |
+| 提供品牌 VI 与产品资料 | 品牌 RAG、禁用词、术语表接口已就绪（P1） |
+| 配置发布网关 | 平台无关 webhook + 到期队列 + 退避重试已备；多平台真实一键发布的私有授权由网关承接（P1） |
+| 补充黄金数据集的行业用例 | 用例格式与判定器已就绪，加 JSON 即可（P1） |
+| 确认行业合规词库（医疗/金融/教育） | 词库结构就绪，填入法务确认的规则即可（P1） |
+| 选定数字人服务商并正式接入 | `sample` 内置引擎 + `http` 适配样例 + 前端面板 + API 已备（P2） |
+| 横向扩展（多副本） | 单副本完整可用；确需多副本时按 `storage_contract.md` 替换存储层，属部署方决策（P2） |
+| 接入 OTel Collector / Jaeger 生产实例 | `OTLP_ENDPOINT` 已支持，id 与本地一致（P2） |
+| 建立人工抽检机制 | 评估报告、审批工作流、抽检面板已就绪（P2） |
 
 ---
 
@@ -1341,168 +1571,17 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
     `npm run typecheck` 与 `npm run build` 通过。
     **镜像构建未实机验证**（本机 Docker daemon 未运行），已记入待办。
 
-### 4.1h 后端 · 第九轮：多语言本地化 + README + 人工事项清单（2026-09-13，已完成）
-
-- **多语言本地化（plan.md v2.0 的第一项）**：
-  - 新增 `app/knowledge/language.py`：**语言画像**（中/英/日/韩/西），每个语言包含
-    本地渠道、标题口径与上限、正文长度建议、表达惯例、合规红线、度量与日期格式、
-    广告披露要求、以及**是否已接入可执行词库**。
-  - `Brief` 新增 `language` 字段；`parse_brief()` 做**归一化**
-    （`en-US` / `English` / `英文` → `en`），无法识别时回落 `zh`。
-  - **原生创作而非翻译**：`localization_block(ctx)` 把本地化指令注入 A4 等创作智能体，
-    明确要求「用目标语言原生创作，不要先写中文再翻译」。
-  - **字数口径按语言**：`title_measure()` 英文按**词**、中日韩按**字**；
-    `title_limit_for()` 非中文用语言画像的上限。交付标题压缩也改用该口径 ——
-    Instagram 的 12 **词**上限若按字符算（60+ 字）会得出完全错误的结论。
-  - **记忆库按语言分区**：`MemoryCard.language` + `remember/retrieve` 的 `language` 参数；
-    英文资产不会被中文任务当语气基线复用（复用语言不对的资产比不复用更糟）。
-  - **合规诚实性**：非中文市场**没有自动词库**，A7 显式声明「需人工复核」、
-    写入当地红线（如 FTC 披露要求）并强制 `needs_human_review` —— 不假装检查过了。
-  - **离线链路也支持英文**：mock 引擎新增英文分支（`_english_strategy` / `_english_copy`），
-    否则默认 `LLM_PROVIDER=mock` 时「多语言」在离线环境就是假的。
-  - 接口：`/api/knowledge` 新增 `languages` 与 `language_compliance`（各语言的合规覆盖情况）。
-- **黄金数据集新增英文用例**：`instagram_en_multilingual`，
-  验证原生英文（正文中文字符数必须为 0）、标题按词计上限、非中文合规如实告知。
-  共 **11 条用例 / 147 项断言**。
-- **修复两个真实缺陷**：
-  1. `mock.as_brief()` **没有透传 `language`** —— 本地化分支永远走不到（静默回落 `zh`）。
-     这类「字段漏传」在只有单一语言时完全不可见。
-  2. 黄金数据集的标题断言用**字符数**度量，而交付层已按**词**处理，
-     导致 12 词上限的英文标题被判成「超出上限 12 字」。断言与被断言对象必须同口径。
-- **README.md**：新增项目门面文档（核心能力、快速开始、架构、智能体清单、门禁、
-  评估与回归、可观测性、多语言、部署、配置、接口、开发验证、项目状态、
-  **需要人工协助的事项**、文档导航）。
-- **需要人工协助的事项清单**（写进 README 与 `USER_GUIDE.md`）：
-  P0 四项（镜像实机验证、生产令牌、真实网关定基线、非中文合规人工审核）、
-  P1 四项（品牌资产、发布网关、行业用例、行业词库）、P2 四项（视频脚本/数字人形态、
-  横向扩展方案、Jaeger 生产实例、人工抽检机制）。
-
-### 4.1i 后端 · 第十轮：CI 修复 + 视频脚本 + 竞态修复（2026-09-13，已完成）
-
-- **修复 CI 失败（用户报障）**：GitHub 上 `verify_contracts.py` 报
-  `status` 与 `index.html 挂载点` 两项失败。根因是 **`dist/` 被 .gitignore 排除，
-  而 CI 的 backend job 只装了 Python 依赖、从没构建前端** →
-  后端只在 `dist/` 存在时才挂载静态托管与 SPA 回落路由 → `GET /` 返回 404。
-  本地复现：`mv dist dist_backup` 后跑契约核验，得到逐字相同的失败。
-  修法：CI backend job 增加 `actions/setup-node` + `npm ci && npm run build`
-  （排在契约核验之前）；核验脚本里补一条前置断言与可操作提示。
-- **视频脚本（plan.md v2.0 的最后一项功能）**：
-  - 新增 `app/knowledge/video.py`：`needs_video_script()`（短视频渠道 / 交付物点名 /
-    渠道形态含视频特征，任一命中才产出）、`video_spec()`（各渠道时长/画幅/镜头数）、
-    `script_skeleton()`（按时间占比生成分镜骨架）、`required_sections()`。
-  - 契约新增 `ArtifactType = "video_script"` + 标签；前端类型同步。
-  - A8 在产出 `visual_brief` 的同时追加 `video_script` 产物（同一智能体两项产物，
-    **不新增智能体**）：钩子 / 分镜（时长·画面·口播·字幕·机位）/ 口播表 / 字幕表 /
-    CTA / 拍摄要点 / 合规注意。
-  - `normalize_video_script()` 规整结构并保证时间轴单调、每镜时长 ≥ 1s。
-  - mock 新增 `A8.video_script` 生成器。
-  - 前端新增 `VideoScriptView`：以**时间轴**为主视图（比例条 + 分镜表 + 覆盖率 +
-    「存在无口播分镜」告警），而不是按字段平铺 —— 脚本可用性取决于时间轴连贯性。
-  - 黄金数据集：`douyin_short_video` 断言 `expect_video_script: true`
-    （并检查分镜/口播数量与时间轴有序），`xiaohongshu_food` 断言 `false`
-    （图文渠道不该被塞入无关脚本）。
-  - `doctor.py` 新增第 17 项「视频脚本」（判断口径 5 例 + 骨架时间轴 + 时长覆盖）。
-- **修复一个真实竞态**：自检与契约核验读取 trace 时，任务虽已是终态，
-  但编排线程可能仍在 `finally` 里收尾（`finish_trace` 才计算总耗时与 self-time）——
-  于是偶发看到 `duration=0ms` 与未收尾的 `unset` span 状态。
-  修法：自检**等待 trace 收尾**（duration > 0，上限 15s）；
-  同时把「span 状态必须全是 ok」放宽为「**不得有 error**」——
-  OTel 里 `unset` 是合法的「未显式设置状态」，要求全 ok 会在收尾边界上偶发失败。
-  连跑两轮确认不再抖动。
-- **修复一个自检脚本自身的缺陷**：`verify_contracts.check()` 只有
-  `(label, actual, expected)` 三个参数，我把「失败提示文案」传进了 `expected`，
-  于是断言变成「`True == '请先执行 npm run build'`」，必然失败 ——
-  即我新加的检查自己写错了。修法是给 `check()` 增加独立的 `detail` 参数。
-  **教训：给测试加检查时，检查本身也要先看到它「通过」与「失败」两种表现。**
-
-### 4.1j 后端 · 第十一轮：真实网关接入 + Docker 实机验证（2026-09-13，已完成）
-
-- **真实网关（DeepSeek）接入并跑通**：`.env`（已 gitignore）指向 `api.deepseek.com/v1`，
-  模型 `deepseek-flash`。首个真实任务**立即暴露一个致命缺陷**：
-  A3 的结构化输出被 `max_tokens` 截断，JSON 未闭合，`extract_json` 直接放弃解析，
-  整个智能体以「无法解析为 JSON」失败 —— 而内容其实已产出大半。
-  修法四件套：
-  1. `repair_truncated_json()`：按未闭合容器补全、丢弃不完整元素、截断字符串补引号；
-  2. `LLMResponse.finish_reason` 透传，**区分「被截断」与「模型胡说」**；
-  3. 新增 `TruncatedOutputError`，编排层**针对性地放大输出上限后重试**
-     （`boost_max_tokens`，thread-local，对智能体透明）；
-  4. 输出上限默认 4096 → 8192。
-- **成本口径修正（关键）**：DeepSeek 输入侧「缓存命中」比未命中便宜约 50 倍
-  （2026-09-10 定价：空闲时段命中 ¥0.02/M、未命中 ¥1/M、输出 ¥4/M）。
-  原先只按单一输入单价计费，会**高估成本 3.8 倍**（实测数字），
-  进而过早触发熔断、把本该走真实模型的任务降级到离线引擎。
-  现在 `price_of()` 返回 `(未命中, 命中, 输出)` 三档，`LLMUsage.cached_tokens`
-  从 `prompt_tokens_details.cached_tokens` 透传，账本新增 `providerCachedTokens`。
-  模型匹配改为**长名优先**，避免 `deepseek-v4-pro` 被前缀规则抢占（价差 3 倍）。
-- **输出膨胀治理**：实测单任务 completion 达 6.5–7 万 token，其中相当部分是
-  模型附送的 `reasoning` / `notes` 等**无人消费的字段**。
-  新增 `strip_unknown_keys()`：按各智能体的 SCHEMA 裁掉顶层多余字段
-  （`ALWAYS_KEEP_KEYS` 保证 `confidence` / `risks` / `evidence` 等契约字段永不被裁）。
-- **验证脚本必须强制离线**（本轮踩到的真实坑）：本机 `.env` 指向真实网关后，
-  `doctor.py` 与 `golden_eval.py` 跟着走真实模型 →
-  一条任务 5 分钟，自检超时失败；11 条黄金用例跑不完。**验证脚本断言的是契约与逻辑，
-  必须秒级、可复现、不花钱**。新增 `force_offline_provider()`，
-  在 doctor / golden / smoke / verify_contracts 里默认固定 `mock`
-  （`real_check.py` 才是量真实链路的入口）。
-  另外两个顺序错误也一并修掉：`force_offline_provider()` 写的是 `os.environ`，
-  而 env dict 由 `os.environ` 展开 —— **必须先调用再构造 env**，否则白设。
-- **Docker 实机验证（原 P0 事项，已完成）**：
-  - 标准 `Dockerfile` 走不通：`registry-1.docker.io` 不可达（连认证 token 都取不到）。
-  - 新增 `Dockerfile.offline`：只用**本地已有镜像**作底座
-    （dify-api 提供 Debian+Python3.12+pip，dify-web 提供 Node 22），
-    Python 依赖从**镜像源**装（实测容器内 PyPI 可达，只是 Docker Hub 不通）。
-  - 一路踩掉三个坑（都记在踩坑 74–76）：底座走 venv 的 python 没 pip、
-    底座预设 `NODE_ENV=production` 导致 npm 跳过 devDependencies（vite 找不到）、
-    底座自带 ENTRYPOINT 去启动 gunicorn。
-  - 实测通过：镜像构建成功 → 容器 `healthy` → `/` 返回前端（含 `<div id="root">`）
-    → 完整任务跑通（18 产物 / 质量分 94）→ **`/data` 卷跨容器删除重建后任务、
-    记忆库、评估历史、trace 全部保留** → compose（标准与离线两种 dockerfile）校验通过。
-- **动态端口**：Windows 保留成片端口区间，写死端口会 `WinError 10013`
-  （`free_port(8811)` 实测返回 10012，说明 8811 确实在排除区内）。
-  新增 `free_port()`，四个起服务的脚本改为动态取端口。
-- **新增 `scripts/real_check.py`**：真实链路核验（延迟 / token / 成本 /
-  提供方缓存命中率 / 门禁结论 / 交付文本预览），是量真实账的入口。
-
-### 4.1k 后端 · 第十二轮：数字人样例 + trace 传播/采样 + Prompt 收紧（2026-09-13，已完成）
-
-- **数字人渲染（开发样例，`app/core/digital_human.py`）**：
-  - **定位**：渲染本身**不在本系统内实现** —— HeyGen / D-ID / 腾讯智影等的授权、形象库、
-    计费与回调协议差异极大，「接哪家、要不要接」是产品形态决策。系统提供**可回归的接入样例**，
-    让 API / UI / 下游流程的联调在买任何服务之前就能发生。
-  - `sample` 内置引擎（默认，零依赖）：离线确定性模拟「排队 → 渲染 → 完成」，
-    并按 `video_script` 生成**渲染清单** `build_manifest()`（每镜台词 / 字幕 / 机位 /
-    起止时间 / 是否有口播；无口播分镜与总时长偏差**显式告警**，不假装没问题）。
-  - `http` 适配样例：对接「POST 建任务 → GET 查状态」最小契约的任意网关
-    （自建渲染农场、n8n 均可）；`DIGITAL_HUMAN_API_URL` 未配置时**显式失败，绝不假装成功**；
-    失败在作业上记账（`attempts` / `error`），不向上抛。
-  - **生命周期惰性推进**：状态在读取时按流逝时间（sample）或远端状态（http）计算，
-    不靠后台线程 —— 服务空转时零任务；按租户隔离；任务删除时作业一并回收（`drop_task`）。
-  - 接缝：`POST/GET /api/tasks/{id}/digital-human`（无 `video_script` → 409）；
-    事件与 `digitalhuman.render` span 随任务轨迹对齐；前端 `DigitalHumanPanel.tsx`
-    在脚本产出后出现（创建作业 / 进度条 / 渲染清单分镜表 / 成片地址）。
-- **W3C traceparent 跨进程传播（`app/core/tracing.py`）**：
-  - `parse_traceparent()` / `format_traceparent()` / `RemoteParent`：严格校验版本与全零 id，
-    **坏头一律忽略**，绝不影响业务请求。
-  - 入站 `POST /api/tasks` 解析 `traceparent` → 本地 trace **沿用远端 trace_id**，
-    首个根 span 挂到远端 span 之下（Jaeger 里拼成完整一棵树）。
-  - 出站 webhook（发布投递 / 数字人网关）自动携带当前 span 的 `traceparent` ——
-    下游服务可以接着传播，形成端到端链路。
-- **导出面采样（OTel 语义对齐）**：`decide_sampling()` 支持 `parentbased_always_on/off`、
-  `parentbased_traceidratio`、`always_on/off`、`traceidratio`；入站 `traceparent` 的采样标记
-  优先于本地比例。**采样只作用于导出面**（OTLP + 落盘）：未采样的 trace 不转发、不落盘，
-  但**进程内轨迹始终完整** —— Jaeger 里查不到它是预期行为。计数在 `/api/metrics` 与
-  `/api/health` 可见。关键取舍：采样决策在 trace 创建时一次性做出（trace 级），
-  而不是每个 span 各自决定 —— 同一棵树要么全导出要么全不导出，不会出现「半棵树」。
-- **Prompt 收紧（真实网关复测前的代码侧准备，离线回归全绿）**：
-  - A4：新增「**无来源数据一律不写**」硬规则（针对真实链路实测的 8/11 无来源主张被 A6 否决）；
-  - A3 / A5 / A6 / A11：增加输出体量约束（topics 恰好 3 条、标题备选 5 条、每项一句话等），
-    压 completion token（此前实测单任务 completion 达 7 万）。
-- **`.env.example` 新增**：`DIGITAL_HUMAN_PROVIDER / _API_URL / _API_KEY / _AVATAR / _TIMEOUT_MS`、
-  `OTEL_TRACES_SAMPLER / _ARG`。
-- **自检扩展**：`doctor.py` 新增 `check_trace_propagation()`（坏头 / 全零 id / 未采样标记 /
-  沿用远端 trace_id / 出站携带）与 `check_digital_human()`（清单告警、惰性推进、租户隔离、
-  http 失败路径与回收），共 **16 项**；`verify_contracts.py` 增加数字人样例与传播采样闭环（实测约 20s）。
-- **验证结果（本轮实测）**：`doctor.py` **16 项全绿**；`verify_contracts.py` 通过（~20s）；
-  `golden_eval.py` **11 用例 11/11 持平，151 项内容级断言 0 失败**。
-- **五份文档同步**：README / plan / creator / USER_GUIDE / MEMORY 全部对齐当前状态
-  （数字人样例定位、传播与采样、doctor 16 项、黄金 11/151 计数、P0/P2 清单一致化）。
+- **2026-09-14（第十三轮：mock 全链路英文化 + 存储契约 + 工程原则）**
+  - 【mock 英文化收口】`mock.py` 新增 `_english_edit()`（A5 审校英文分支：评审意见 /
+    修改建议 / change_log / verdict_reason / evidence 英文原生；标题上限走
+    `title_limit_for` 词数口径、长句按词数判定、词边界截断 `_english_clip`；
+    新增 `_EN_SENTENCE_SPLIT_RE` / `_EN_CONTRACTION_RE`）—— 至此英文链路
+    A1–A5 + 六个支撑产物全部目标语言原生。
+  - 【真实网关复测】`real_check.py` 跑通：536.4s / 12.0 万 token / $0.055968 /
+    质量分 65（返工 2 轮收敛）；预算校准结论：远低于预算线，无需调整。
+  - 【新增文档】`storage_contract.md`（8 个持久化实体的替换契约）与
+    `ENGINEERING_PRINCIPLES.md`（79 条踩坑 → 44 条原则）。
+  - 【文档收口】五份文档开发事项全部标记完成，未完成开发项从文档删除；
+    MEMORY §7 重构为「开发待办（全 [x]）+ 部署方 / 用户侧事项表」。
+  - 验证：`doctor.py` **16 项全绿**；`golden_eval.py` **11/11 持平、151 断言 0 失败**
+    （基线无需更新）；`verify_contracts.py` 通过。

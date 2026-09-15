@@ -622,6 +622,41 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
   creator（多语言边界、数字人 ✅）、plan（as-built）、MEMORY（本节 + §7 重构为
   「开发待办全部完成 + 部署方事项表」）。
 
+### 4.1m 后端 · 第十四轮：PostgreSQL + Redis 存储模式（2026-09-15，已完成）
+
+- **双存储后端落地**（`CREATOR_STORAGE=file|pg`，默认 file 完全不变）：
+  pg 模式下任务 / 黑板 / 记忆库 / 评估历史 / 数字人作业入 PostgreSQL
+  （`payload jsonb` 保全量 + 提取列做过滤排序），意图租约入 Redis
+  （`SET NX PX` + Lua 原子三态：claimed / renewed / conflict），检查点用
+  `PostgresSaver`（**fail-loud 拒绝静默退回**）。五个实现：
+  `store_pg / blackboard_pg / memory_pg / evaluations_pg / dh_jobs_pg`，
+  均在 file 版模块的条件分支内延迟 import —— **file 模式零依赖**，
+  doctor 有反向断言（file 下 psycopg/redis 出现在 sys.modules 即失败）。
+- **连接层**：`app/core/pg.py`（psycopg_pool 连接池）、`redis_client.py`、
+  `pg_schema.py`（21 条幂等 DDL）。**连接池必须 autocommit=True** ——
+  PostgresSaver 的 setup() 含 `CREATE INDEX CONCURRENTLY`，事务块内直接报错；
+  代价是多语句原子性要显式 `conn.transaction()`（如 next_version 的
+  `pg_advisory_xact_lock` + 计数），已在契约文档写明。
+- **记忆库语义同源**：PG 版打分**复用 file 版** `_score_cards / _build_drafts` 等
+  函数（向量不落库、每进程懒计算缓存），两后端召回排序语义一致，杜绝漂移；
+  pgvector 不引入（维度可配 + 混合评分无法用 `<=>` 单独表达），取舍写入契约。
+- **迁移与验证脚本**：`pg_migrate.py`（JSON → PG，幂等 ON CONFLICT，支持
+  `--dry-run`；实测 2 任务 / 92 黑板条目 / 2 评估迁入，重跑 inserted 全 0）；
+  `pg_check.py`（PG 专项：跨副本可见、租户隔离、租约三态、PostgresSaver）；
+  doctor 依赖检查 / 检查点断言按模式自动切换口径。
+- **容器化**：compose 增 `--profile pg`（postgres + redis，健康检查 +
+  `required: false` 依赖，端口可用 `CREATOR_PG_PORT / CREATOR_REDIS_PORT` 改映射）；
+  app 的 lifespan 在 pg 模式启动自检（schema + Redis ping，失败拒绝启动）。
+- **文档同步**：storage_contract.md（实现状态 + 切换步骤速查 §6）、README、
+  USER_GUIDE（§11.3/§11.4/§15/§16/§18）、plan（as-built 改「✅ 双后端实现」）。
+- **顺手修的两个既有问题**：① doctor OTLP 检查的竞态 —— 任务状态置终态早于
+  `_export`（OTel 转发 + 落盘），轮询只等状态会偶发 exported=0 假失败
+  （HEAD 基线复现），现改为额外等待 trace 落盘文件出现；② 自检结语写死
+  「SQLite 检查点」，pg 模式下按后端显示。
+- **验证**：file 模式零回归（doctor 16 项 / verify_contracts / golden_eval
+  11 用例 151 断言 / check_deploy 全绿）；pg 模式 pg_check 全绿 + doctor
+  16 项全绿（检查点=postgres）；迁移演练含幂等复跑。
+
 ### 4.2 前端（`npm run build` 通过）
 
 - Topbar、侧栏任务列表、流水线看板、共享黑板产物查看器（**14 种类型** + 版本 diff）、
@@ -1328,6 +1363,10 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
   中文字符数为 0。
 - [x] **存储层替换契约** —— 已完成：`storage_contract.md`（8 个持久化实体的落盘位置、
   方法签名契约、不变量与 PostgreSQL/Redis 替换映射、替换触发条件与回归验证清单）。
+- [x] **PostgreSQL + Redis 存储模式** —— 已完成：`CREATOR_STORAGE=pg` 切换 PG + Redis 后端
+  （任务/黑板/记忆库/评估/数字人作业入 PG、意图租约入 Redis、检查点用 PostgresSaver），
+  默认 file 模式零依赖零改动；`pg_migrate.py`（幂等迁移）/ `pg_check.py`（专项回归）/
+  compose `--profile pg` 就绪，见 §4.1m。
 - [x] **工程原则提炼** —— 已完成：`ENGINEERING_PRINCIPLES.md`（从 79 条踩坑提炼
   44 条原则，按验证与门禁 / 契约与数据 / 可失败设计 / 追踪观测 / 断言口径 / 环境平台分组）。
 
@@ -1358,7 +1397,7 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
 | 补充黄金数据集的行业用例 | 用例格式与判定器已就绪，加 JSON 即可（P1） |
 | 确认行业合规词库（医疗/金融/教育） | 词库结构就绪，填入法务确认的规则即可（P1） |
 | 选定数字人服务商并正式接入 | `sample` 内置引擎 + `http` 适配样例 + 前端面板 + API 已备（P2） |
-| 横向扩展（多副本） | 单副本完整可用；确需多副本时按 `storage_contract.md` 替换存储层，属部署方决策（P2） |
+| 决定是否切换 pg 存储模式 | 双后端已实现（`CREATOR_STORAGE=pg`，见 §4.1m）；是否启用、PG/Redis 用托管还是自建、k8s 副本数调整由部署方决策（P2） |
 | 接入 OTel Collector / Jaeger 生产实例 | `OTLP_ENDPOINT` 已支持，id 与本地一致（P2） |
 | 建立人工抽检机制 | 评估报告、审批工作流、抽检面板已就绪（P2） |
 
@@ -1585,3 +1624,23 @@ src/                     # 前端；契约类型自持于 src/lib/types.ts
     MEMORY §7 重构为「开发待办（全 [x]）+ 部署方 / 用户侧事项表」。
   - 验证：`doctor.py` **16 项全绿**；`golden_eval.py` **11/11 持平、151 断言 0 失败**
     （基线无需更新）；`verify_contracts.py` 通过。
+
+- **2026-09-15（第十四轮：PostgreSQL + Redis 存储模式）**
+  - 【双存储后端】`CREATOR_STORAGE=file|pg`：pg 模式下任务 / 黑板 / 记忆库 / 评估 /
+    数字人作业入 PostgreSQL（`payload jsonb` 保全量），意图租约入 Redis
+    （`SET NX PX` + Lua 三态），检查点用 `PostgresSaver`（fail-loud）；
+    五个 `*_pg.py` 实现全部条件分支延迟 import，file 模式零依赖（doctor 反向断言）。
+  - 【连接层】`app/core/pg.py`（psycopg_pool，**autocommit=True** —— PostgresSaver 的
+    `CREATE INDEX CONCURRENTLY` 不允许事务块）、`redis_client.py`、`pg_schema.py`
+    （21 条幂等 DDL）；多语句原子性显式 `conn.transaction()`（next_version 咨询锁）。
+  - 【语义同源】记忆库打分复用 file 版 `_score_cards / _build_drafts`，向量不落库
+    （pgvector 不引入，取舍写入契约），两后端召回排序一致。
+  - 【脚本与部署】`pg_migrate.py`（幂等迁移，dry-run；实测 2 任务 / 92 黑板 / 2 评估，
+    重跑 inserted=0）、`pg_check.py`（专项回归全绿）；compose `--profile pg`
+    （postgres+redis 健康检查 + 端口可配）；lifespan pg 启动自检（失败拒绝启动）。
+  - 【文档】storage_contract.md（实现状态 + 切换速查）、README、USER_GUIDE、plan（as-built）。
+  - 【顺手修】doctor OTLP 检查竞态（状态终态早于 _export，基线复现 exported=0 假失败，
+    改为等待 trace 落盘文件）；自检结语按后端显示检查点类型。
+  - 验证：file 零回归（doctor 16 项 / verify_contracts / golden_eval 11 用例 151 断言 /
+    check_deploy 全绿）；pg 模式 doctor 16 项全绿（检查点=postgres）+ pg_check 全绿 +
+    迁移演练（含幂等复跑）。

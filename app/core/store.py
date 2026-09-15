@@ -140,4 +140,15 @@ class TaskStore:
             log.warn(f"删除任务文件失败 {task_id}", error)
 
 
-task_store = TaskStore()
+def _build_task_store():
+    """按 ``CREATOR_STORAGE`` 选择后端；PG 实现延迟 import（file 模式零依赖）。"""
+    from ..config import STORAGE_MODE
+
+    if STORAGE_MODE == "pg":
+        from .store_pg import PgTaskStore
+
+        return PgTaskStore()
+    return TaskStore()
+
+
+task_store = _build_task_store()

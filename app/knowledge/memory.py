@@ -133,6 +133,39 @@ def _language_key(value: str | None) -> str:
     return normalize_language(value or DEFAULT_MEMORY_LANGUAGE)
 
 
+def _build_drafts(
+    cards: list[dict[str, Any]] | None, templates: list[dict[str, Any]] | None
+) -> list[dict[str, Any]]:
+    """把 A11 产出的知识卡片与模板整理成入库草稿（file / PG 两个后端共用）。"""
+    drafts: list[dict[str, Any]] = []
+    for item in cards or []:
+        drafts.append(
+            {
+                "kind": str(item.get("type") or "lesson").lower(),
+                "title": str(item.get("title") or "").strip(),
+                "content": str(item.get("content") or "").strip(),
+                "tags": [str(tag) for tag in (item.get("tags") or []) if str(tag).strip()],
+                "reuse_hint": str(item.get("reuse_hint") or "").strip(),
+            }
+        )
+    # 模板本身就是最值得复用的知识，统一转成 template 卡片入库
+    for item in templates or []:
+        name = str(item.get("name") or "").strip()
+        body = str(item.get("body") or "").strip()
+        if not name or not body:
+            continue
+        drafts.append(
+            {
+                "kind": "template",
+                "title": name,
+                "content": f"{str(item.get('usage') or '').strip()}\n{body}".strip(),
+                "tags": ["模板"],
+                "reuse_hint": "可直接套用后替换产品信息",
+            }
+        )
+    return drafts
+
+
 @dataclass
 class MemoryCard:
     """一条可跨任务复用的知识。"""
@@ -207,6 +240,75 @@ class MemoryHit:
             "vector_score": round(self.vector, 4),
             "reasons": list(self.reasons),
         }
+
+
+def _score_cards(
+    *,
+    cards: list[MemoryCard],
+    query_tokens: set[str],
+    query_vector: list[float] | None,
+    weight: float,
+    brand: str,
+    channel: str,
+    industry: str,
+    exclude_task: str | None,
+    vector_of,
+) -> list[MemoryHit]:
+    """对候选卡片逐条打分并排序（file / PG 两个后端共用，保证排序语义同源）。
+
+    ``vector_of`` 是 ``card_id → 向量`` 的取值函数（由各后端注入自己的进程内缓存）。
+    返回**未截断**的命中列表，由调用方做 top_k 截断与 hits 计数。
+    """
+    hits: list[MemoryHit] = []
+    for card in cards:
+        if exclude_task and card.task_id == exclude_task:
+            continue
+
+        tag_score = max((_overlap(query_tokens, tag) for tag in card.tags), default=0.0)
+        title_score = _overlap(query_tokens, card.title)
+        body_score = _overlap(query_tokens, card.content)
+        text_score = _W_TAG * tag_score + _W_TITLE * title_score + _W_BODY * body_score
+
+        # 关键词分量先归一化到 0..1，再与语义分量按权重线性混合
+        keyword_score = min(1.0, text_score * _W_TEXT_GAIN)
+        vector_sim = 0.0
+        if query_vector is not None:
+            vector_sim = max(0.0, cosine(query_vector, vector_of(card.id) or []))
+        score = keyword_score * (1.0 - weight) + vector_sim * weight
+
+        reasons: list[str] = []
+        if text_score > 0:
+            reasons.append("文本相关")
+        if weight > 0 and vector_sim >= _VECTOR_REASON:
+            reasons.append("语义相近")
+
+        if brand and card.brand == brand:
+            score += _W_BRAND
+            reasons.append("同品牌")
+        if channel and card.channel == channel:
+            score += _W_CHANNEL
+            reasons.append("同渠道")
+        if industry and card.industry == industry:
+            score += _W_INDUSTRY
+            reasons.append("同行业")
+
+        if score < MIN_SCORE:
+            continue
+        age = _age_days(card)
+        hits.append(
+            MemoryHit(
+                card=card,
+                score=min(score, 1.0),
+                reasons=reasons,
+                age_days=age,
+                fresh=age <= FRESH_DAYS,
+                vector=vector_sim,
+            )
+        )
+
+    # 同分时优先新鲜知识（creator.md 把「知识新鲜度」列为知识层 KPI）
+    hits.sort(key=lambda hit: (hit.score, -hit.age_days), reverse=True)
+    return hits
 
 
 class MemoryStore:
@@ -289,34 +391,7 @@ class MemoryStore:
         stamp = now_iso()
         owner = (tenant or DEFAULT_TENANT).strip() or DEFAULT_TENANT
         lang = _language_key(language)
-        drafts: list[dict[str, Any]] = []
-
-        for item in cards:
-            drafts.append(
-                {
-                    "kind": str(item.get("type") or "lesson").lower(),
-                    "title": str(item.get("title") or "").strip(),
-                    "content": str(item.get("content") or "").strip(),
-                    "tags": [str(tag) for tag in (item.get("tags") or []) if str(tag).strip()],
-                    "reuse_hint": str(item.get("reuse_hint") or "").strip(),
-                }
-            )
-
-        # 模板本身就是最值得复用的知识，统一转成 template 卡片入库
-        for item in templates or []:
-            name = str(item.get("name") or "").strip()
-            body = str(item.get("body") or "").strip()
-            if not name or not body:
-                continue
-            drafts.append(
-                {
-                    "kind": "template",
-                    "title": name,
-                    "content": f"{str(item.get('usage') or '').strip()}\n{body}".strip(),
-                    "tags": ["模板"],
-                    "reuse_hint": "可直接套用后替换产品信息",
-                }
-            )
+        drafts = _build_drafts(cards, templates)
 
         added = 0
         with self._lock:
@@ -462,55 +537,17 @@ class MemoryStore:
         if query_vector is not None:
             self._ensure_vectors(cards)
 
-        hits: list[MemoryHit] = []
-        for card in cards:
-            if exclude_task and card.task_id == exclude_task:
-                continue
-
-            tag_score = max((_overlap(query_tokens, tag) for tag in card.tags), default=0.0)
-            title_score = _overlap(query_tokens, card.title)
-            body_score = _overlap(query_tokens, card.content)
-            text_score = _W_TAG * tag_score + _W_TITLE * title_score + _W_BODY * body_score
-
-            # 关键词分量先归一化到 0..1，再与语义分量按权重线性混合
-            keyword_score = min(1.0, text_score * _W_TEXT_GAIN)
-            vector_sim = 0.0
-            if query_vector is not None:
-                vector_sim = max(0.0, cosine(query_vector, self._vectors.get(card.id, [])))
-            score = keyword_score * (1.0 - weight) + vector_sim * weight
-
-            reasons: list[str] = []
-            if text_score > 0:
-                reasons.append("文本相关")
-            if weight > 0 and vector_sim >= _VECTOR_REASON:
-                reasons.append("语义相近")
-
-            if brand and card.brand == brand:
-                score += _W_BRAND
-                reasons.append("同品牌")
-            if channel and card.channel == channel:
-                score += _W_CHANNEL
-                reasons.append("同渠道")
-            if industry and card.industry == industry:
-                score += _W_INDUSTRY
-                reasons.append("同行业")
-
-            if score < MIN_SCORE:
-                continue
-            age = _age_days(card)
-            hits.append(
-                MemoryHit(
-                    card=card,
-                    score=min(score, 1.0),
-                    reasons=reasons,
-                    age_days=age,
-                    fresh=age <= FRESH_DAYS,
-                    vector=vector_sim,
-                )
-            )
-
-        # 同分时优先新鲜知识（creator.md 把「知识新鲜度」列为知识层 KPI）
-        hits.sort(key=lambda hit: (hit.score, -hit.age_days), reverse=True)
+        hits = _score_cards(
+            cards=cards,
+            query_tokens=query_tokens,
+            query_vector=query_vector,
+            weight=weight,
+            brand=brand,
+            channel=channel,
+            industry=industry,
+            exclude_task=exclude_task,
+            vector_of=self._vectors.get,
+        )
         top = hits[: max(0, top_k)]
 
         if top:
@@ -647,7 +684,18 @@ def evidence_from_hits(hits: list[dict[str, Any]], *, limit: int = 3) -> list[di
     return items
 
 
-memory_store = MemoryStore()
+def _build_memory_store():
+    """按 ``CREATOR_STORAGE`` 选择后端；PG 实现延迟 import（file 模式零依赖）。"""
+    from ..config import STORAGE_MODE
+
+    if STORAGE_MODE == "pg":
+        from .memory_pg import PgMemoryStore
+
+        return PgMemoryStore()
+    return MemoryStore()
+
+
+memory_store = _build_memory_store()
 
 __all__ = [
     "CARD_KINDS",

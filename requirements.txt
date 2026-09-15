@@ -11,6 +11,15 @@ uvicorn[standard]>=0.32.0
 langgraph>=0.2.60
 langgraph-checkpoint-sqlite>=2.0.0
 
+# ---- 存储层替换（可选能力，见 storage_contract.md 与 app/core/pg.py）----
+# 这四个包**只在 CREATOR_STORAGE=pg 时被 import**：默认 file 模式（JSON + SQLite）
+# 零依赖、离线可跑，与 OTel 三件套同一策略 —— 写进 requirements 是为了让
+# `pip install -r requirements.txt` 一步到位，切 PostgreSQL/Redis 时不必再补装。
+psycopg[binary]>=3.2
+psycopg-pool>=3.2
+redis>=5.0
+langgraph-checkpoint-postgres>=3.0,<4
+
 # ---- 配置与工具 ----
 python-dotenv>=1.0.0
 httpx>=0.27.0

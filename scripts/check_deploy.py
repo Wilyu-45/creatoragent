@@ -55,6 +55,30 @@ def ignored_patterns() -> list[str]:
     return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
 
 
+def _compose_service_block(compose_text: str, service: str) -> str:
+    """精确截取 ``services.<service>`` 的整块文本（按缩进边界）。
+
+    此前用 ``split("jaeger:", 1)`` 粗暴截断 —— 应用环境变量里一出现
+    ``http://jaeger:4318`` 就会把其后半段环境变量误丢；引入 postgres/redis
+    服务后，它们的变量也可能被误当作 app 的来校验。按缩进切块一劳永逸。
+    """
+    lines = compose_text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.rstrip() == f"  {service}:":
+            start = i + 1
+            break
+    if start is None:
+        return ""
+    body: list[str] = []
+    for line in lines[start:]:
+        # 非空且缩进不足 4 格 = 下一个服务（2 格）或顶层键（0 格），本服务块结束
+        if line.strip() and not line.startswith("    "):
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
 def main() -> int:
     known = known_env_vars()
     ignored = ignored_patterns()
@@ -124,7 +148,10 @@ def main() -> int:
 
     print("\n[3] docker-compose 的环境变量")
     compose_text = COMPOSE.read_text(encoding="utf-8")
-    app_section = compose_text.split("jaeger:", 1)[0]
+    app_section = _compose_service_block(compose_text, "app")
+    if not app_section:
+        print("  FAIL 未能从 docker-compose.yml 解析出 services.app 块")
+        failures.append("compose app 服务块解析")
     for match in re.finditer(r"^\s{6}([A-Z0-9_]+):", app_section, re.MULTILINE):
         name = match.group(1)
         check(f"compose {name}", name in known, "后端从未读取该变量")

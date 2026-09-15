@@ -166,50 +166,55 @@ class EvaluationStore:
         owner = (tenant or "").strip()
         with self._lock:
             records = [r for r in self._records if not owner or r.tenant == owner]
+        return aggregate_stats(records)
 
-        axis_totals: dict[str, list[float]] = {}
-        by_mode: dict[str, int] = {}
-        for record in records:
-            by_mode[record.mode] = by_mode.get(record.mode, 0) + 1
-            for axis in record.axes:
-                key = str(axis.get("key") or "")
-                if not key:
-                    continue
-                axis_totals.setdefault(key, []).append(float(axis.get("score") or 0))
 
-        def avg(values: list[float]) -> float:
-            return round(sum(values) / len(values), 2) if values else 0.0
+def aggregate_stats(records: list["EvaluationRecord"]) -> dict[str, Any]:
+    """对一组评估记录做聚合（file / PG 两个后端共用，保证口径同源）。"""
+    axis_totals: dict[str, list[float]] = {}
+    by_mode: dict[str, int] = {}
+    for record in records:
+        by_mode[record.mode] = by_mode.get(record.mode, 0) + 1
+        for axis in record.axes:
+            key = str(axis.get("key") or "")
+            if not key:
+                continue
+            axis_totals.setdefault(key, []).append(float(axis.get("score") or 0))
 
-        labels = {
-            str(axis.get("key")): str(axis.get("label") or axis.get("key"))
-            for record in records
-            for axis in record.axes
-        }
-        return {
-            "total": len(records),
-            "tasks": len({record.task_id for record in records}),
-            "avg_total": avg([record.total for record in records]),
-            "pass_rate": (
-                round(
-                    sum(1 for record in records if record.verdict == "pass") / len(records) * 100, 1
-                )
-                if records
-                else 0.0
-            ),
-            "verdicts": {
-                verdict: sum(1 for record in records if record.verdict == verdict)
-                for verdict in ("pass", "review", "reject")
-            },
-            "modes": by_mode,
-            "fallbacks": sum(1 for record in records if record.fallback),
-            "axis_avg": [
-                {"key": key, "label": labels.get(key, key), "score": avg(values)}
-                for key, values in sorted(
-                    axis_totals.items(), key=lambda item: -avg(item[1])
-                )
-            ],
-            "latest_at": records[-1].created_at if records else None,
-        }
+    def avg(values: list[float]) -> float:
+        return round(sum(values) / len(values), 2) if values else 0.0
+
+    labels = {
+        str(axis.get("key")): str(axis.get("label") or axis.get("key"))
+        for record in records
+        for axis in record.axes
+    }
+    ordered = sorted(records, key=lambda record: record.created_at)
+    return {
+        "total": len(records),
+        "tasks": len({record.task_id for record in records}),
+        "avg_total": avg([record.total for record in records]),
+        "pass_rate": (
+            round(
+                sum(1 for record in records if record.verdict == "pass") / len(records) * 100, 1
+            )
+            if records
+            else 0.0
+        ),
+        "verdicts": {
+            verdict: sum(1 for record in records if record.verdict == verdict)
+            for verdict in ("pass", "review", "reject")
+        },
+        "modes": by_mode,
+        "fallbacks": sum(1 for record in records if record.fallback),
+        "axis_avg": [
+            {"key": key, "label": labels.get(key, key), "score": avg(values)}
+            for key, values in sorted(
+                axis_totals.items(), key=lambda item: -avg(item[1])
+            )
+        ],
+        "latest_at": ordered[-1].created_at if ordered else None,
+    }
 
 
 def build_record(
@@ -251,13 +256,25 @@ def build_record(
     )
 
 
-evaluation_store = EvaluationStore()
+def _build_evaluation_store():
+    """按 ``CREATOR_STORAGE`` 选择后端；PG 实现延迟 import（file 模式零依赖）。"""
+    from ..config import STORAGE_MODE
+
+    if STORAGE_MODE == "pg":
+        from .evaluations_pg import PgEvaluationStore
+
+        return PgEvaluationStore()
+    return EvaluationStore()
+
+
+evaluation_store = _build_evaluation_store()
 
 __all__ = [
     "EvaluationRecord",
     "EvaluationStore",
     "MAX_PER_TASK",
     "MAX_RECORDS",
+    "aggregate_stats",
     "build_record",
     "evaluation_store",
 ]

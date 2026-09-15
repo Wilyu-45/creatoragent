@@ -5,6 +5,14 @@
 （多副本），必须先按本契约把存储层替换为 **PostgreSQL + Redis**。本文列出全部
 持久化实体的落盘位置、方法签名契约与替换映射，替换时不必反向推导接口。
 
+> **实现状态（2026-09-15）**：本契约已全量实现。设置 `CREATOR_STORAGE=pg`
+> 即切换到 PostgreSQL + Redis 后端（默认 `file` 完全不变）；pg 依赖
+> （psycopg / redis / langgraph-checkpoint-postgres）只在 pg 分支内延迟 import，
+> file 模式保持零依赖。各实体的 PG 实现见 §2 表「实现模块」列；
+> 数据迁移用 `scripts/pg_migrate.py`（幂等，支持 `--dry-run`），
+> 存储层回归用 `scripts/pg_check.py`，模式自检已并入 `scripts/doctor.py`。
+> 本地一键起库：`docker compose --profile pg up -d postgres redis`。
+
 ---
 
 ## 1. 总边界
@@ -20,16 +28,16 @@
 
 ## 2. 持久化实体总表
 
-| # | 落盘位置 | 模块 | 内容 | 多副本替换 |
+| # | 落盘位置 | 模块 | 内容 | PG 实现（`CREATOR_STORAGE=pg`） |
 |---|---|---|---|---|
-| 1 | `tasks/<task_id>.json` | `app/core/store.py` `TaskStore` | 任务记录（TaskRecord 全量快照） | PostgreSQL 表 `tasks` |
-| 2 | `blackboard.json` | `app/core/blackboard.py` `Blackboard` | 意图租约 / 事实 / 活动 / 产物 / 评审 | PG 表 5 张 + **Redis 租约锁** |
-| 3 | `memory.json` | `app/knowledge/memory.py` `MemoryStore` | A11 知识卡片（含本地向量） | PG 表 + **pgvector** |
-| 4 | `evaluations.json` | `app/core/evaluations.py` `EvaluationStore` | LLM-as-a-Judge 评估历史 | PG 表 `evaluations` |
-| 5 | `checkpoints.sqlite` | `app/core/orchestrator.py`（LangGraph `SqliteSaver`） | 断点续跑检查点 | **`langgraph-checkpoint-postgres`** |
-| 6 | `traces/<task_id>.json` | `app/core/tracing.py`（`EXPORT_DIR`） | OTel 形状的 trace 导出 | OTLP collector + Jaeger/ClickHouse |
-| 7 | `digital_human.json` | `app/core/digital_human.py`（`STORE_FILE`） | 数字人渲染作业 | PG 表或 Redis Hash |
-| 8 | （内存） | `app/llm/cache.py` `ResponseCache` | LLM 响应缓存（TTL + 容量，不落盘） | 可选 Redis，miss 只影响成本不影响正确性 |
+| 1 | `tasks/<task_id>.json` | `app/core/store.py` `TaskStore` | 任务记录（TaskRecord 全量快照） | `store_pg.py` `PgTaskStore`（表 `tasks`，`payload jsonb` 存全量） |
+| 2 | `blackboard.json` | `app/core/blackboard.py` `Blackboard` | 意图租约 / 事实 / 活动 / 产物 / 评审 | `blackboard_pg.py` `PgBlackboard`（表 5 张 + **Redis 租约锁**） |
+| 3 | `memory.json` | `app/knowledge/memory.py` `MemoryStore` | A11 知识卡片（含本地向量） | `memory_pg.py` `PgMemoryStore`（表 `memory_cards`；**向量不落库**，评分复用 file 版函数） |
+| 4 | `evaluations.json` | `app/core/evaluations.py` `EvaluationStore` | LLM-as-a-Judge 评估历史 | `evaluations_pg.py` `PgEvaluationStore`（表 `evaluations`） |
+| 5 | `checkpoints.sqlite` | `app/core/orchestrator.py`（LangGraph `SqliteSaver`） | 断点续跑检查点 | `langgraph-checkpoint-postgres` `PostgresSaver`（**fail-loud，不静默退回**） |
+| 6 | `traces/<task_id>.json` | `app/core/tracing.py`（`EXPORT_DIR`） | OTel 形状的 trace 导出 | 不替换（导出面保留文件；生产观测走 OTLP collector） |
+| 7 | `digital_human.json` | `app/core/digital_human.py`（`STORE_FILE`） | 数字人渲染作业 | `dh_jobs_pg.py` `PgJobBackend`（表 `digital_human_jobs`） |
+| 8 | （内存） | `app/llm/cache.py` `ResponseCache` | LLM 响应缓存（TTL + 容量，不落盘） | 不替换（纯内存；可选 Redis，miss 只影响成本不影响正确性） |
 
 ---
 
@@ -81,13 +89,17 @@ snapshot(task_id) -> BlackboardSnapshot
 不变量：
 - `acquire_intent` 是**租约**语义（TTL 过期自动清扫，`_sweep_expired_intents`）：
   同一智能体重复声明 = 续期；冲突时返回 `(None, reason)`。
-- ⚠️ 当前实现是**进程内**锁（`threading.RLock` + 内存列表）：单副本正确，
-  多副本下两个进程会各自拿到同一把「锁」。替换时意图租约必须换成
-  **Redis `SET key value NX PX <ttl>`**，其余实体按表存储即可。
+- file 版是**进程内**锁（`threading.RLock` + 内存列表）：单副本正确，多副本下
+  两个进程会各自拿到同一把「锁」。PG 版（`PgBlackboard`）的意图租约已改为
+  **Redis `SET key value NX PX <ttl>` + Lua 原子脚本**：跨进程原子地完成
+  「抢占 / 续期 / 冲突判定」三态，TTL 到期自动释放；key 前缀
+  `CREATOR_REDIS_PREFIX`（默认 `creator:`）隔离多套环境。
 
 **替换映射**：PG 表 `bb_facts / bb_activities / bb_artifacts / bb_reviews`
 （均以 `task_id` 为外键）+ Redis 租约 `intent:{task_id}:{direction}`。
-`next_version` 需要在事务内 `SELECT ... FOR UPDATE` 或改用序列。
+`next_version` 用**事务级咨询锁**（`pg_advisory_xact_lock`）+ 计数，显式包在
+`conn.transaction()` 内 —— 连接池必须是 autocommit 模式（PostgresSaver 的
+`CREATE INDEX CONCURRENTLY` 不允许事务块），多语句原子性因此必须显式声明。
 
 ### 3.3 记忆库 — `MemoryStore`（A11 知识卡片）
 
@@ -116,8 +128,11 @@ stats(tenant: str | None = None) -> dict
 - **容量与时效**：每租户容量上限逐出（`_evict`）+ TTL 过期清扫（`_sweep_expired`）。
 
 **替换映射**：PG 表 `memory_cards(tenant, digest UNIQUE, kind, title, content,
-tags[], language, created_at, expires_at)` + pgvector 列；
-`retrieve` → 关键词倒排 + `ORDER BY embedding <=> query_vec` 混合排序。
+tags[], language, created_at, expires_at)`。**实现取舍（pgvector 不引入）**：
+embedding 维度可配（16～1536），固定维度列不适配；且混合评分含元数据加成与
+关键词分量，无法用 `<=>` 单独表达。PG 版落库只存原文，向量每进程懒计算缓存，
+候选卡片过滤后全量取出（每租户 `MAX_CARDS` 封顶），打分**复用 file 版
+`_score_cards` 等函数** —— 两种后端排序语义同源，杜绝召回顺序漂移。
 
 ### 3.4 评估历史 — `EvaluationStore`
 
@@ -135,13 +150,12 @@ axes jsonb, created_at)`；`latest` → `ORDER BY created_at DESC LIMIT 1`。
 
 ### 3.5 断点检查点 — LangGraph Checkpointer
 
-`orchestrator._checkpointer()` 用 `SqliteSaver` 打开 `checkpoints.sqlite`；
-**打开失败时静默退回 memory checkpointer**（`checkpointer_kind` 字段可见，
-doctor 第 10 项专门守护「必须是真的 SQLite」）。
-
-多副本下 memory 退回会让断点续跑直接失效（状态在各自进程里），
-因此替换时直接换 `langgraph-checkpoint-postgres`（`PostgresSaver`），
-并**移除静默退回**：数据库连不上应该起不来，而不是悄悄丢续跑能力。
+`orchestrator._checkpointer()` 按 `STORAGE_MODE` 分支：file 模式用 `SqliteSaver`
+打开 `checkpoints.sqlite`（打开失败**静默退回 memory checkpointer**，
+`checkpointer_kind` 字段可见，doctor 专门守护「必须是真的 SQLite」）；
+pg 模式用 `PostgresSaver`（`langgraph-checkpoint-postgres`），初始化失败
+**fail-loud 拒绝启动** —— 数据库连不上就该起不来，而不是悄悄丢续跑能力，
+doctor 同样守护「必须是真的 postgres」。
 
 ### 3.6 Trace 导出
 
@@ -173,10 +187,32 @@ doctor 第 10 项专门守护「必须是真的 SQLite」）。
 | 并发任务数 | > 8 | 黑板 + 任务记录换共享存储 |
 | 记忆库卡片 | > 2000 / 召回精确率 < 0.7 | pgvector / 独立向量库 |
 
-## 5. 替换后的回归验证
+## 5. 替换后的回归验证（已落地为脚本）
 
-1. `doctor.py` 的租户隔离断言（写入归属 / 召回不越租户 / 同租户幂等）；
-2. `doctor.py` 第 10 项：断点续跑必须落在真持久层（把「SQLite/memory」断言
-   改为「PostgresSaver」后重跑）；
-3. `verify_contracts.py`：API 契约不变 —— 存储替换对接口层必须零感知；
-4. 双副本手动演练：副本 A 创建任务、副本 B 能看到并续跑。
+1. `python scripts/doctor.py`：file 模式跑出 16 项全绿（其中含反向断言
+   「file 模式不得泄漏 psycopg/redis import」）；`CREATOR_STORAGE=pg` 下重跑，
+   依赖检查与检查点后端断言自动切换为 postgres 口径；
+2. `python scripts/pg_check.py`：PG 存储层专项回归 —— 租户隔离、事实去重、
+   意图租约三态（claimed / renewed / conflict）、任务增删查、记忆库
+   幂等写入与召回、评估历史；
+3. `python scripts/verify_contracts.py`：API 契约不变 —— 存储替换对接口层必须零感知；
+4. `python scripts/pg_migrate.py --dry-run` → 去掉 `--dry-run`：JSON → PostgreSQL
+   一次性迁移，逐类实体输出「源数 / 插入 / 跳过」计数，可重复执行（幂等）；
+5. 双副本手动演练（部署方）：副本 A 创建任务、副本 B 能看到并续跑
+   （共享 PG + Redis 后此语义成立）。
+
+## 6. 切换步骤速查
+
+```bash
+# 1) 起库（端口可用 CREATOR_PG_PORT / CREATOR_REDIS_PORT 改映射，避开本机占用）
+docker compose --profile pg up -d postgres redis
+# 2) 配置连接串（compose 网络内用服务名；宿主机直连用 localhost + 映射端口）
+#    CREATOR_STORAGE=pg
+#    CREATOR_DATABASE_URL=postgresql://creator:creator@localhost:5432/creator
+#    CREATOR_REDIS_URL=redis://localhost:6379/0
+# 3) 迁移存量数据（可选，file → pg 一次性；幂等可重跑）
+python scripts/pg_migrate.py --dry-run
+python scripts/pg_migrate.py
+# 4) 启动应用（lifespan 会自检 schema 与 Redis，失败拒绝启动）
+python scripts/doctor.py   # 期望检查点后端=postgres、依赖检查走 pg 分支
+```

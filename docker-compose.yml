@@ -10,6 +10,13 @@
 # 说明：本 compose 通过 OTLP_ENDPOINT 把追踪送到 Jaeger。
 # **不配这个变量时应用同样完整可用** —— 进程内 span 树与本地
 # data/traces/*.json 不依赖任何外部服务。
+#
+# PostgreSQL + Redis 存储模式（多副本横向扩展的前提，见 storage_contract.md）：
+#   docker compose --profile pg up -d --build
+#   # 或分两步：先起库，等应用镜像就绪后再起应用
+#   docker compose --profile pg up -d postgres redis
+#   docker compose up -d --build app
+# 默认（不带 --profile pg）行为完全不变：JSON + SQLite 单机存储。
 
 services:
   app:
@@ -53,6 +60,12 @@ services:
       EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-local}"
       EMBEDDING_WEIGHT: "${EMBEDDING_WEIGHT:-0.35}"
 
+      # ---- 存储层：默认 file（JSON + SQLite，零依赖）；--profile pg 起 postgres/redis ----
+      CREATOR_STORAGE: "${CREATOR_STORAGE:-file}"
+      # 容器内默认指向 compose 网络里的库；宿主机直连本地库时用 localhost 变体自行覆盖
+      CREATOR_DATABASE_URL: "${CREATOR_DATABASE_URL:-postgresql://creator:creator@postgres:5432/creator}"
+      CREATOR_REDIS_URL: "${CREATOR_REDIS_URL:-redis://redis:6379/0}"
+
       # ---- 访问令牌（为空则不鉴权；生产环境务必设置）----
       CREATOR_API_TOKENS: "${CREATOR_API_TOKENS:-}"
 
@@ -62,6 +75,13 @@ services:
     depends_on:
       jaeger:
         condition: service_started
+      # pg profile 未激活时这两个依赖被忽略（required: false）；激活后等库就绪再起应用
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/health"]
@@ -82,5 +102,46 @@ services:
       - "4318:4318"     # OTLP/HTTP（宿主也可直连，方便容器外的进程导出）
     restart: unless-stopped
 
+  # ---- 仅 pg 存储模式需要（docker compose --profile pg up -d）----
+  postgres:
+    # Docker Hub 不可达时可换本地已有镜像（与 Dockerfile.offline 同思路）：
+    #   $env:CREATOR_PG_IMAGE='postgres:15-alpine'; docker compose --profile pg up -d
+    image: "${CREATOR_PG_IMAGE:-postgres:16-alpine}"
+    container_name: creator-postgres
+    profiles: ["pg"]
+    environment:
+      POSTGRES_USER: creator
+      POSTGRES_PASSWORD: creator
+      POSTGRES_DB: creator
+    ports:
+      # 宿主机可直连（pg_migrate / 本地开发用）；宿主 5432 已被占用时换端口：
+      #   $env:CREATOR_PG_PORT='55432'; docker compose --profile pg up -d
+      - "${CREATOR_PG_PORT:-5432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U creator -d creator"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: "${CREATOR_REDIS_IMAGE:-redis:7-alpine}"
+    container_name: creator-redis
+    profiles: ["pg"]
+    # 意图租约允许丢失（TTL 语义），无需持久化配置
+    ports:
+      - "${CREATOR_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   creator-data:
+  pg-data:

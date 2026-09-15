@@ -377,7 +377,7 @@ Turn Budget 限制每个 Session 的最大迭代轮数以防止失控成本和�
 |---|---|---|
 | LangGraph 做流程编排 | ✅ 一致 | `StateGraph` + 条件边门禁环 + `interrupt()` 人工审批 + `SqliteSaver` 断点续跑 |
 | CrewAI 做 Agent 定义层 | ⏸️ 未引入 | 当前 11 个智能体均为「单次结构化生成」，LangGraph 节点 + Pydantic 契约已足够；引入 CrewAI 会增加一层抽象与失败面，留待需要 Agent 内部多步推理/工具循环时再评估 |
-| PostgreSQL + Redis 共享黑板 | 🔁 替代实现 | 用 JSON 文件 + 进程内锁 + `intent` 租约满足单机 MVP 的并发正确性；接口按可替换设计，替换契约（方法签名 / 不变量 / 表与 key 映射 / 触发条件）见 [`storage_contract.md`](storage_contract.md) |
+| PostgreSQL + Redis 共享黑板 | ✅ 双后端实现 | file 模式（默认）：JSON 文件 + 进程内锁 + `intent` 租约满足单机并发正确性；`CREATOR_STORAGE=pg`：黑板/任务/记忆库/评估/数字人作业入 PostgreSQL（`payload jsonb`），意图租约改 Redis `SET NX PX` + Lua 原子脚本，检查点用 PostgresSaver（fail-loud）。契约（方法签名 / 不变量 / 表与 key 映射 / 触发条件）见 [`storage_contract.md`](storage_contract.md)，迁移与回归脚本齐备（`pg_migrate.py` / `pg_check.py`） |
 | MCP Server 统一接入 | 🔁 内置知识层 | 渠道规范 / 行业洞察 / 广告法词库 / 视觉风格库 / SEO 规则直接以 `app/knowledge/*` 提供，无外部进程依赖；外部工具（搜索/图像生成）后续按需接 MCP |
 | OpenTelemetry + LangSmith | 🔁 事件总线 + SSE | `/api/metrics` 覆盖延迟 p99、成本、缓存、租约、门禁通过率、**评估分**等关键指标；全链路 Trace 待接入 |
 | LangSmith Eval / RAGAS（2.5 系统级） | 🔁 自建替代 | `app/core/judge.py` 双轨评估器（规则版可复现 + 模型版失败自动回退）+ `golden/` 黄金数据集与基线回归，见 2.5.1 / 2.5.2 |

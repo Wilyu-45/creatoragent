@@ -666,8 +666,10 @@ kubectl -n creator port-forward svc/creator 8787:8787
 清单包含 Namespace / ConfigMap / Secret / PVC / Deployment / Service / Ingress。
 两点需要知道：
 
-- **副本数固定为 1**（`Recreate` 策略）。当前持久化是本地 JSON + SQLite 检查点，
-  多副本会各写各的导致状态分裂。要横向扩展必须先换存储层（PostgreSQL + Redis）。
+- **副本数固定为 1**（`Recreate` 策略）。默认 file 模式的持久化是本地 JSON + SQLite
+  检查点，多副本会各写各的导致状态分裂。要横向扩展先把应用切到
+  `CREATOR_STORAGE=pg`（PostgreSQL + Redis，切换步骤见
+  [`storage_contract.md`](storage_contract.md) §6），再由部署方调整副本数与托管库连接串。
 - **探针用 `/api/health`**，它免鉴权 —— 因此即使开启 `CREATOR_API_TOKENS` 也能正常探活。
 
 生产环境请务必设置 `CREATOR_API_TOKENS`（决定租户隔离边界），
@@ -680,6 +682,8 @@ kubectl -n creator port-forward svc/creator 8787:8787
 | 变量 | 说明 |
 | --- | --- |
 | `CREATOR_DATA_DIR` | 数据目录（容器内固定 `/data`，对应挂载卷） |
+| `CREATOR_STORAGE` | 存储后端：`file`（默认，JSON + SQLite，零依赖）/ `pg`（PostgreSQL + Redis，多副本前提） |
+| `CREATOR_DATABASE_URL` / `CREATOR_REDIS_URL` | 仅 pg 模式生效；compose 网络内默认指向 `postgres` / `redis` 服务 |
 | `LLM_PROVIDER` / `OPENAI_*` | `mock`（默认，无需密钥）或任意 OpenAI 兼容网关 |
 | `CREATOR_API_TOKENS` | 访问令牌（为空则不鉴权；**生产必设**） |
 | `OTLP_ENDPOINT` | 追踪导出目标（如 `http://jaeger:4318`；为空则只做进程内追踪） |
@@ -966,7 +970,11 @@ INIT → STRATEGY → CREATIVE → PLANNING → DRAFTING → REVIEW → EDITING
 | `data/digital_human.json` | 数字人渲染作业（**开发样例**）；删除任务时一并回收 |
 | `data/checkpoints.sqlite` | LangGraph 检查点（断点续跑） |
 
-> 存储层替换（多副本前换 PostgreSQL + Redis）的接口契约与映射见 [`storage_contract.md`](storage_contract.md)。
+> 默认 `file` 模式下数据都在 `data/`；`CREATOR_STORAGE=pg` 时任务/黑板/记忆库/
+> 评估/数字人作业改存 PostgreSQL（`payload jsonb` 保全量）、意图租约存 Redis、
+> 检查点走 PostgresSaver，`traces/` 导出仍在本目录（生产观测建议直接接 OTLP）。
+> 两后端的接口契约、实体映射与迁移步骤见 [`storage_contract.md`](storage_contract.md)；
+> file → pg 存量数据迁移用 `python scripts/pg_migrate.py`（幂等，先 `--dry-run` 预览）。
 
 **随代码版本化、不在 `data/` 下的资产**：
 
@@ -1002,6 +1010,13 @@ python scripts/verify_contracts.py
 
 # 容器化清单核验（不需要 Docker daemon）
 python scripts/check_deploy.py
+
+# PG 存储层专项回归（需 CREATOR_STORAGE=pg + 本地 postgres/redis，见 storage_contract.md §6）
+python scripts/pg_check.py
+
+# file → pg 存量数据迁移（幂等；先 --dry-run 预览计数再实迁）
+python scripts/pg_migrate.py --dry-run
+python scripts/pg_migrate.py
 
 # 真实网关链路核验（延迟 / token / 成本 / 缓存命中 / 门禁结论）
 python scripts/real_check.py --tasks 1
@@ -1077,7 +1092,7 @@ npm run build
 | # | 事项 | 为什么需要人 |
 | --- | --- | --- |
 | 10 | **选定数字人服务商并决定是否正式接入** | 系统提供的是接入样例（[13.6](#136-数字人渲染开发样例)：内置引擎 + http 适配）；正式接入需明确产品形态并选型服务商，网关契约见 `DIGITAL_HUMAN_API_URL` 说明 |
-| 11 | **决定横向扩展方案** | 单副本完整可用；确需多副本时按 [`storage_contract.md`](storage_contract.md) 把黑板/检查点等换成 PostgreSQL + Redis（属架构与部署决策） |
+| 11 | **决定是否切换 pg 存储模式** | 双存储后端已实现：默认 `file`（单机零依赖）与 `CREATOR_STORAGE=pg`（PostgreSQL + Redis，多副本前提）。是否为生产环境启用 pg、PG/Redis 用托管还是自建，属架构与部署决策；切换步骤见 [`storage_contract.md`](storage_contract.md) §6 |
 | 12 | **接入 OTel Collector / Jaeger 生产实例** | 本地用 compose 里的 all-in-one 即可；生产需要持久化存储与采样策略 |
 | 13 | **建立人工抽检机制** | 评估与门禁能拦住大部分问题，但品牌调性与创意质量最终仍需人判断 |
 
@@ -1163,9 +1178,11 @@ npm run build
 （compose 已默认配好）。别用 `docker compose down -v`，那会连卷一起删。
 
 **Q：k8s 里能起多副本吗？**
-暂时不行，清单里固定 `replicas: 1`。当前持久化是本地 JSON + SQLite，
-多副本会各写各的导致状态分裂。要横向扩展得先换存储层（PostgreSQL + Redis）。
-**在清单里假装支持多副本，比不支持更危险**，所以这里明确写死。
+默认 file 模式不行，清单里固定 `replicas: 1` —— 本地 JSON + SQLite 多副本会状态分裂。
+pg 存储模式（`CREATOR_STORAGE=pg`，PostgreSQL + Redis 共享后端）已实现，
+先把应用切过去（步骤见 [`storage_contract.md`](storage_contract.md) §6），
+再由部署方决定副本数与托管库。**在清单里假装支持多副本，比不支持更危险**，
+所以 file 模式的清单保持写死单副本。
 
 **Q：开启 API 令牌后容器一直不健康？**
 不应该 —— 探针用的是免鉴权的 `GET /api/health`。`scripts/check_deploy.py`
@@ -1248,7 +1265,7 @@ creator/
 ├── plan.md              # 迭代计划
 ├── MEMORY.md            # 开发进度与踩坑
 ├── ENGINEERING_PRINCIPLES.md  # 工程原则（从踩坑提炼）
-├── storage_contract.md  # 存储层替换契约（多副本 → PostgreSQL + Redis）
+├── storage_contract.md  # 存储层契约（file / pg 双后端已实现，含切换步骤）
 ├── README.md            # 项目门面（含人工协助清单）
 └── USER_GUIDE.md        # 本文档
 ```

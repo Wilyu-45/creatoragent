@@ -41,6 +41,30 @@ EmbeddingProviderName = Literal["local", "openai"]
 JudgeModeName = Literal["off", "advisory", "blocking"]
 JudgeProviderName = Literal["offline", "llm"]
 
+#: 存储后端：file（默认，JSON + SQLite，零依赖离线可跑）| pg（PostgreSQL + Redis，支持多副本）。
+#: 替换契约与实现指引见 storage_contract.md；PG 实现只在 ``pg`` 模式下被 import（零依赖保证）。
+StorageModeName = Literal["file", "pg"]
+
+
+def _storage_mode() -> str:
+    raw = (os.environ.get("CREATOR_STORAGE") or "file").strip().lower()
+    if raw in ("file", "pg"):
+        return raw
+    import sys
+
+    print(f"[config] CREATOR_STORAGE={raw!r} 非法（只支持 file/pg），回落 file", file=sys.stderr)
+    return "file"
+
+
+#: 存储后端选择在 **import 期固化**：单例构造、checkpointer 分支都依赖它，
+#: 进程生命周期内不可变（与 DATA_DIR 同口径）。
+STORAGE_MODE: StorageModeName = _storage_mode()  # type: ignore[assignment]
+
+#: PG / Redis 连接配置（仅 ``STORAGE_MODE == "pg"`` 时被 app/core/pg.py 等读取）。
+#: 留空时 pg.py 使用本地默认值（见各模块 docstring）。
+DATABASE_URL = (os.environ.get("CREATOR_DATABASE_URL") or "").strip()
+REDIS_URL = (os.environ.get("CREATOR_REDIS_URL") or "").strip()
+
 #: 评估口径版本号。改动权重或规则时递增，便于「同一批数据跨版本对比」时区分。
 #: 放在 config 而非 judge 模块，是为了让 ``public_config()`` 不必反向 import 评估器。
 RUBRIC_VERSION = "2026-09-13.judge-v1"
@@ -444,6 +468,12 @@ def public_config() -> dict[str, Any]:
         "tokenBudget": _config.token_budget,
         "llmCache": _config.llm_cache,
         "authRequired": auth_enabled(),
+        # 存储后端概要：mode 用于前端/运维确认当前落库方式；
+        # 只暴露「是否已配置连接串」的布尔值，URL 含密钥，绝不回传明文（与 _mask 同口径）
+        "storage": {
+            "mode": STORAGE_MODE,
+            "databaseConfigured": bool(DATABASE_URL),
+        },
         "llm": {
             "provider": llm.provider,
             "baseUrl": llm.base_url,

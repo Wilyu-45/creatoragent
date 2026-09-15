@@ -118,6 +118,27 @@ def check_deps() -> None:
 
     print("langgraph   : StateGraph / interrupt / Command / SqliteSaver 均可用")
 
+    storage_mode = (os.environ.get("CREATOR_STORAGE") or "file").strip().lower()
+    if storage_mode == "pg":
+        import psycopg
+        import psycopg_pool
+        import redis
+
+        from langgraph.checkpoint.postgres import PostgresSaver  # noqa: F401
+
+        print(f"psycopg     : {psycopg.__version__}｜psycopg_pool: {psycopg_pool.__version__}")
+        print(f"redis       : {redis.__version__}")
+        print("langgraph   : PostgresSaver 可用（pg 存储模式）")
+        return
+
+    # 反向断言（零依赖防回归）：file 模式下 PG/Redis 依赖必须**从未被加载**。
+    # PG 实现全部藏在条件分支的函数体内，若此处 sys.modules 里出现它们，
+    # 说明有人在模块顶层加了 import —— 「零依赖离线可跑」的承诺即被打破。
+    leaked = sorted(name for name in ("psycopg", "psycopg_pool", "redis") if name in sys.modules)
+    if leaked:
+        print(f"    ! file 模式依赖泄漏：{leaked} 已被加载（应只在 pg 模式的条件分支内延迟 import）")
+        raise SystemExit(1)
+
 
 def exercise_mock() -> bool:
     """按真实流水线顺序喂数据，验证所有离线生成器与门禁信号。"""
@@ -476,18 +497,23 @@ def check_memory_tenant(brief: dict) -> bool:
 
 
 def check_checkpointer() -> bool:
-    """校验断点续跑用的是 SQLite 检查点，而不是静默退回的内存检查点。
+    """校验断点续跑用的是真检查点，而不是静默退回的内存检查点。
 
     「静默退化」是本项目最需要防守的失败模式之一：内存检查点下一切自检都通过，
     但进程一旦重启，运行中的任务就再也接不回来。
+    file 模式期望 ``sqlite``；pg 模式期望 ``postgres``（PostgresSaver 在
+    orchestrator 导入期完成 setup，连不上会 fail-loud，走不到这一步）。
     """
+    storage_mode = (os.environ.get("CREATOR_STORAGE") or "file").strip().lower()
+    expected = "postgres" if storage_mode == "pg" else "sqlite"
     from app.core.orchestrator import orchestrator
 
     print("\n[断点续跑：检查点后端]")
     kind = orchestrator.checkpointer_kind
-    print(f"    后端={kind}" + (f"｜失败原因：{orchestrator.checkpointer_error}" if kind != "sqlite" else ""))
-    if kind != "sqlite":
-        print("    ! 检查点退回内存实现：进程重启后中断任务无法续跑")
+    print(f"    后端={kind}（期望 {expected}）"
+          + (f"｜失败原因：{orchestrator.checkpointer_error}" if kind != expected else ""))
+    if kind != expected:
+        print(f"    ! 检查点退回内存实现：进程重启后中断任务无法续跑（期望 {expected}）")
         return False
     return True
 
@@ -799,7 +825,7 @@ def check_otel(brief: dict) -> bool:
     from app.core import otel
     from app.core.orchestrator import orchestrator
     from app.core.store import task_store
-    from app.core.tracing import tracer
+    from app.core.tracing import EXPORT_DIR, tracer
     from app.core.types import Brief
 
     print("\n[OTLP 导出：链路与 id 一致性]")
@@ -845,6 +871,14 @@ def check_otel(brief: dict) -> bool:
         ):
             break
         _time.sleep(0.3)
+
+    # 状态终态 ≠ 追踪导出完成：orchestrator 先把状态落库、退出图后 _export 才
+    # 做 OTel 转发与落盘。只等状态会与导出赛跑（偶发 exported=0 的假失败，
+    # 第十四轮实测踩过）。落盘文件在 OTel 转发**之后**写出 —— 等它出现（或
+    # 短暂宽限后放弃，未采样 trace 本就不落盘）即可确定导出已结束。
+    export_deadline = _time.time() + 10
+    while _time.time() < export_deadline and not (EXPORT_DIR / f"{task.id}.json").exists():
+        _time.sleep(0.05)
 
     local = tracer.trace(task.id)
     exported = list(memory.get_finished_spans())
@@ -1359,12 +1393,27 @@ def check_video() -> bool:
     return decide_ok and timeline_ok and coverage_ok
 
 
+def _mask_url_for_print() -> str:
+    """掩码后的目标库连接串（绝不回显明文密码）。"""
+    from app.core.pg import database_url, mask_url
+
+    return mask_url(database_url())
+
+
 def main() -> int:
+    storage_mode = (os.environ.get("CREATOR_STORAGE") or "file").strip().lower()
+    if storage_mode == "pg" and (os.environ.get("CREATOR_DOCTOR_PG") or "") != "1":
+        print("PG 存储模式下，自检会把测试数据写入 CREATOR_DATABASE_URL 指向的数据库。")
+        print("如确认要跑：$env:CREATOR_DOCTOR_PG='1' 后重试（默认 file 模式无需配置）。")
+        return 1
     data_dir = isolate_data_dir()
     # 必须在导入 app.* 之前固定提供方：config 在 import 时读取环境变量
     provider = force_offline_provider()
     check_python()
     print(f"data dir    : {data_dir}")
+    print(f"存储层      : {storage_mode}" + (
+        f"（{_mask_url_for_print()}）" if storage_mode == "pg" else "（JSON + SQLite，零依赖）"
+    ))
     print(f"LLM 提供方  : {provider}（自检固定离线，保证秒级可复现；真实链路用 scripts/real_check.py）")
     print()
     check_deps()
@@ -1413,10 +1462,15 @@ def main() -> int:
     }
     print()
     if all(checks.values()):
+        checkpoint_label = (
+            "SQLite 检查点可用（断点续跑有效）"
+            if storage_mode == "file"
+            else "PostgresSaver 检查点可用（断点续跑有效，多副本可共享）"
+        )
         print(
             "自检通过：环境可用；Mock 引擎可在返工 1 轮后收敛；"
             "记忆库 RAG（关键词 + 向量混合）闭环成立且按租户隔离；发布排期具备自动投递的时间基础；"
-            "鉴权租户解析正确；SQLite 检查点可用（断点续跑有效）；离线评估器可复现且对合规风险敏感；"
+            f"鉴权租户解析正确；{checkpoint_label}；离线评估器可复现且对合规风险敏感；"
             "黄金数据集回归判定器能正确识别回退、失败与门禁强度下降；"
             "调用轨迹 span 树成型、层级正确且可按 OTel 形状导出；"
             "OTLP 导出链路 id 一致、层级与智能体归属保留；"

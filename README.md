@@ -149,7 +149,8 @@ OPENAI_API_KEY=sk-xxx OPENAI_MODEL=deepseek-chat python -m app.main
               │
 观测层      事件总线 + SSE / 调用轨迹 span 树（可选 OTLP → Jaeger）/ 指标聚合
               │
-持久层      JSON 文件 + SQLite 检查点（data/），可按接口替换为 PostgreSQL + Redis
+持久层      file 模式：JSON 文件 + SQLite 检查点（data/，零依赖）
+            pg 模式：PostgreSQL + Redis（CREATOR_STORAGE=pg，支持多副本）
 ```
 
 **技术栈**：Python 3.12 · FastAPI · LangGraph · Pydantic · React 19 + TypeScript + Vite 7
@@ -447,7 +448,7 @@ npm run typecheck && npm run build
 | 容器化与部署（镜像 + compose + k8s） | ✅ |
 | 断点续跑健康度可见性 | ✅ |
 | 跨进程 trace 传播 / 采样 | ✅ W3C traceparent 入站 + 出站；采样只作用于导出面（OTel 语义） |
-| 横向扩展（多副本） | ✅ 单副本完整可用；多副本替换契约已备（[`storage_contract.md`](storage_contract.md)），是否实施属部署方按需决策 |
+| 横向扩展（多副本） | ✅ 单副本 file 模式完整可用；`CREATOR_STORAGE=pg` 已实现 PostgreSQL + Redis 后端（任务/黑板/记忆库/评估/数字人作业入 PG，意图租约入 Redis，检查点用 PostgresSaver），迁移与验证脚本齐备（[`storage_contract.md`](storage_contract.md) §6） |
 | 真实模型链路压测与 Prompt 调优 | ✅ Prompt 收紧后已完成真实网关复测（质量分 62 → 65，门禁按设计生效，成本 $0.056/篇 远低于预算线） |
 | mock 引擎多语言 | ✅ 交付物 + 六个支撑产物全部目标语言原生（doctor 断言 9 类产物中文残留为 0） |
 
@@ -510,7 +511,7 @@ npm run typecheck && npm run build
 | # | 事项 | 为什么需要人 |
 |---|---|---|
 | 10 | **选定数字人服务商并决定是否正式接入** | 系统提供的是接入样例（内置引擎 + http 适配）；正式接入需明确产品形态并选型服务商，网关契约见 `DIGITAL_HUMAN_API_URL` 说明 |
-| 11 | **决定横向扩展方案** | 单副本完整可用；确需多副本时按 [`storage_contract.md`](storage_contract.md) 把黑板/检查点等换成 PostgreSQL + Redis（属架构与部署决策） |
+| 11 | **决定是否切换 pg 存储模式** | 双存储后端已实现：默认 `file`（单机零依赖）与 `CREATOR_STORAGE=pg`（PostgreSQL + Redis，多副本前提）。是否为生产环境启用 pg、PG/Redis 用托管还是自建，属架构与部署决策；切换步骤见 [`storage_contract.md`](storage_contract.md) §6 |
 | 12 | **接入 OTel Collector / Jaeger 生产实例** | 本地用 compose 里的 all-in-one 即可；生产需要持久化存储与采样策略 |
 | 13 | **建立人工抽检机制** | 评估与门禁能拦住大部分问题，但品牌调性与创意质量最终仍需人判断 |
 
@@ -535,7 +536,7 @@ npm run typecheck && npm run build
 | [`MEMORY.md`](MEMORY.md) | **开发进度与踩坑记录**：每轮变更、关键设计决策、79 条踩坑与验证结果 |
 | [`USER_GUIDE.md`](USER_GUIDE.md) | **用户操作手册**：启动、界面导览、实操流程、配置表、接口速查、FAQ |
 | [`ENGINEERING_PRINCIPLES.md`](ENGINEERING_PRINCIPLES.md) | **工程原则**：从 79 条踩坑提炼的团队开发约定（验证、契约、可失败设计、断言口径、环境） |
-| [`storage_contract.md`](storage_contract.md) | **存储层替换契约**：多副本前换 PostgreSQL + Redis 的接口签名、不变量与替换映射 |
+| [`storage_contract.md`](storage_contract.md) | **存储层契约（已实现）**：file / pg 双后端的接口签名、不变量、实体映射与切换步骤速查（`CREATOR_STORAGE=pg` → PostgreSQL + Redis） |
 
 ---
 

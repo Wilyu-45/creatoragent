@@ -169,15 +169,40 @@ class Orchestrator:
     # ---------------------------------------------------------------- #
 
     def _checkpointer(self) -> Any:
-        """优先使用 SQLite 检查点（可跨重启），失败则退回内存实现。
+        """按存储模式选择检查点后端。
 
-        两个容易踩的点：
-        1. 检查点在**导入期**就要打开数据库，而 ``ensure_dirs()`` 要等 lifespan
-           才执行，因此这里必须先自己建目录；
-        2. 建目录成功 ≠ 数据库能打开（例如目录被沙箱/权限限制时 ``sqlite3`` 会抛
-           ``unable to open database file``）。失败必须留下明确痕迹 —— 否则
-           「断点续跑」会静默失效，直到某天进程重启才发现任务全都没了。
+        * **file 模式**：优先 SQLite（可跨重启），失败退回内存实现并留下明确痕迹。
+          两个容易踩的点：
+          1. 检查点在**导入期**就要打开数据库，而 ``ensure_dirs()`` 要等 lifespan
+             才执行，因此这里必须先自己建目录；
+          2. 建目录成功 ≠ 数据库能打开（例如目录被沙箱/权限限制时 ``sqlite3`` 会抛
+             ``unable to open database file``）。失败必须留下明确痕迹 —— 否则
+             「断点续跑」会静默失效，直到某天进程重启才发现任务全都没了。
+        * **pg 模式**：``PostgresSaver``（检查点落库，多副本可共享续跑）。
+          连接失败**直接终止启动**（契约 storage_contract.md「移除静默退回」）——
+          多副本下退回内存检查点会让各副本各自为政，比单机不可用更危险。
         """
+        from ..config import STORAGE_MODE
+
+        if STORAGE_MODE == "pg":
+            from .pg import pg_pool
+
+            try:
+                from langgraph.checkpoint.postgres import PostgresSaver
+
+                saver = PostgresSaver(pg_pool())
+                saver.setup()  # 建齐检查点表（幂等，可重入）
+                self.checkpointer_kind = "postgres"
+                self.checkpointer_error = ""
+                return saver
+            except Exception as error:  # noqa: BLE001
+                self.checkpointer_kind = "memory"
+                self.checkpointer_error = f"{type(error).__name__}: {error}"
+                raise RuntimeError(
+                    "PG 模式下初始化 PostgresSaver 检查点失败（fail-loud，拒绝静默退回内存）："
+                    f"{self.checkpointer_error}；请确认 CREATOR_DATABASE_URL 可达"
+                ) from error
+
         try:
             CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(CHECKPOINT_FILE), check_same_thread=False)

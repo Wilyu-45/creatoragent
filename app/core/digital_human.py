@@ -50,48 +50,94 @@ STORE_FILE = DATA_DIR / "digital_human.json"
 #: http 适配样例的两次远端轮询最小间隔（秒）：避免列表刷新打爆远端
 _HTTP_POLL_INTERVAL = 2.0
 
-_STORE_LOCK = threading.RLock()
-_JOBS: dict[str, dict[str, Any]] | None = None
-_DIRTY = False
+#: 作业持久化后端（懒建单例；pg 模式用 PostgreSQL，file 模式用 JSON 文件）
+_BACKEND: "_FileJobBackend | PgJobBackend | None" = None
 
 
 # ------------------------------------------------------------------ #
-# 存储：懒加载 + 原子写盘                                             #
+# 存储：后端选择（file = JSON 文件；pg = PostgreSQL，契约同 storage_contract.md）
 # ------------------------------------------------------------------ #
 
 
-def _load_locked() -> dict[str, dict[str, Any]]:
-    global _JOBS, _DIRTY
-    if _JOBS is None:
-        _JOBS = {}
-        try:
-            raw = json.loads(STORE_FILE.read_text(encoding="utf-8"))
-            for job in raw.get("jobs") or []:
-                if isinstance(job, dict) and job.get("id"):
-                    _JOBS[str(job["id"])] = job
-        except FileNotFoundError:
-            pass
-        except (OSError, ValueError) as error:
-            log.warn(f"数字人任务存储读取失败（按空库继续）：{error}")
-        _DIRTY = False
-    return _JOBS
+class _FileJobBackend:
+    """file 模式后端：进程内字典 + 原子写盘（原有行为，逻辑原样保留）。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._jobs: dict[str, dict[str, Any]] | None = None
+        self._dirty = False
+
+    def _load_locked(self) -> dict[str, dict[str, Any]]:
+        if self._jobs is None:
+            self._jobs = {}
+            try:
+                raw = json.loads(STORE_FILE.read_text(encoding="utf-8"))
+                for job in raw.get("jobs") or []:
+                    if isinstance(job, dict) and job.get("id"):
+                        self._jobs[str(job["id"])] = job
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as error:
+                log.warn(f"数字人任务存储读取失败（按空库继续）：{error}")
+            self._dirty = False
+        return self._jobs
+
+    def _save_locked(self) -> None:
+        if not self._dirty:
+            return
+        payload = {"jobs": sorted(self._jobs.values(), key=lambda job: job.get("created_at") or "")}
+        STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STORE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, STORE_FILE)
+        self._dirty = False
+
+    def create(self, job: dict[str, Any]) -> None:
+        with self._lock:
+            jobs = self._load_locked()
+            jobs[str(job["id"])] = job
+            self._dirty = True
+            self._save_locked()
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(job) for job in self._load_locked().values()]
+
+    def write_back(self, jobs: list[dict[str, Any]]) -> None:
+        """推进结果回写（以 id 对齐，保留期间新建的作业）。"""
+        with self._lock:
+            live = self._load_locked()
+            for job in jobs:
+                if job.get("id") in live:
+                    live[str(job["id"])] = job
+            self._dirty = True
+            self._save_locked()
+
+    def drop_task(self, task_id: str) -> int:
+        with self._lock:
+            jobs = self._load_locked()
+            doomed = [job_id for job_id, job in jobs.items() if str(job.get("task_id")) == task_id]
+            for job_id in doomed:
+                jobs.pop(job_id, None)
+            if doomed:
+                self._dirty = True
+                self._save_locked()
+        return len(doomed)
 
 
-def _save_locked() -> None:
-    global _DIRTY
-    if not _DIRTY:
-        return
-    payload = {"jobs": sorted(_JOBS.values(), key=lambda job: job.get("created_at") or "")}
-    STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STORE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, STORE_FILE)
-    _DIRTY = False
+def _job_backend() -> "_FileJobBackend | PgJobBackend":
+    """按 ``CREATOR_STORAGE`` 选择作业后端；PG 实现延迟 import（file 模式零依赖）。"""
+    global _BACKEND
+    if _BACKEND is None:
+        from ..config import STORAGE_MODE
 
+        if STORAGE_MODE == "pg":
+            from .dh_jobs_pg import PgJobBackend
 
-def _mark_dirty() -> None:
-    global _DIRTY
-    _DIRTY = True
+            _BACKEND = PgJobBackend()
+        else:
+            _BACKEND = _FileJobBackend()
+    return _BACKEND
 
 
 # ------------------------------------------------------------------ #
@@ -397,11 +443,7 @@ def create_job(
         "manifest": manifest,
         "history": [{"ts": now_iso(), "from": "", "to": "queued", "note": "渲染任务已受理"}],
     }
-    with _STORE_LOCK:
-        jobs = _load_locked()
-        jobs[job_id] = job
-        _mark_dirty()
-        _save_locked()
+    _job_backend().create(job)
 
     with tracer.span_on_task(
         task.id,
@@ -425,26 +467,23 @@ def create_job(
         if chosen == "http":
             # http provider 立即提交一次；失败在作业上记账，不向上抛
             _advance_http(job, moment)
-            with _STORE_LOCK:
-                _mark_dirty()
-                _save_locked()
+            _job_backend().write_back([job])
     log.info(f"数字人渲染任务已创建：{job_id}（task={task.id}, provider={chosen}）")
     return dict(job)
 
 
 def _refresh(job: dict[str, Any], now: datetime) -> None:
-    """惰性推进一个作业的状态（样例按流逝时间，http 按远端状态）。"""
+    """惰性推进一个作业的状态（样例按流逝时间，http 按远端状态）。
+
+    纯状态推进，不碰持久化 —— 回写由 ``list_jobs`` 统一做（仅状态有变化时）。
+    """
     if job.get("status") in ("done", "failed"):
         return
-    before = str(job.get("status"))
     if job.get("provider") == "http":
         with tracer.span_on_task(str(job.get("task_id")), "digitalhuman.poll", kind="client"):
             _advance_http(job, now)
     else:
         _advance_sample(job, now)
-    if str(job.get("status")) != before:
-        with _STORE_LOCK:
-            _mark_dirty()
 
 
 def list_jobs(
@@ -453,24 +492,20 @@ def list_jobs(
     """列出渲染作业（读取时惰性推进状态），新→旧排序。
 
     ``tenant`` 用于鉴权开启时把结果限定在当前租户内。
-    推进逻辑（含 http provider 的远端轮询）在**锁外**执行，网络慢不阻塞其他调用方。
+    推进逻辑（含 http provider 的远端轮询）在**持久化之外**执行，
+    网络慢不阻塞其他调用方；仅状态有变化的作业才回写。
     """
+    backend = _job_backend()
     moment = now or datetime.now(timezone.utc)
-    with _STORE_LOCK:
-        snapshot = [dict(job) for job in _load_locked().values()]
-    changed = False
+    snapshot = [dict(job) for job in backend.snapshot()]
+    changed: list[dict[str, Any]] = []
     for job in snapshot:
         before_status = str(job.get("status"))
         _refresh(job, moment)
         if str(job.get("status")) != before_status:
-            changed = True
+            changed.append(job)
     if changed:
-        with _STORE_LOCK:
-            live = _load_locked()
-            for job in snapshot:  # 推进结果回写（以 id 对齐，保留期间新建的作业）
-                if job.get("id") in live:
-                    live[str(job["id"])] = job
-            _save_locked()
+        backend.write_back(changed)
     rows = [
         job
         for job in snapshot
@@ -489,15 +524,7 @@ def get_job(job_id: str, *, tenant: str | None = None) -> dict[str, Any] | None:
 
 def drop_task(task_id: str) -> int:
     """任务被删除时回收其渲染作业（与 tracer.drop / event_bus.drop 同一时机）。"""
-    with _STORE_LOCK:
-        jobs = _load_locked()
-        doomed = [job_id for job_id, job in jobs.items() if str(job.get("task_id")) == task_id]
-        for job_id in doomed:
-            jobs.pop(job_id, None)
-        if doomed:
-            _mark_dirty()
-            _save_locked()
-    return len(doomed)
+    return _job_backend().drop_task(task_id)
 
 
 __all__ = [

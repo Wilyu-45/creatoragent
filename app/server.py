@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.routes import create_api_router
-from .config import API_TOKENS, ROOT_DIR, ensure_dirs, get_config
+from .config import API_TOKENS, ROOT_DIR, STORAGE_MODE, ensure_dirs, get_config
 from .core import otel
 from .core.blackboard import blackboard
 from .core.orchestrator import orchestrator
@@ -33,6 +33,22 @@ DIST_DIR = ROOT_DIR / "dist"
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     ensure_dirs()
+
+    # pg 模式启动自检（fail-loud）：schema 建齐 + Redis 连通。任一失败直接终止
+    # 启动 —— 多副本下静默降级会让各副本状态分裂，比单机不可用更危险
+    # （契约 storage_contract.md「移除静默退回」）。
+    if STORAGE_MODE == "pg":
+        from .core.pg_schema import ensure_pg_schema
+        from .core.redis_client import ping_redis
+
+        try:
+            ensure_pg_schema()
+            ping_redis()
+        except Exception as error:  # noqa: BLE001
+            log.error("存储层启动自检失败，拒绝启动（fail-loud）", error)
+            raise
+        log.info("存储层自检通过：PostgreSQL schema 就绪、Redis 连通")
+
     info: dict[str, Any] = task_store.load_all()
     blackboard.load()
 

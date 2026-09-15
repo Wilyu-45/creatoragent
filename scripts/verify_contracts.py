@@ -81,7 +81,10 @@ try:
     with httpx.Client(base_url=BASE, timeout=30.0) as client:
         print("[GET /api/health]")
         health = client.get("/api/health").json()
-        check("checkpointer.kind", health["checkpointer"]["kind"], "sqlite")
+        # 存储模式决定检查点后端：file → sqlite；pg → postgres（子进程环境已透传）
+        storage_mode = (os.environ.get("CREATOR_STORAGE") or "file").strip().lower()
+        expected_kind = "postgres" if storage_mode == "pg" else "sqlite"
+        check("checkpointer.kind", health["checkpointer"]["kind"], expected_kind)
         check("provider.name", health["provider"]["name"], "mock")
 
         print("[GET /（静态托管，含新构建的前端）]")

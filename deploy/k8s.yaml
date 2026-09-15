@@ -6,7 +6,10 @@
 # 设计取舍（单机/小集群取向）：
 # * **单副本 + Recreate**：当前持久化是本地 JSON + SQLite 检查点，
 #   多副本会各写各的导致状态分裂。要横向扩展必须先换掉存储层
-#   （PostgreSQL + Redis，见 plan.md 5.1 的替换路径），因此这里刻意不假装支持。
+#   （PostgreSQL + Redis，见 plan.md 5.1 的替换路径与 storage_contract.md，
+#   代码已按 CREATOR_STORAGE=pg 实现此路径），因此这里刻意不假装支持。
+#   部署方切换 pg 模式后的扩缩容决策（replicas、PostgreSQL/Redis 的托管与
+#   连接串注入）由部署方负责，本清单保持单机默认不动。
 # * **镜像用占位名**：CI 推镜像时替换 `image:`（或用 kustomize/helm 覆盖）。
 # * Secret 与 ConfigMap 分离：令牌、模型密钥进 Secret，其余进 ConfigMap。
 

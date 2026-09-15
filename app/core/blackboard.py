@@ -326,4 +326,15 @@ class Blackboard:
         )
 
 
-blackboard = Blackboard()
+def _build_blackboard():
+    """按 ``CREATOR_STORAGE`` 选择后端；PG + Redis 实现延迟 import（file 模式零依赖）。"""
+    from ..config import STORAGE_MODE
+
+    if STORAGE_MODE == "pg":
+        from .blackboard_pg import PgBlackboard
+
+        return PgBlackboard()
+    return Blackboard()
+
+
+blackboard = _build_blackboard()

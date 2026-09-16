@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.types import AgentResult
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -110,6 +111,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
     big_idea = as_obj(creative.get("big_idea"))
 
     ctx.emit("把创意方向拆解为选题与内容大纲")
+    tools = run_agent_tools(ctx, META)
 
     user = f"""【创作 Brief】
 品牌：{brief.brand}｜产品：{brief.product}｜渠道：{brief.channel}｜目标：{brief.objective}
@@ -124,7 +126,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 Big Idea：{as_str(big_idea.get('title'))} —— {as_str(big_idea.get('statement'))}
 推荐方向：{as_str(creative.get('recommended_direction'))}
 
-请输出选题清单、内容大纲与渠道适配表，严格要求 JSON 结构如下：
+{tools.prompt_block()}请输出选题清单、内容大纲与渠道适配表，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -133,7 +135,7 @@ Big Idea：{as_str(big_idea.get('title'))} —— {as_str(big_idea.get('statemen
         SYSTEM,
         user,
         "A3.plan",
-        {"brief": brief.model_dump(mode="json"), "strategy": strategy, "creative": creative},
+        {"brief": brief.model_dump(mode="json"), "strategy": strategy, "creative": creative, "tools": tools.context()},
         schema=SCHEMA,
     )
     content = normalize(result.data)

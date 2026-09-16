@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.types import AgentResult
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -121,6 +122,7 @@ def _run_estimate(ctx: AgentRunContext) -> AgentResult:
     strategy = ctx.upstream_of("strategy")
 
     ctx.emit("基于内容版本与渠道规则做效果预估（发布前）")
+    tools = run_agent_tools(ctx, META)
 
     recommended = as_str(draft.get("recommended_version"), "V1")
     target = next(
@@ -141,7 +143,7 @@ def _run_estimate(ctx: AgentRunContext) -> AgentResult:
 【策略目标】
 {objectives_text or '（未指定）'}
 
-请给出效果预估区间、归因、优化建议与 A/B 方案，严格要求 JSON 结构如下：
+{tools.prompt_block()}请给出效果预估区间、归因、优化建议与 A/B 方案，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -156,6 +158,7 @@ def _run_estimate(ctx: AgentRunContext) -> AgentResult:
             "plan": plan,
             "draft": draft,
             "revision": ctx.revision,
+            "tools": tools.context(),
         },
     )
 
@@ -203,6 +206,7 @@ def _run_review(ctx: AgentRunContext, actuals: dict[str, Any]) -> AgentResult:
     window = as_str(actuals.get("window"), "发布后 72 小时")
 
     ctx.emit("收到运营回填的真实效果数据，开始发布后复盘")
+    tools = run_agent_tools(ctx, META)
 
     user = f"""【复盘对象】{brief.channel}｜观察窗口：{window}
 品牌：{brief.brand}｜目标：{brief.objective}｜受众：{brief.audience}
@@ -214,7 +218,7 @@ def _run_review(ctx: AgentRunContext, actuals: dict[str, Any]) -> AgentResult:
 【发布前预估（用于对照，可能缺失）】
 {content_to_text(predicted) if predicted else '（无预估基线，请只做绝对表现解读，不要编造对照数据）'}
 
-请输出复盘报告，严格要求 JSON 结构如下：
+{tools.prompt_block()}请输出复盘报告，严格要求 JSON 结构如下：
 {REVIEW_SCHEMA}"""
 
     result = call_with_prompts(
@@ -227,6 +231,7 @@ def _run_review(ctx: AgentRunContext, actuals: dict[str, Any]) -> AgentResult:
             "brief": brief.model_dump(mode="json"),
             "actuals": actuals,
             "predicted": predicted,
+            "tools": tools.context(),
         },
     )
 

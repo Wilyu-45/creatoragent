@@ -29,6 +29,7 @@ from typing import Any
 from ..core.types import AgentResult, Evidence
 from ..knowledge.industry import channel_rule
 from ..knowledge.memory import evidence_from_hits, memory_store, render_hits
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -152,6 +153,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
     analysis = ctx.upstream_of("analysis")
 
     ctx.emit("汇总全链路产物，提炼可复用知识卡片并登记知识缺口")
+    tools = run_agent_tools(ctx, META)
 
     scorecard = as_obj(edit.get("scorecard"))
     compliance_score = compliance.get("compliance_score")
@@ -212,7 +214,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 【效果预估】{as_str(alignment.get('note'))}
 【轮次】返工 {ctx.revision} 轮｜历史产物 {len(ctx.artifacts)} 件
 
-{render_hits(recalled)}请输出知识沉淀方案，严格要求 JSON 结构如下：
+{render_hits(recalled)}{tools.prompt_block()}请输出知识沉淀方案，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -235,6 +237,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
             "revision": ctx.revision,
             "artifact_count": len(ctx.artifacts),
             "memory": recalled,
+            "tools": tools.context(),
         },
         schema=SCHEMA,
     )

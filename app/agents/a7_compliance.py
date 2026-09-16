@@ -6,6 +6,7 @@ from typing import Any
 
 from ..core.types import AgentResult, GateResult
 from ..knowledge.language import compliance_coverage
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -109,6 +110,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
     brief = ctx.brief
     draft = ctx.upstream_of("draft")
     ctx.emit("开始品牌一致性与广告法合规扫描")
+    tools = run_agent_tools(ctx, META)
 
     recommended = as_str(draft.get("recommended_version"), "V1")
     target = next(
@@ -128,7 +130,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 品牌：{brief.brand}｜行业：{brief.industry}｜要求调性：{brief.tone}
 品牌约束：{'；'.join(brief.constraints) or '（未指定）'}
 
-请输出合规报告，严格要求 JSON 结构如下：
+{tools.prompt_block()}请输出合规报告，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -137,7 +139,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
         SYSTEM,
         user,
         "A7.compliance",
-        {"brief": brief.model_dump(mode="json"), "draft": draft, "revision": ctx.revision},
+        {"brief": brief.model_dump(mode="json"), "draft": draft, "revision": ctx.revision, "tools": tools.context()},
     )
 
     content = normalize(result.data)

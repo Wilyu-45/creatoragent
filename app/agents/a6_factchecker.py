@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.types import AgentResult, GateResult
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -103,6 +104,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
     brief = ctx.brief
     draft = ctx.upstream_of("draft")
     ctx.emit("开始核查文案中的数据、引用与主张来源")
+    tools = run_agent_tools(ctx, META)
 
     recommended = as_str(draft.get("recommended_version"), "V1")
     target = next(
@@ -126,7 +128,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 {claims_text or '（作者未声明主张，请自行从正文中抽取）'}
 
 行业：{brief.industry}
-请逐条核查并给出风险等级与修改要求，严格要求 JSON 结构如下：
+{tools.prompt_block()}请逐条核查并给出风险等级与修改要求，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -135,7 +137,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
         SYSTEM,
         user,
         "A6.factcheck",
-        {"brief": brief.model_dump(mode="json"), "draft": draft, "revision": ctx.revision},
+        {"brief": brief.model_dump(mode="json"), "draft": draft, "revision": ctx.revision, "tools": tools.context()},
         schema=SCHEMA,
     )
 

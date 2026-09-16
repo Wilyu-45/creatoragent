@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.types import AgentResult
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -97,6 +98,7 @@ def normalize(data: dict[str, Any], fallback_audience: str) -> dict[str, Any]:
 def run(ctx: AgentRunContext) -> AgentResult:
     brief = ctx.brief
     ctx.emit("开始分析受众、场景与传播目标")
+    tools = run_agent_tools(ctx, META)
 
     user = f"""【创作 Brief】
 品牌：{brief.brand}
@@ -110,7 +112,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 硬性约束：{'；'.join(brief.constraints) or '（未指定）'}
 补充说明：{brief.notes or '（无）'}
 
-{memory_block(ctx)}请输出策略简报，严格要求 JSON 结构如下：
+{memory_block(ctx)}{tools.prompt_block()}请输出策略简报，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -119,7 +121,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
         SYSTEM,
         user,
         "A1.strategy",
-        {"brief": brief.model_dump(mode="json"), "memory": ctx.memory},
+        {"brief": brief.model_dump(mode="json"), "memory": ctx.memory, "tools": tools.context()},
     )
     content = normalize(result.data, brief.audience)
 

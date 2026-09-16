@@ -16,6 +16,7 @@ from typing import Any
 
 from ..core.types import AgentResult
 from ..knowledge.industry import channel_rule, publish_slots, seo_pattern, title_limit
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -166,6 +167,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
     strategy = ctx.upstream_of("strategy")
 
     ctx.emit(f"按 {brief.channel} 规则适配标题与标签，并布局搜索关键词")
+    tools = run_agent_tools(ctx, META)
 
     recommended = as_str(draft.get("recommended_version"), "V1")
     target = next(
@@ -187,7 +189,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 【主推文案正文】
 {as_str(target.get('body'))[:600]}
 
-请输出渠道适配方案，严格要求 JSON 结构如下：
+{tools.prompt_block()}请输出渠道适配方案，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -202,6 +204,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
             "plan": plan,
             "draft": draft,
             "revision": ctx.revision,
+            "tools": tools.context(),
         },
     )
 

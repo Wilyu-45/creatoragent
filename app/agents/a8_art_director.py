@@ -16,6 +16,7 @@ from ..core.types import AgentResult
 from ..knowledge.industry import channel_rule
 from ..knowledge.video import needs_video_script
 from ..knowledge.visual import DEFAULT_STYLE, channel_visual_spec
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -214,6 +215,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
     draft = ctx.upstream_of("draft")
 
     ctx.emit("基于创意方向与渠道形态制定视觉方案，并校验图文一致性")
+    tools = run_agent_tools(ctx, META)
 
     recommended = as_str(draft.get("recommended_version"), "V1")
     target = next(
@@ -231,7 +233,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 【主推文案正文】
 {as_str(target.get('body'))[:600]}
 
-请输出视觉方案（含视觉方向、色彩、配图 Prompt、分镜、版式与图文一致性校验），
+{tools.prompt_block()}请输出视觉方案（含视觉方向、色彩、配图 Prompt、分镜、版式与图文一致性校验），
 严格要求 JSON 结构如下：
 {SCHEMA}"""
 
@@ -246,6 +248,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
             "creative": creative,
             "draft": draft,
             "revision": ctx.revision,
+            "tools": tools.context(),
         },
     )
 

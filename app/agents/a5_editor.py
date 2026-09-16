@@ -6,6 +6,7 @@ from typing import Any
 
 from ..core.types import AgentResult, ReviewItem
 from ..core.util import js_round
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -111,6 +112,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
     brief = ctx.brief
     draft = ctx.upstream_of("draft")
     ctx.emit("开始审校：结构、表达、品牌语气")
+    tools = run_agent_tools(ctx, META)
 
     recommended = as_str(draft.get("recommended_version"), "V1")
     target = next(
@@ -129,7 +131,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 CTA：{as_str(target.get('cta'))}
 话题标签：{' '.join(as_str_array(target.get('hashtags')))}
 
-请完成审校并输出修订稿、修改说明与质量评分，严格要求 JSON 结构如下：
+{tools.prompt_block()}请完成审校并输出修订稿、修改说明与质量评分，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -138,7 +140,7 @@ CTA：{as_str(target.get('cta'))}
         SYSTEM,
         user,
         "A5.edit",
-        {"brief": brief.model_dump(mode="json"), "draft": draft, "revision": ctx.revision},
+        {"brief": brief.model_dump(mode="json"), "draft": draft, "revision": ctx.revision, "tools": tools.context()},
         schema=SCHEMA,
     )
 

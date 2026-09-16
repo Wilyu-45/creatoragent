@@ -7,6 +7,7 @@ from typing import Any
 
 from ..core.types import AgentResult
 from ..knowledge.industry import channel_rule
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -137,6 +138,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
     ctx.emit(
         f"按 {len(ctx.feedback)} 条审校意见修订文案" if is_revision else "开始撰写多版本文案"
     )
+    tools = run_agent_tools(ctx, META)
 
     revision_block = ""
     if is_revision:
@@ -162,7 +164,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 选定选题：{as_str(plan.get('selected_topic'))}
 标题备选：{' / '.join(as_str_array(plan.get('headline_candidates')))}
 
-{memory_block(ctx)}{revision_block}请撰写 3 个版本文案，并声明全部关键主张，严格要求 JSON 结构如下：
+{memory_block(ctx)}{tools.prompt_block()}{revision_block}请撰写 3 个版本文案，并声明全部关键主张，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -179,6 +181,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
             "feedback": ctx.feedback,
             "revision": ctx.revision,
             "memory": ctx.memory,
+            "tools": tools.context(),
         },
         schema=SCHEMA,
     )

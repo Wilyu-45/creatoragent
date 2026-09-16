@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.types import AgentResult
+from ..tools import run_agent_tools
 from .base import (
     AgentDefinition,
     AgentMeta,
@@ -109,6 +110,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
     audience = as_obj(strategy.get("audience_profile"))
 
     ctx.emit("基于策略简报推导 Big Idea 与创意方向")
+    tools = run_agent_tools(ctx, META)
 
     user = f"""【创作 Brief】
 品牌：{brief.brand}｜产品：{brief.product}｜渠道：{brief.channel}｜调性：{brief.tone}
@@ -121,7 +123,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 使用场景：{'；'.join(as_str_array(audience.get('scenarios')))}
 核心动机：{'；'.join(as_str_array(audience.get('motivations')))}
 
-{memory_block(ctx)}请给出 Big Idea、2-3 个创意方向与调性指南，严格要求 JSON 结构如下：
+{memory_block(ctx)}{tools.prompt_block()}请给出 Big Idea、2-3 个创意方向与调性指南，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(
@@ -130,7 +132,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
         SYSTEM,
         user,
         "A2.creative",
-        {"brief": brief.model_dump(mode="json"), "strategy": strategy, "memory": ctx.memory},
+        {"brief": brief.model_dump(mode="json"), "strategy": strategy, "memory": ctx.memory, "tools": tools.context()},
     )
     content = normalize(result.data)
     directions = as_obj_array(content["directions"])

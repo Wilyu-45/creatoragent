@@ -36,6 +36,7 @@ from .base import (
     read_evidence,
     read_risks,
     system_prompt,
+    vision_attachments,
 )
 
 META = AgentMeta(
@@ -61,10 +62,23 @@ SYSTEM = system_prompt(
 
 硬性规则：
 - 视觉描述必须可执行（风格词 + 光线 + 构图），禁止只写「高级感」这类空洞形容词
+- **每条 image_prompts 必须带 negative 与 aspect_ratio**，且 aspect_ratio 与
+  工具给出的渠道规格（主图/封面画幅）一致——缺任一项视为不合格产出
 - 不得承诺能生成特定真实人物、受版权保护或平台禁止的素材
 - 产品外观、材质、功效的画面表现必须与文案表述一致，
   禁止用画面暗示文案未声明的功效（否则会绕过 A7 合规门禁）
-- 只输出 JSON，不输出任何解释性文字""",
+- **Brief 自带素材（参考素材清单）是已知事实**：画幅以清单标注的实测值为准，
+  不得凭空描述素材内容；能读图时以画面为准，不能读图时只依据文字描述与用途说明
+- 只输出 JSON，不输出任何解释性文字
+
+工具用法：
+- 先看 image_prompt_lint 给出的「文案→画面必兑现要素」，逐条落进 prompt；
+  它列出的自查清单要在输出前逐项过一遍（画幅一致、负面词齐备、不含违禁主体）
+- asset_spec_check 给出的是 Brief 素材的**实测画幅与渠道规格的逐条比对**：
+  标为「可直接用作封面」的素材应在方案中复用而非重新生成，
+  标为「不一致」的要给出重裁或安全区处理方式
+- lint 是对**上游视觉建议**的规范性检查，不是对你最终产出的自动验收，
+  最终画面是否兑现文案仍由你在 copy_visual_check 中负责说明""",
 )
 
 SCHEMA = """{
@@ -250,6 +264,8 @@ def run(ctx: AgentRunContext) -> AgentResult:
             "revision": ctx.revision,
             "tools": tools.context(),
         },
+        # 美术指导必须看到已有素材才能谈一致性（色调/构图/画幅），图像随本次调用发送
+        images=vision_attachments(ctx),
     )
 
     content = normalize(result.data, brief.channel)

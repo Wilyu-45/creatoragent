@@ -3485,7 +3485,7 @@ class MockProvider:
 
         payload = generator(context)
         content = json.dumps(payload, ensure_ascii=False, indent=2)
-        prompt_text = "\n".join(m.content for m in request.messages)
+        prompt_text = "\n".join(m.text for m in request.messages)
 
         return LLMResponse(
             content=content,

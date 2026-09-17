@@ -78,6 +78,35 @@ PHASE_LABEL: dict[str, str] = {
 
 Priority = Literal["low", "normal", "high", "urgent"]
 
+#: 素材形态（plan.md v2.0「多模态理解」）
+AssetKind = Literal["image", "video", "document", "link"]
+
+
+class BriefAsset(BaseModel):
+    """Brief 附带的参考素材。
+
+    三种指向方式（由 ``app/core/assets.py`` 统一解析）：
+
+    * 公网图片/视频地址（``https://...``）——多模态模型自行拉取；
+    * 内联 data URL——调用方已在别处取到字节时使用；
+    * ``assets/`` 目录下的**相对**文件名——本地素材的唯一入口，
+      绝对路径与 ``..`` 越界一律拒绝（Brief 来自 API 调用方，不能当本机
+      文件读取原语用）。
+
+    ``note`` 是使用者对素材的口头说明（「这是上一版的封面」），会原样进提示词；
+    它同时也是图片进入离线链路时的文字视图来源。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: AssetKind = "image"
+    #: 图片/视频地址、data URL，或 ``assets/`` 下的相对文件名
+    ref: str = ""
+    #: 素材名（如「产品正面图」）
+    title: str = ""
+    #: 用途说明（会原样进入提示词）
+    note: str = ""
+
 
 class Brief(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -98,6 +127,8 @@ class Brief(BaseModel):
     notes: str = ""
     priority: Priority = "normal"
     deadline: str | None = None
+    #: 参考素材（多模态输入）。默认空列表：不带素材的任务与历史行为完全一致。
+    assets: list[BriefAsset] = Field(default_factory=list)
 
 
 def create_empty_brief() -> Brief:
@@ -117,6 +148,7 @@ def create_empty_brief() -> Brief:
         notes="",
         priority="normal",
         deadline=None,
+        assets=[],
     )
 
 

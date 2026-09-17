@@ -29,6 +29,10 @@ BLACKBOARD_FILE = DATA_DIR / "blackboard.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 #: A11 记忆库（跨任务知识卡片），供其他智能体做 RAG 召回。
 MEMORY_FILE = DATA_DIR / "memory.json"
+#: Brief 素材目录（plan.md v2.0「多模态理解」）：本地图片素材只允许放在这里，
+#: 由 ``app/core/assets.py`` 读取并内联为 data URL。**不接受任意绝对路径** ——
+#: Brief 可来自 API 调用方，放开绝对路径等于给模型一个本机文件读取原语。
+ASSETS_DIR = DATA_DIR / "assets"
 #: LLM-as-a-Judge 评估历史（plan.md 4.3 D14），用于 Prompt 回归与黄金集评测。
 EVAL_FILE = DATA_DIR / "evaluations.json"
 #: LangGraph checkpointer 的落地位置：用于人工审批中断后的断点续跑。
@@ -40,6 +44,8 @@ DigitalHumanProviderName = Literal["sample", "http"]
 EmbeddingProviderName = Literal["local", "openai"]
 JudgeModeName = Literal["off", "advisory", "blocking"]
 JudgeProviderName = Literal["offline", "llm"]
+#: 联网检索提供方：none = 不联网（默认，离线可跑）；http = 走自建搜索网关
+SearchProviderName = Literal["none", "http"]
 
 #: 存储后端：file（默认，JSON + SQLite，零依赖离线可跑）| pg（PostgreSQL + Redis，支持多副本）。
 #: 替换契约与实现指引见 storage_contract.md；PG 实现只在 ``pg`` 模式下被 import（零依赖保证）。
@@ -86,6 +92,14 @@ class LLMSettings:
     temperature: float = 0.7
     max_tokens: int = 2048
     timeout_ms: int = 60_000
+    #: 是否把 Brief 素材里的图片作为多模态输入发给模型（plan.md v2.0「多模态理解」）。
+    #: **默认关闭**：绝大多数 OpenAI 兼容文本模型（DeepSeek chat/flash、通义 qwen-plus、
+    #: 本地 Ollama 文本模型…）收到图片内容块会直接返回 400，而这是不可重试的确定性失败，
+    #: 只会让该智能体降级到离线引擎——默认开启等于给按默认配置跑通的链路埋雷。
+    #: 确认所用模型支持读图后打开；素材的**文字清单**不受此项影响，始终可用。
+    vision: bool = False
+    #: 单次创作最多注入的图片数：多模态输入按图片计费，且图多了会挤占文本预算
+    vision_max_images: int = 3
 
 
 @dataclass
@@ -171,6 +185,34 @@ class DigitalHumanSettings:
 
 
 @dataclass
+class SearchSettings:
+    """联网检索接入设置（A1/A2/A6/A10 的 ``web_search`` / ``page_fetch`` 工具）。
+
+    检索**不内置任何搜索服务**：各家的配额、计费与返回结构差异极大，
+    这里只定义「POST 查询 → JSON 结果」的最小契约（``app/core/web.py``），
+    由使用者指向自己的搜索网关（SerpAPI / Bing / 自建聚合均可）。
+
+    * ``none``（默认）：完全离线。工具会如实返回「未配置联网检索」，
+      智能体据此**不得声称已联网核实**——离线可跑通的默认体验不受影响；
+    * ``http``：按 ``WEB_SEARCH_API_URL`` 启用真实检索。
+    """
+
+    provider: SearchProviderName = "none"
+    #: http 适配器的检索端点（POST）；为空时 http provider 直接报「未配置」
+    api_url: str = ""
+    #: 调用上述端点的鉴权头（以 ``Bearer `` 前缀拼接）
+    api_key: str = ""
+    #: 单次检索返回的结果条数上限（同时限制进入提示词的篇幅）
+    max_results: int = 5
+    #: 单次请求超时（毫秒）；检索是旁路能力，超时必须短于创作链路可接受时延
+    timeout_ms: int = 8_000
+    #: 是否允许 ``page_fetch`` 抓取检索结果页正文（关掉则只给标题与摘要）
+    fetch_pages: bool = True
+    #: 单次 ``page_fetch`` 最多抓取的页面数
+    max_pages: int = 2
+
+
+@dataclass
 class TracingSettings:
     """分布式追踪设置（plan.md 2.4）。
 
@@ -213,6 +255,7 @@ class RuntimeConfig:
     publish: PublishSettings = field(default_factory=PublishSettings)
     judge: JudgeSettings = field(default_factory=JudgeSettings)
     digital_human: DigitalHumanSettings = field(default_factory=DigitalHumanSettings)
+    search: SearchSettings = field(default_factory=SearchSettings)
     tracing: TracingSettings = field(default_factory=TracingSettings)
 
 
@@ -257,6 +300,8 @@ def _build_config() -> RuntimeConfig:
             temperature=_num(os.environ.get("LLM_TEMPERATURE"), 0.7),
             max_tokens=_int(os.environ.get("LLM_MAX_TOKENS"), 2048),
             timeout_ms=_int(os.environ.get("LLM_TIMEOUT_MS"), 60_000),
+            vision=_bool(os.environ.get("LLM_VISION"), False),
+            vision_max_images=min(8, max(0, _int(os.environ.get("LLM_VISION_MAX_IMAGES"), 3))),
         ),
         embedding=EmbeddingSettings(
             provider=_embedding_provider(),
@@ -288,6 +333,15 @@ def _build_config() -> RuntimeConfig:
             avatar=(os.environ.get("DIGITAL_HUMAN_AVATAR") or "").strip(),
             timeout_ms=max(1_000, _int(os.environ.get("DIGITAL_HUMAN_TIMEOUT_MS"), 10_000)),
         ),
+        search=SearchSettings(
+            provider=_search_provider(),
+            api_url=(os.environ.get("WEB_SEARCH_API_URL") or "").strip(),
+            api_key=(os.environ.get("WEB_SEARCH_API_KEY") or "").strip(),
+            max_results=min(20, max(1, _int(os.environ.get("WEB_SEARCH_MAX_RESULTS"), 5))),
+            timeout_ms=max(1_000, _int(os.environ.get("WEB_SEARCH_TIMEOUT_MS"), 8_000)),
+            fetch_pages=_bool(os.environ.get("WEB_SEARCH_FETCH_PAGES"), True),
+            max_pages=min(10, max(0, _int(os.environ.get("WEB_SEARCH_MAX_PAGES"), 2))),
+        ),
         tracing=TracingSettings(
             otlp_endpoint=(os.environ.get("OTLP_ENDPOINT") or "").strip(),
             service_name=(os.environ.get("OTEL_SERVICE_NAME") or "creator-agent-studio").strip()
@@ -317,6 +371,11 @@ def _embedding_provider() -> str:
 def _digital_human_provider() -> str:
     raw = (os.environ.get("DIGITAL_HUMAN_PROVIDER") or "sample").strip().lower()
     return raw if raw in ("sample", "http") else "sample"
+
+
+def _search_provider() -> str:
+    raw = (os.environ.get("WEB_SEARCH_PROVIDER") or "none").strip().lower()
+    return raw if raw in ("none", "http") else "none"
 
 
 _SAMPLERS = (
@@ -365,6 +424,10 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
                 continue
             if attr == "provider" and value not in ("mock", "openai"):
                 continue
+            if attr == "vision":
+                value = bool(value)
+            elif attr == "vision_max_images":
+                value = min(8, max(0, _int(str(value), 3))) if isinstance(value, (int, float, str)) else 3
             setattr(_config.llm, attr, value)
     _apply_flat(
         patch,
@@ -410,6 +473,19 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
             "dhTimeoutMs": ("timeout_ms", None),
         },
     )
+    _apply_flat(
+        patch,
+        _config.search,
+        {
+            "searchProvider": ("provider", ("none", "http")),
+            "searchApiUrl": ("api_url", None),
+            "searchApiKey": ("api_key", None),
+            "searchMaxResults": ("max_results", None),
+            "searchTimeoutMs": ("timeout_ms", None),
+            "searchFetchPages": ("fetch_pages", None),
+            "searchMaxPages": ("max_pages", None),
+        },
+    )
     return _config
 
 
@@ -430,6 +506,12 @@ def _apply_flat(patch: dict[str, Any], target: Any, mapping: dict[str, tuple[str
             value = max(0, int(value))
         elif attr == "tick_seconds":
             value = max(1, int(value))
+        elif attr == "max_results":
+            value = min(20, max(1, int(value)))
+        elif attr == "timeout_ms":
+            value = max(1_000, int(value))
+        elif attr == "max_pages":
+            value = min(10, max(0, int(value)))
         setattr(target, attr, value)
 
 
@@ -441,6 +523,8 @@ _LLM_FIELD_BY_CAMEL = {
     "temperature": "temperature",
     "maxTokens": "max_tokens",
     "timeoutMs": "timeout_ms",
+    "vision": "vision",
+    "visionMaxImages": "vision_max_images",
 }
 
 
@@ -482,6 +566,8 @@ def public_config() -> dict[str, Any]:
             "temperature": llm.temperature,
             "maxTokens": llm.max_tokens,
             "timeoutMs": llm.timeout_ms,
+            "vision": llm.vision,
+            "visionMaxImages": llm.vision_max_images,
             "apiKeySet": len(llm.api_key) > 0,
             "apiKeyMasked": _mask(llm.api_key),
         },
@@ -518,6 +604,18 @@ def public_config() -> dict[str, Any]:
             "apiKeySet": len(digital_human.api_key) > 0,
             "apiKeyMasked": _mask(digital_human.api_key),
             "timeoutMs": digital_human.timeout_ms,
+        },
+        "search": {
+            "provider": _config.search.provider,
+            "apiUrl": _config.search.api_url,
+            "apiKey": "",
+            "apiKeySet": len(_config.search.api_key) > 0,
+            "apiKeyMasked": _mask(_config.search.api_key),
+            "maxResults": _config.search.max_results,
+            "timeoutMs": _config.search.timeout_ms,
+            "fetchPages": _config.search.fetch_pages,
+            "maxPages": _config.search.max_pages,
+            "configured": _config.search.provider == "http" and bool(_config.search.api_url),
         },
         "tracing": {
             "otlpEndpoint": tracing.otlp_endpoint,
@@ -568,3 +666,4 @@ def ensure_dirs() -> None:
     """确保持久化目录存在。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     TASK_DIR.mkdir(parents=True, exist_ok=True)
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)

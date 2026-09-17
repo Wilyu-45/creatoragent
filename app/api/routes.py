@@ -33,7 +33,14 @@ from ..core.orchestrator import orchestrator
 from ..core.store import task_store
 from ..core.tracing import EXPORT_DIR, parse_traceparent, tracer
 from ..core import otel
-from ..core.types import PHASE_LABEL, PHASE_ORDER, Brief, TaskRecord, create_empty_brief
+from ..core.types import (
+    PHASE_LABEL,
+    PHASE_ORDER,
+    Brief,
+    BriefAsset,
+    TaskRecord,
+    create_empty_brief,
+)
 from ..knowledge.compliance import INDUSTRY_RULES, LEXICON_GROUPS
 from ..knowledge.industry import CHANNEL_RULES, INDUSTRY_PROFILES
 from ..knowledge.language import (
@@ -71,6 +78,31 @@ def _as_string_array(value: Any) -> list[str]:
     return []
 
 
+def _parse_assets(value: Any) -> list[BriefAsset]:
+    """解析 brief.assets：接受字符串（一行一条）或对象数组。"""
+    if isinstance(value, str):
+        items: list[Any] = [part.strip() for part in value.splitlines() if part.strip()]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    assets: list[BriefAsset] = []
+    for item in items:
+        if isinstance(item, str):
+            assets.append(BriefAsset(ref=item))
+        elif isinstance(item, dict):
+            kind = str(item.get("kind") or "image").strip().lower()
+            assets.append(
+                BriefAsset(
+                    kind=kind if kind in ("image", "video", "document", "link") else "image",  # type: ignore[arg-type]
+                    ref=str(item.get("ref") or item.get("url") or "").strip(),
+                    title=str(item.get("title") or "").strip(),
+                    note=str(item.get("note") or "").strip(),
+                )
+            )
+    return assets
+
+
 def _pick(raw: dict[str, Any], key: str, fallback: str) -> str:
     value = raw.get(key)
     if isinstance(value, str) and value.strip():
@@ -104,6 +136,9 @@ def parse_brief(input_value: Any) -> Brief:
         notes=notes if isinstance(notes, str) else "",
         priority=priority if priority in PRIORITIES else "normal",
         deadline=deadline if isinstance(deadline, str) and deadline else None,
+        # 素材（多模态输入）：宽容解析，非法条目在 assets.py 里带 issue 如实标注，
+        # 不在这里静默丢弃——「素材不可用」本身是需要让智能体知道的信息
+        assets=_parse_assets(raw.get("assets")),
     )
 
 

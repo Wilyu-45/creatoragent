@@ -102,6 +102,17 @@ export const PHASE_LABEL: Record<Phase, string> = {
 
 export type Priority = 'low' | 'normal' | 'high' | 'urgent';
 
+/** 素材形态；影响智能体对素材的处理方式（图片可随多模态消息发送） */
+export type AssetKind = 'image' | 'video' | 'document' | 'link';
+
+/** Brief 附带的参考素材：公网地址、data URL，或 data/assets/ 下的相对文件名 */
+export interface BriefAsset {
+  kind: AssetKind;
+  ref: string;
+  title?: string;
+  note?: string;
+}
+
 export interface Brief {
   /** 品牌名 */
   brand: string;
@@ -127,6 +138,8 @@ export interface Brief {
   notes: string;
   priority: Priority;
   deadline: string | null;
+  /** 参考素材（多模态输入）：图片/视频取样、竞品截图、品牌规范文档等 */
+  assets?: BriefAsset[];
 }
 
 export function createEmptyBrief(): Brief {
@@ -144,6 +157,7 @@ export function createEmptyBrief(): Brief {
     notes: '',
     priority: 'normal',
     deadline: null,
+    assets: [],
   };
 }
 

@@ -96,6 +96,22 @@ def current_provider_name() -> str:
     return getattr(provider, "name", "mock")
 
 
+def vision_enabled() -> bool:
+    """当前是否具备多模态（图像）输入能力。
+
+    离线引擎**永远**返回 False：它只消费 ``context`` 结构化数据，根本不读
+    ``messages``，给它塞图片块只会污染 token 估算口径（黄金基线的前提是
+    「同一输入产出同一结果」，图片字节不该出现在这条路上）。
+
+    ``LLM_VISION`` 默认关闭：文本模型（DeepSeek chat/flash、qwen-plus、本地 Ollama
+    文本模型等）收到内容块数组会返回 400，且该失败不可重试，只会让智能体降级到
+    离线引擎。确认模型支持读图后再打开——素材的**文字清单**不受此项影响。
+    """
+    if not get_config().llm.vision:
+        return False
+    return not getattr(resolve_provider(), "simulated", False)
+
+
 def chat(request: LLMRequest) -> LLMResponse:
     """统一模型调用入口；每次调用都会产生一个 ``llm.<purpose>`` span。
 

@@ -53,6 +53,16 @@ SYSTEM = system_prompt(
 - 排期建议只描述动作与节奏，不承诺流量结果
 - 只输出 JSON，不输出任何解释性文字
 
+工具用法：
+- topic_dedupe 会把你的拟用角度与品牌历史选题库做词面查重（2-gram 重合度）：
+  凡是工具标为高重合的选题，**必须换角度或换切入场景**再往下写，
+  不要只改标题措辞；确实需要复用同一主题时，在 selection_reason 里说明本轮新增的差异点
+- 查重是词面比对，判不了「同主题不同角度」：工具未报警但你认为仍可能撞车的，
+  也要主动换掉
+- publish_timeline 给出的是**具体发布时刻**（已把建议时段换算成 ISO 时间）：
+  publishing_rhythm / channel_adaptation 里的时段请直接引用这些时刻，不要自己推算日期；
+  工具标注的节假日未顺延、UTC 口径等限制，要在 notes 中原样保留
+
 输出体量（控制 token，超量从简）：
 - topics 恰好 3 条，每条 outline ≤6 项、每项一句话
 - headline_candidates 恰好 5 条；structure ≤5 段

@@ -5,8 +5,10 @@
 
 设计原则（与项目工程原则一致）：
 
-* **离线优先**——所有工具基于内置知识库（``app/knowledge/*``）、A11 记忆库与
+* **离线优先**——默认配置下所有工具基于内置知识库（``app/knowledge/*``）、A11 记忆库与
   可测量的文本特征，零外部依赖，同一输入结果可复现（黄金数据集的前提）；
+  唯一的外部能力是**可选的联网检索**（``web_search``/``page_fetch``，默认关闭），
+  未配置时如实返回「本轮未联网」而不是编造结果；
 * **失败隔离**——单个工具抛异常只记录进报告，绝不阻断创作链路；
   「旁路能力不能成为创作链路的新失败面」；
 * **如实标注**——工具结果必须带来源说明：内置知识不冒充联网核实，
@@ -98,7 +100,7 @@ class ToolReport:
             return ""
         lines = [
             "【工具情报】以下结果由本智能体的工具在生成前检索/计算得出"
-            "（来源：内置知识库与文本分析，非联网实时核实，引用时须如实标注来源）："
+            "（来源说明见各工具条目，引用时须如实标注来源与口径）："
         ]
         for inv in oks:
             lines.append(f"▍工具 {inv.tool}：{inv.summary}")
@@ -142,6 +144,8 @@ def _all_tools() -> list[Tool]:
         a7_compliance,
         a8_art_director,
         a9_channel_seo,
+        compute,
+        web_research,
     )
 
     modules = (
@@ -156,6 +160,10 @@ def _all_tools() -> list[Tool]:
         a9_channel_seo,
         a10_analyst,
         a11_memory,
+        # 确定性计算与联网检索排在最后：各智能体原有的离线工具保持既有顺序，
+        # 保证「未配置联网」时提示词里的情报块顺序与历史一致
+        compute,
+        web_research,
     )
     tools: list[Tool] = []
     for module in modules:
@@ -200,6 +208,23 @@ def tool_catalog() -> list[dict[str, Any]]:
 # ------------------------------------------------------------------ #
 # 执行器                                                              #
 # ------------------------------------------------------------------ #
+
+
+def recommended_draft(
+    ctx: "AgentRunContext",
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """取上游「文案草稿」的主推版本与全部版本，供多个智能体的工具复用。
+
+    A5/A7/A8/A9/A10 都要在「同一处语义」上取主推版本；口径散落在各工具模块里
+    容易悄悄跑偏（例如一处默认 ``V1``、另一处默认 ``V2``），因此统一在此定义。
+    """
+    from ..llm.json_utils import as_obj_array, as_str
+
+    draft = ctx.upstream_of("draft")
+    recommended = as_str(draft.get("recommended_version"), "V1")
+    versions = as_obj_array(draft.get("versions"))
+    target = next((item for item in versions if as_str(item.get("id")) == recommended), {})
+    return target, versions
 
 
 def run_agent_tools(ctx: "AgentRunContext", agent_id: "str | AgentMeta") -> ToolReport:
@@ -273,5 +298,6 @@ __all__ = [
     "all_tools",
     "tools_for",
     "tool_catalog",
+    "recommended_draft",
     "run_agent_tools",
 ]

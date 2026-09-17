@@ -38,7 +38,7 @@ from ..llm.json_utils import (
     normalize_score,
 )
 from ..llm.pricing import DEFAULT_PRICE, PRICING, cost_of, price_of  # noqa: F401
-from ..llm.types import ChatMessage, LLMRequest
+from ..llm.types import ChatMessage, ImagePart, LLMRequest
 
 # ------------------------------------------------------------------ #
 # 运行时上下文                                                        #
@@ -147,6 +147,7 @@ def call_with_prompts(
     context: dict[str, Any],
     *,
     schema: str = "",
+    images: list[ImagePart] | None = None,
 ) -> StructuredResult:
     """智能体唯一的结构化调用入口。
 
@@ -161,18 +162,36 @@ def call_with_prompts(
        逐条解释，白烧输出 token（实测某任务 completion 达 6.5 万 token）。
     2. **提示词里显式要求精简**：在 schema 之后追加一条「不要附加解释字段」的约束。
        这两点合起来把输出预算压回可控范围。
+
+    ``images`` 是本轮素材图片（``vision_attachments`` 产出）。多模态不可用时
+    （离线引擎 / 纯文本模型）自动丢弃：离线引擎不读消息，塞图只会污染 token
+    口径；纯文本模型收到内容块数组会直接报错。丢弃是静默的——提示词里的素材
+    清单已按「本模型不读图」如实说明，智能体不会误以为自己看到了画面。
     """
     from ..llm.json_utils import extract_json, strip_unknown_keys
 
+    # 素材清单在**所有**智能体的用户提示词前统一注入：它是 Brief 的组成部分，
+    # 每个角色都需要知道「本次带了哪些素材」（合规看授权风险、审校看图文是否对得上、
+    # 渠道看能不能用作封面）。没有素材时返回空串，提示词与历史逐字一致。
+    block = assets_block(ctx)
+    if block:
+        user = f"{block}{user}"
+
     if schema:
         user = f"{user}\n\n【输出要求】只输出上述 JSON，不要附加任何未列出的字段或解释性文字。"
+
+    if images:
+        from ..llm.engine import vision_enabled
+
+        if not vision_enabled():
+            images = None
 
     response = chat(
         LLMRequest(
             purpose=purpose,
             messages=[
                 ChatMessage(role="system", content=system),
-                ChatMessage(role="user", content=user),
+                ChatMessage(role="user", content=user, images=list(images or [])),
             ],
             context=context,
             json=True,
@@ -368,6 +387,24 @@ def localization_block(ctx: AgentRunContext) -> str:
     return localization_directive(ctx.brief.channel, ctx.brief.language)
 
 
+def assets_block(ctx: AgentRunContext) -> str:
+    """渲染 Brief 素材清单（多模态输入的文字视图）。无素材时返回空串。
+
+    这是「素材」在**离线与纯文本模型**下的唯一来源，因此素材相关的智能体
+    （合规、审校、渠道）都接它，哪怕它们自己不读图。
+    """
+    from ..core.assets import assets_prompt_block
+
+    return assets_prompt_block(ctx.brief.assets)
+
+
+def vision_attachments(ctx: AgentRunContext) -> list[ImagePart]:
+    """取可随本次调用发送的素材图片；多模态不可用时为空列表。"""
+    from ..core.assets import vision_parts
+
+    return vision_parts(ctx.brief.assets)
+
+
 def content_to_text(content: dict[str, Any]) -> str:
     """把结构化产物压平成可读文本，用于版本 diff、关键词检索与全文合规扫描。"""
     lines: list[str] = []
@@ -417,6 +454,8 @@ __all__ = [
     "read_reviews",
     "memory_block",
     "localization_block",
+    "assets_block",
+    "vision_attachments",
     "content_to_text",
     "as_num",
     "as_obj",

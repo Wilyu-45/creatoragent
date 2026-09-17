@@ -1,11 +1,15 @@
 """A6 事实核查智能体的工具集。
 
-对应《plan.md》2.2.3 的「搜索 Server」内置替代——本系统**没有联网能力**，
+对应《plan.md》2.2.3 的「搜索 Server」内置替代——**默认配置下本系统不联网**，
 因此不提供假装查证的「搜索」工具，而是提供：
 
 * ``claims_scanner``——从草稿中抽取数值型/最高级断言（可测量的文本特征）；
 * ``source_crosscheck``——把作者声明的主张与正文断言做启发式对照；
 * ``memory_crosscheck``——从 A11 记忆库召回品牌事实供交叉参考（非权威来源）。
+
+真实联网检索由 ``app/tools/web_research.py`` 统一提供（``web_search`` /
+``page_fetch``，默认关闭、配置后按真实结果注入）——它同时服务 A1/A2/A10，
+故不放在本模块，避免同一能力出现两份实现。
 """
 
 from __future__ import annotations

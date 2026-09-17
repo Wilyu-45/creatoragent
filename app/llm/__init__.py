@@ -4,14 +4,23 @@
 保证任何情况下都能返回可用于流水线的响应（无 API Key 也能整条链路跑通）。
 """
 
-from .engine import chat, current_provider_name, resolve_provider
-from .types import ChatMessage, LLMRequest, LLMResponse, LLMUsage, estimate_tokens
+from .engine import chat, current_provider_name, resolve_provider, vision_enabled
+from .types import (
+    ChatMessage,
+    ImagePart,
+    LLMRequest,
+    LLMResponse,
+    LLMUsage,
+    estimate_tokens,
+)
 
 __all__ = [
     "chat",
     "resolve_provider",
     "current_provider_name",
+    "vision_enabled",
     "ChatMessage",
+    "ImagePart",
     "LLMRequest",
     "LLMResponse",
     "LLMUsage",

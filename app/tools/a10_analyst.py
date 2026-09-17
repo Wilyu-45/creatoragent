@@ -42,7 +42,8 @@ OBJECTIVE_METRICS: dict[str, list[str]] = {
 _DEFAULT_BENCHMARK = {"ctr": [1.5, 6.0], "engagement": [2.0, 7.0]}
 
 
-def _benchmark_for(channel: str) -> dict[str, list[float]]:
+def benchmark_for(channel: str) -> dict[str, list[float]]:
+    """按渠道取经验基准；精确命中 -> 子串命中 -> 通用兜底。"""
     if channel in CHANNEL_BENCHMARKS:
         return CHANNEL_BENCHMARKS[channel]
     for key, value in CHANNEL_BENCHMARKS.items():
@@ -54,7 +55,7 @@ def _benchmark_for(channel: str) -> dict[str, list[float]]:
 def channel_benchmarks(ctx: "AgentRunContext") -> ToolOutcome:
     """内部经验基准区间（如实标注：非平台数据，仅作区间锚点）。"""
     brief = ctx.brief
-    bench = _benchmark_for(brief.channel)
+    bench = benchmark_for(brief.channel)
     lines = [
         f"「{brief.channel}」经验锚点：CTR {bench['ctr'][0]}%-{bench['ctr'][1]}%，"
         f"互动率 {bench['engagement'][0]}%-{bench['engagement'][1]}%",
@@ -132,6 +133,78 @@ def objective_metrics(ctx: "AgentRunContext") -> ToolOutcome:
     )
 
 
+#: 双侧检验 z 值（α=0.05）与统计功效 z 值（power=0.8）——查表常数，非估算
+_Z_ALPHA = 1.959964
+_Z_POWER = 0.8416212
+
+#: 默认最小可检测相对提升：低于 20% 的提升在内容渠道上通常淹没在自然波动里
+_DEFAULT_REL_LIFT = 0.20
+
+#: 变量数上限：A/B 变量越多，多重比较带来的假阳性越高（用 Bonferroni 校正 α）
+_MAX_AB_VARIABLES = 6
+
+
+def _per_arm_sample(baseline: float, delta: float) -> int:
+    """两比例检验的每臂样本量：n = 2(z_α+z_β)²·p(1-p)/δ²。"""
+    if delta <= 0:
+        return 0
+    value = 2 * (_Z_ALPHA + _Z_POWER) ** 2 * baseline * (1 - baseline) / (delta**2)
+    return int(-(-value // 100) * 100)  # 向上取整到百位，避免「刚好差一点」
+
+
+def ab_significance(ctx: "AgentRunContext") -> ToolOutcome:
+    """A/B 判定口径：每臂样本量、判定线与多重比较校正（确定性统计）。
+
+    A10 要输出 ``ab_tests``，但「跑多久才算赢」如果只写「观察 3 天」，
+    就等于把结论交给波动。这里按两比例检验给出可复现的样本量要求，
+    并把「不许中途偷看」写成明面上的约束——不是效果承诺，是判定纪律。
+    """
+    brief = ctx.brief
+    bench = benchmark_for(brief.channel)
+    baseline = round((bench["ctr"][0] + bench["ctr"][1]) / 2 / 100, 4)
+    delta = baseline * _DEFAULT_REL_LIFT
+    per_arm = _per_arm_sample(baseline, delta)
+
+    # 按「典型 3 组对测」估算 α 校正；A10 若提交更多组，须按实际组数重算
+    variables = min(_MAX_AB_VARIABLES, 3)
+    alpha_corrected = round(0.05 / variables, 4)
+
+    lines = [
+        f"基线（渠道 CTR 区间中值）：{baseline * 100:.1f}%｜"
+        f"最小可检测相对提升：{_DEFAULT_REL_LIFT:.0%}（绝对差 {delta * 100:.2f} 个百分点）",
+        f"每臂所需样本（曝光/点击基数）：≥{per_arm:,}｜判定线：相对提升 ≥{_DEFAULT_REL_LIFT:.0%}"
+        f"（绝对差 ≥{delta * 100:.2f} 个百分点）且样本量达标才算胜出",
+        f"多重比较校正：计划 {variables} 个 A/B 变量时，单变量显著性门槛收紧到 α={alpha_corrected}"
+        f"（Bonferroni），否则「总有一个跑赢」是必然结果",
+        "纪律约束：样本量达标前不得中途查看并据此决策（peeking 会把 5% 的假阳性抬到 30% 以上）；"
+        "观察期天数 = 每臂样本 ÷ 单臂日曝光，需运营侧提供日曝光量才能换算，"
+        "本系统没有平台流量数据，**不代为估算观察期**",
+        f"（来源：两比例检验确定性计算 z_α={_Z_ALPHA}、z_β={_Z_POWER}；"
+        f"基线取自{_benchmark_label(brief.channel)}内部经验区间——非平台真实数据，"
+        "ab_tests 请把判定口径写进 metric 字段，并在 cautions 中声明观察期与禁偷看）",
+    ]
+    return ToolOutcome(
+        summary=f"每臂需 ≥{per_arm:,} 样本，判定线 +{_DEFAULT_REL_LIFT:.0%}（相对）",
+        detail="\n".join(lines),
+        data={
+            "channel": brief.channel,
+            "baseline_rate": baseline,
+            "relative_lift": _DEFAULT_REL_LIFT,
+            "absolute_delta": round(delta, 4),
+            "per_arm_sample": per_arm,
+            "variables": variables,
+            "alpha": 0.05,
+            "alpha_corrected": alpha_corrected,
+            "z_alpha": _Z_ALPHA,
+            "z_power": _Z_POWER,
+        },
+    )
+
+
+def _benchmark_label(channel: str) -> str:
+    return f"「{channel}」" if channel in CHANNEL_BENCHMARKS else "通用"
+
+
 TOOLS: list[Tool] = [
     Tool(
         name="channel_benchmarks",
@@ -151,6 +224,12 @@ TOOLS: list[Tool] = [
         agent_ids=("A10",),
         handler=objective_metrics,
     ),
+    Tool(
+        name="ab_significance",
+        description="A/B 判定口径：每臂样本量/判定线/多重比较校正",
+        agent_ids=("A10",),
+        handler=ab_significance,
+    ),
 ]
 
 __all__ = [
@@ -158,5 +237,7 @@ __all__ = [
     "channel_benchmarks",
     "content_factors",
     "objective_metrics",
+    "ab_significance",
+    "benchmark_for",
     "CHANNEL_BENCHMARKS",
 ]

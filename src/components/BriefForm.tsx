@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Brief, Priority } from '../lib/types.ts';
+import type { AssetKind, Brief, BriefAsset, Priority } from '../lib/types.ts';
 import { createEmptyBrief } from '../lib/types.ts';
 import { Spinner } from './ui.tsx';
 
@@ -12,6 +12,30 @@ function fromLines(value: string): string[] {
     .split(/[\n,，、;；]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+/** 素材行 → BriefAsset：支持「地址」或「标题=地址」两种写法，形态按扩展名推断。 */
+function toAssets(value: string): BriefAsset[] {
+  const KIND_BY_EXT: Record<string, AssetKind> = {
+    png: 'image', jpg: 'image', jpeg: 'image', webp: 'image', gif: 'image', bmp: 'image', svg: 'image',
+    mp4: 'video', mov: 'video', webm: 'video',
+    pdf: 'document', md: 'document', docx: 'document', txt: 'document',
+  };
+  return value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [maybeTitle, maybeRef] = line.includes('=') ? line.split('=') : ['', line];
+      const ref = (maybeRef ?? '').trim();
+      const ext = ref.split('?')[0].split('.').pop()?.toLowerCase() ?? '';
+      if (ref.startsWith('data:')) return { kind: 'image' as AssetKind, ref };
+      return {
+        kind: KIND_BY_EXT[ext] ?? 'link',
+        ref,
+        ...(maybeTitle.trim() ? { title: maybeTitle.trim() } : {}),
+      };
+    });
 }
 
 export function BriefForm({
@@ -29,6 +53,7 @@ export function BriefForm({
   const [keywords, setKeywords] = useState('冷萃咖啡, 办公室, 提神');
   const [constraints, setConstraints] = useState('不使用绝对化用语\n不承诺功效');
   const [deliverables, setDeliverables] = useState('图文笔记 1 篇\n标题备选 5 条');
+  const [assets, setAssets] = useState('');
   const [autoApprove, setAutoApprove] = useState(false);
 
   const patch = (key: keyof Brief, value: string): void => {
@@ -42,6 +67,7 @@ export function BriefForm({
         keywords: fromLines(keywords),
         constraints: fromLines(constraints),
         deliverables: fromLines(deliverables),
+        assets: toAssets(assets),
       },
       autoApprove,
     );
@@ -138,6 +164,19 @@ export function BriefForm({
           <div className="field">
             <label>期望交付物（逐行）</label>
             <textarea value={deliverables} onChange={(e) => setDeliverables(e.target.value)} />
+          </div>
+        </div>
+
+        <div className="field" style={{ marginTop: 12 }}>
+          <label>参考素材（逐行；支持「标题=地址」，本地图片放 data/assets/ 后写文件名）</label>
+          <textarea
+            value={assets}
+            onChange={(e) => setAssets(e.target.value)}
+            placeholder={'产品正面图=product.png\nhttps://cdn.example.com/competitor.jpg'}
+          />
+          <div className="muted small">
+            素材清单对所有智能体可见（标题、画幅、用途）；多模态读图需模型支持并在
+            .env 里打开 LLM_VISION。
           </div>
         </div>
 

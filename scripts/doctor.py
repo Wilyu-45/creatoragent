@@ -28,10 +28,17 @@
 16. 校验 **数字人渲染样例**：渲染清单（分镜透传 / 无口播告警 / 时长偏差）、
     样例引擎按流逝时间的惰性推进（排队 → 渲染 → 完成）、租户隔离、
     http 适配样例在未配置网关时的显式失败路径与任务删除时的作业回收
+17. 校验 **Brief 素材（多模态输入）**：五种图片格式的画幅实测、本地素材的
+    目录约束与如实报错、离线/读图两种提示词口径、A8 素材规格比对工具，
+    以及带素材任务在离线链路上的端到端可跑通
+18. 校验 **确定性计算沙箱**：越权语法（导入/属性/下标/推导式/字符串/超大幂次/
+    除零）逐条拦截、公式求值可复现，以及量级换算 / 排期推算 / 回填核算三个
+    换算工具的结果可复核、缺失项如实列出
 
 检查项的**计数会随合并/拆分变化**（第十轮新增「视频脚本」时是 17 项；第十二轮把
-传播/采样与数字人样例并入既有项后回到 16 项），因此文档统一写
-「16 项（含传播/采样与数字人样例）」，最终以本脚本实际输出的清单为准。
+传播/采样与数字人样例并入既有项后回到 16 项；随后新增「Brief 素材（多模态）」为 17 项，
+本轮新增「确定性计算沙箱」为 18 项），因此文档统一写「18 项」，
+最终以本脚本实际输出的清单为准。
 
 注意：本脚本默认写入**项目内**的 ``.doctor-data/`` 临时目录，避免自检污染开发环境的
 ``data/``；如需指定，可显式设置 ``CREATOR_DATA_DIR``。刻意不用系统 temp 目录 ——
@@ -1393,6 +1400,305 @@ def check_video() -> bool:
     return decide_ok and timeline_ok and coverage_ok
 
 
+def check_multimodal() -> bool:
+    """校验 Brief 素材（多模态输入）链路。
+
+    素材是最容易出现「看起来支持、实际不可用」的能力，因此这里逐层验证：
+
+    ① 图片画幅来自**文件头实测**（PNG/JPEG/GIF/WebP/BMP），不是猜的或模型说的；
+    ② 本地素材只认 ``assets/`` 下的相对路径，越界/缺失如实报错而非静默消失；
+    ③ 离线路径下素材清单仍进提示词（否则智能体根本不知道有素材），并如实写明
+       「本模型不读图」；只有打开 ``LLM_VISION`` 且提供方非离线时才真的有图片块；
+    ④ 带素材的任务能在离线链路上跑完——素材不能成为创作链路的新失败面。
+    """
+    import base64
+    import struct
+    import time
+
+    from app.config import ASSETS_DIR, get_config
+    from app.core.assets import assets_prompt_block, image_size, parse_assets, vision_parts
+    from app.core.types import Brief, BriefAsset
+
+    print("\n[Brief 素材 / 多模态输入]")
+
+    png = (
+        b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR"
+        + struct.pack(">II", 1200, 1600) + b"\x08\x06\x00\x00\x00"
+    )
+    gif = b"GIF89a" + struct.pack("<HH", 640, 480) + b"\x00" * 4
+    bmp = b"BM" + b"\x00" * 16 + struct.pack("<ii", 800, 600) + b"\x00" * 4
+    webp = (
+        b"RIFF" + b"\x00" * 4 + b"WEBP" + b"VP8X" + (10).to_bytes(4, "little")
+        + b"\x00" * 4 + (1199).to_bytes(3, "little") + (1599).to_bytes(3, "little") + b"\x00" * 4
+    )
+    jpeg = (
+        b"\xff\xd8\xff\xe0" + struct.pack(">H", 16) + b"\x00" * 14
+        + b"\xff\xc0" + struct.pack(">H", 17) + b"\x08"
+        + struct.pack(">HH", 900, 720) + b"\x03" + b"\x00" * 6
+    )
+    expected = {"PNG": (png, (1200, 1600)), "GIF": (gif, (640, 480)), "BMP": (bmp, (800, 600)),
+                "WebP": (webp, (1200, 1600)), "JPEG": (jpeg, (720, 900))}
+    header_ok = True
+    for name, (data, size) in expected.items():
+        actual = image_size(data)
+        mark = "✓" if actual == size else "✗"
+        if actual != size:
+            header_ok = False
+        print(f"    {mark} {name:<5}文件头 -> {actual}（期望 {size}）")
+    unknown_ok = image_size(b"not an image") is None
+    print(f"    {'✓' if unknown_ok else '✗'} 未知格式不猜尺寸（返回 None）")
+
+    # 真实写一个本地素材，验证「可读 + 内联 + 实测算幅」
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    local = ASSETS_DIR / "doctor_asset.png"
+    local.write_bytes(png)
+    raw = [
+        "doctor_asset.png",
+        {"kind": "image", "ref": "https://cdn.example.com/p.jpg", "title": "远程图", "note": "参考"},
+        {"kind": "image", "ref": "../../etc/passwd", "title": "越界"},
+        {"kind": "image", "ref": "C:/Windows/win.ini", "title": "绝对路径"},
+        {"kind": "image", "ref": "不存在的图.png", "title": "缺失"},
+        {"kind": "image", "ref": "data:image/gif;base64," + base64.b64encode(gif).decode()},
+        {"kind": "video", "ref": "https://cdn.example.com/a.mp4", "title": "花絮"},
+        "   ",
+    ]
+    assets = parse_assets(raw)
+    local_ok = assets[0].width == 1200 and assets[0].data_url.startswith("data:image/png;base64,")
+    guard_ok = all(assets[i].issue for i in (2, 3, 4)) and not assets[1].data_url
+    kinds_ok = assets[5].kind == "image" and assets[6].kind == "video"
+    blank_dropped = len(assets) == 7
+    print(
+        f"    {'✓' if local_ok else '✗'} 本地素材：实测算幅 {assets[0].width}×{assets[0].height}"
+        f"（{assets[0].aspect_ratio}）｜已内联为 data URL"
+    )
+    print(f"    {'✓' if guard_ok else '✗'} 路径防护：越界/绝对路径/缺失 分别如实报错")
+    print(f"    {'✓' if kinds_ok and blank_dropped else '✗'} 形态识别：data URL=图片、mp4=视频｜空白行已剔除")
+    for index in (2, 3, 4):
+        print(f"      - {assets[index].title}：{assets[index].issue}")
+
+    cfg = get_config()
+    block = assets_prompt_block(raw)
+    honest_offline = "本模型不读图" in block and "1200×1600（3:4）" in block
+    no_parts_offline = vision_parts(raw) == []
+    print(f"    {'✓' if honest_offline else '✗'} 离线提示词：素材清单 {len(assets)} 条进提示词并写明「本模型不读图」")
+    print(f"    {'✓' if no_parts_offline else '✗'} 离线不发图片块（避免污染 token 口径与黄金基线）")
+
+    saved = (cfg.llm.provider, cfg.llm.base_url, cfg.llm.api_key, cfg.llm.vision)
+    try:
+        cfg.llm.provider, cfg.llm.base_url, cfg.llm.api_key = "openai", "http://localhost:9/v1", "doctor"
+        cfg.llm.vision = True
+        parts = vision_parts(raw, limit=2)
+        vision_ok = len(parts) == 2 and parts[0].url.startswith("data:image/png;base64,") and parts[1].url.startswith("http")
+        honest_online = "多模态形式提供" in assets_prompt_block(raw)
+        print(f"    {'✓' if vision_ok else '✗'} 打开 LLM_VISION：取到 {len(parts)} 张图块（本地=data URL，远程=原地址）")
+        print(f"    {'✓' if honest_online else '✗'} 提示词随能力变化（读图时不再声称「不读图」）")
+    finally:
+        cfg.llm.provider, cfg.llm.base_url, cfg.llm.api_key, cfg.llm.vision = saved
+
+    # 工具层：A8 的 asset_spec_check 必须给出实测画幅与渠道规格的比对
+    from app.agents.base import AgentRunContext
+    from app.tools.a8_art_director import asset_spec_check
+
+    brief = Brief(
+        brand="自检品牌", product="自检产品", channel="小红书", industry="消费品",
+        assets=[BriefAsset(kind="image", ref="doctor_asset.png", title="主图素材")],
+    )
+    ctx = AgentRunContext(
+        task_id="doctor-assets", brief=brief, phase="VISUAL_ADAPT", revision=0,
+        feedback=[], upstream={}, next_version=lambda _t: 1, emit=lambda *a, **k: None,
+    )
+    outcome = asset_spec_check(ctx)
+    tool_ok = "1200×1600" in outcome.detail and "3:4" in outcome.detail
+    print(f"    {'✓' if tool_ok else '✗'} A8 asset_spec_check：{outcome.summary}")
+
+    # 端到端：带素材的任务在离线链路上仍要跑完
+    from app.core.orchestrator import orchestrator
+    from app.core.store import task_store
+
+    task = orchestrator.create_task(brief, auto_approve=True)
+    deadline = time.monotonic() + 60
+    current = None
+    while time.monotonic() < deadline:
+        current = task_store.get(task.id)
+        if current is not None and current.status in ("completed", "rejected", "failed", "cancelled"):
+            break
+        time.sleep(0.2)
+    e2e_ok = current is not None and current.status == "completed"
+    print(
+        f"    {'✓' if e2e_ok else '✗'} 带素材的任务端到端：终态="
+        f"{getattr(current, 'status', 'timeout')}｜产物={len(getattr(current, 'artifacts', []) or [])}"
+    )
+
+    local.unlink(missing_ok=True)
+    ok = all([header_ok, unknown_ok, local_ok, guard_ok, kinds_ok, blank_dropped,
+              honest_offline, no_parts_offline, vision_ok, honest_online, tool_ok, e2e_ok])
+    if not ok:
+        print("    ! 素材链路异常：可能静默丢弃素材、把离线路径当读图，或尺寸是猜的")
+    return ok
+
+
+def check_compute() -> bool:
+    """校验确定性计算沙箱与换算工具。
+
+    这层最容易「看起来能算、其实能执行代码」，因此分四段验证：
+
+    ① **越权语法一律拦截**：导入、属性访问、下标、推导式、lambda、字符串运算、
+       超大幂次、除零、未定义变量——白名单按 AST 节点类型判定，逐条实测；
+    ② 公式求值与工具换算**可复现**（同一输入必得同一结果，不是模型心算）；
+    ③ 排期时刻由共享的时段解析产生，口径与发布网关一致；
+    ④ 回填数据能换算成派生指标并与预估对照；**算不出的项如实列出**而不是补数。
+    """
+    from datetime import datetime, timezone
+
+    from app.agents.base import AgentRunContext
+    from app.core.publisher import parse_slot_time
+    from app.core.sandbox import SandboxError, apply_formula, evaluate
+    from app.core.types import Brief
+    from app.tools.base import tool_catalog
+    from app.tools.compute import (
+        actuals_audit,
+        brief_keyword_audit,
+        funnel_sensitivity,
+        publish_timeline,
+    )
+
+    print("\n[确定性计算沙箱]")
+
+    escapes = [
+        "__import__('os').system('echo x')",
+        "open('x')",
+        "(1).__class__",
+        "[x for x in (1, 2)]",
+        "lambda: 1",
+        "1 if 2 else 3",
+        "'a' + 'b'",
+        "2 ** 99",
+        "1 / 0",
+        "no_such_var",
+    ]
+    unblocked = []
+    for expression in escapes:
+        try:
+            evaluate(expression, {"x": 1})
+        except SandboxError:
+            continue
+        unblocked.append(expression)
+    print(
+        f"    {'✓' if not unblocked else '✗'} 越权语法拦截："
+        f"{len(escapes) - len(unblocked)}/{len(escapes)} 条被拒"
+        + (f"｜漏网：{unblocked}" if unblocked else "（导入/属性/下标/推导式/字符串/超大幂次/除零）")
+    )
+    math_ok = (
+        abs(evaluate("impressions * ctr", {"impressions": 10000, "ctr": 0.03}) - 300) < 1e-9
+        and abs(apply_formula("growth", {"current": 6, "previous": 4}) - 0.5) < 1e-9
+        and abs(evaluate("min(3, 4) + max(1, 2)") - 5) < 1e-9
+    )
+    print(f"    {'✓' if math_ok else '✗'} 公式表求值可复现（clicks / growth / 白名单函数）")
+
+    def ctx_of(brief: Brief, upstream: dict | None = None) -> AgentRunContext:
+        return AgentRunContext(
+            task_id="doctor-compute",
+            brief=brief,
+            phase="PLANNING",
+            revision=0,
+            feedback=[],
+            upstream=upstream or {},
+            next_version=lambda _t: 1,
+            emit=lambda *a, **k: None,
+        )
+
+    brief = Brief(
+        brand="自检品牌", product="自检产品", channel="小红书", industry="消费品",
+        keywords=["冷萃咖啡", "0糖", "办公室提神"],
+    )
+
+    funnel = funnel_sensitivity(ctx_of(brief))
+    rows = funnel.data.get("funnel") or []
+    funnel_ok = bool(rows) and rows[0]["clicks"] == [300, 800] and rows[0]["engagement"] == [400, 1000]
+    print(
+        f"    {'✓' if funnel_ok else '✗'} 曝光档位换算：曝光 1 万 → 点击 "
+        f"{rows[0]['clicks'][0] if rows else '?'}–{rows[0]['clicks'][1] if rows else '?'}"
+        f"（CTR 3.0%–8.0%，实测值）"
+    )
+
+    def hour_minute(iso: str) -> tuple[int, int]:
+        moment = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return moment.hour, moment.minute
+
+    timeline = publish_timeline(ctx_of(brief))
+    items = timeline.data.get("items") or []
+    stamps = [item["due_at"] for item in items]
+    timeline_ok = (
+        bool(items)
+        and all(hour_minute(item["due_at"]) == parse_slot_time(item["slot"]) for item in items)
+        and stamps == sorted(stamps)
+    )
+    print(
+        f"    {'✓' if timeline_ok else '✗'} 排期推算：{len(items)} 个时刻，"
+        f"HH:MM 与时段解析一致且时间严格递增"
+    )
+
+    audit = actuals_audit(
+        ctx_of(
+            brief,
+            {
+                "actuals": {
+                    "window": "发布后 72 小时", "exposure": "12.8 万", "clicks": "6,400",
+                    "interactions": "9000", "conversions": "320",
+                },
+                "predicted": {"ctr": {"low": 3.0, "mid": 5.5, "high": 8.0, "unit": "%"}},
+            },
+        )
+    )
+    derived = audit.data.get("derived") or {}
+    actuals_ok = (
+        abs(derived.get("ctr", 0) - 0.05) < 1e-9
+        and audit.data.get("raw", {}).get("exposure") == 128000
+        and (audit.data.get("comparison") or {}).get("verdict") == "落在预估区间内"
+    )
+    print(
+        f"    {'✓' if actuals_ok else '✗'} 回填换算："
+        f"「12.8 万」→ 曝光 {audit.data.get('raw', {}).get('exposure')}、"
+        f"CTR {derived.get('ctr', 0) * 100:.2f}%、"
+        f"结论 {(audit.data.get('comparison') or {}).get('verdict')}"
+    )
+
+    partial = actuals_audit(ctx_of(brief, {"actuals": {"exposure": "10000"}}))
+    partial_ok = partial.data.get("missing") == ["点击", "互动", "转化"] and not partial.data.get("derived")
+    print(
+        f"    {'✓' if partial_ok else '✗'} 算不出的项如实列出："
+        f"仅填曝光时缺失项 ={partial.data.get('missing')}（未补估算值）"
+    )
+
+    draft = {
+        "recommended_version": "V1",
+        "versions": [
+            {
+                "id": "V1", "title": "冷萃咖啡的日常", "body": "一段正文",
+                "cta": "去看看", "hashtags": ["#0糖"],
+            }
+        ],
+    }
+    keyword = brief_keyword_audit(ctx_of(brief, {"draft": draft}))
+    keyword_ok = keyword.data.get("missing") == ["办公室提神"] and keyword.data.get("tag_only") == ["0糖"]
+    print(
+        f"    {'✓' if keyword_ok else '✗'} 关键词布局核对：缺失={keyword.data.get('missing')}｜"
+        f"仅标签命中={keyword.data.get('tag_only')}"
+    )
+
+    catalog = tool_catalog()
+    names = {item["name"] for item in catalog}
+    catalog_ok = len(catalog) == 48 and {
+        "funnel_sensitivity", "publish_timeline", "actuals_audit", "brief_keyword_audit"
+    } <= names
+    print(f"    {'✓' if catalog_ok else '✗'} 工具注册表：共 {len(catalog)} 个工具（含 4 个确定性计算工具）")
+
+    ok = all([not unblocked, math_ok, funnel_ok, timeline_ok, actuals_ok, partial_ok, keyword_ok, catalog_ok])
+    if not ok:
+        print("    ! 计算层异常：可能沙箱白名单有漏、换算不可复现，或缺失项被补成了估算值")
+    return ok
+
+
 def _mask_url_for_print() -> str:
     """掩码后的目标库连接串（绝不回显明文密码）。"""
     from app.core.pg import database_url, mask_url
@@ -1435,6 +1741,8 @@ def main() -> int:
         otlp = check_otel(brief)
         propagated = check_trace_propagation()
         dhuman = check_digital_human()
+        multimodal = check_multimodal()
+        computed = check_compute()
     except Exception as error:  # noqa: BLE001
         print(f"\n[失败] 自检演练异常：{type(error).__name__}: {error}")
         import traceback
@@ -1459,6 +1767,8 @@ def main() -> int:
         "OTLP 导出链路": otlp,
         "W3C 传播与采样": propagated,
         "数字人渲染样例": dhuman,
+        "Brief 素材（多模态）": multimodal,
+        "确定性计算沙箱": computed,
     }
     print()
     if all(checks.values()):
@@ -1475,7 +1785,11 @@ def main() -> int:
             "调用轨迹 span 树成型、层级正确且可按 OTel 形状导出；"
             "OTLP 导出链路 id 一致、层级与智能体归属保留；"
             "W3C traceparent 可跨进程延续、采样只作用于导出面；"
-            "数字人渲染样例的清单、惰性推进、租户隔离与失败路径均符合预期。"
+            "数字人渲染样例的清单、惰性推进、租户隔离与失败路径均符合预期；"
+            "Brief 素材的画幅为文件头实测值、本地素材路径受限于 assets/ 目录、"
+            "离线链路如实声明「不读图」且带素材的任务仍能跑完；"
+            "确定性计算沙箱在受限语法内可复现求值、越权语法一律拦截，"
+            "量级换算/排期推算/回填核算均给出可复核的结果与来源。"
         )
         return 0
 

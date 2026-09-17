@@ -25,6 +25,7 @@ from .base import (
     read_evidence,
     read_risks,
     system_prompt,
+    vision_attachments,
 )
 
 META = AgentMeta(
@@ -51,7 +52,19 @@ SYSTEM = system_prompt(
 - 严格区分「事实」「假设」「创意建议」，不得把假设写成事实
 - 不得编造调研数据、用户数量、百分比或来源；无法确认的信息必须放入 risks
 - 受众结论要说明推断依据
-- 只输出 JSON，不输出任何解释性文字""",
+- 只输出 JSON，不输出任何解释性文字
+
+工具用法：
+- differentiation_map 推演的是「同质化主张 → 可能的差异化空位」，属于**策略假设**，
+  不是竞品投放数据：引用它时必须在 message_house.evidence 里标注
+  「假设（非实测数据）」，不得改写成事实或写成调研结论
+- 受众画像没有外部数据源，只能基于 brief 与行业常识推断：
+  推断链条要写进 risks，不要伪装成已验证结论
+- web_search / page_fetch 返回了带链接的外部结果时，可作为行业背景并**带上链接**；
+  若工具说明「本轮未启用联网」，则不得引用任何在线数据或实时行情
+- funnel_sensitivity 给出的是「曝光 → 点击/互动」的**确定性换算表**与点击目标的反推：
+  objectives 的 target 必须写成区间且与表中量级自洽（如「曝光 10 万量级 → 点击 3,000–8,000」），
+  **不要在目标里心算数字**；换算基准是内部经验值，必须在 risks 中声明其口径""",
 )
 
 SCHEMA = """{
@@ -122,6 +135,8 @@ def run(ctx: AgentRunContext) -> AgentResult:
         user,
         "A1.strategy",
         {"brief": brief.model_dump(mode="json"), "memory": ctx.memory, "tools": tools.context()},
+        # 策略是最需要「看懂产品长什么样」的一步：素材图片随本次调用一并发送
+        images=vision_attachments(ctx),
     )
     content = normalize(result.data, brief.audience)
 

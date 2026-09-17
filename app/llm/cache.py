@@ -63,7 +63,8 @@ class ResponseCache:
                 "temperature": request.temperature,
                 "max_tokens": request.max_tokens or effective_max_tokens(),
                 "json": request.json,
-                "messages": [[m.role, m.content] for m in request.messages],
+                # 图片按哈希进指纹：换了素材必须算新请求，但 base64 不进缓存键
+                "messages": [m.cache_fingerprint() for m in request.messages],
             },
             ensure_ascii=False,
             sort_keys=True,

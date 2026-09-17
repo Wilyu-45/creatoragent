@@ -49,7 +49,11 @@ class OpenAICompatibleProvider:
         )
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": m.role, "content": m.content} for m in request.messages],
+            # 多模态：带图消息产出内容块数组（text + image_url），
+            # 无图时仍是一个字符串——纯文本提供方不会因为这次改动收到新形状
+            "messages": [
+                {"role": m.role, "content": m.payload_content()} for m in request.messages
+            ],
             "temperature": request.temperature if request.temperature is not None else self._temperature,
             "max_tokens": max_tokens,
             "stream": False,
@@ -93,7 +97,7 @@ class OpenAICompatibleProvider:
         # DeepSeek 也遵循该字段。拿不到就按 0 处理（保守：宁可高估成本）。
         details = usage.get("prompt_tokens_details") or {}
         cached_tokens = int(details.get("cached_tokens") or usage.get("prompt_cache_hit_tokens") or 0)
-        prompt_text = "\n".join(m.content for m in request.messages)
+        prompt_text = "\n".join(m.text for m in request.messages)
         return LLMResponse(
             content=content,
             provider=self.name,

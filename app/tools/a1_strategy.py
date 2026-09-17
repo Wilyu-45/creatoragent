@@ -2,7 +2,8 @@
 
 对应《plan.md》2.2.3 的「搜索 Server / RAG Server」内置替代：
 行业洞察画像（industry_insight）、案例库检索（case_library）、
-渠道格局（channel_landscape）。记忆召回由编排层注入 ``ctx.memory``，不在此重复。
+渠道格局（channel_landscape）、差异化定位推演（differentiation_map）。
+记忆召回由编排层注入 ``ctx.memory``，不在此重复。
 """
 
 from __future__ import annotations
@@ -101,6 +102,61 @@ def channel_landscape(ctx: "AgentRunContext") -> ToolOutcome:
     )
 
 
+def differentiation_map(ctx: "AgentRunContext") -> ToolOutcome:
+    """同质化主张 → 差异化空位的结构化推演，供受众定位与信息屋取角。
+
+    诚实边界：本系统**没有竞品投放数据**。这里给出的是「内置行业洞察 + 案例库」
+    交叉推演出的空位候选，不是竞品实测结论；A1 必须结合 Brief 自行判断后写入
+    ``audience_profile`` 与 ``message_house``，不得把它当成调研数据引用。
+    """
+    brief = ctx.brief
+    profile = industry_profile(brief.industry)
+    cases = cases_for(brief.industry, brief.channel)[:3]
+
+    # 同质化区：行业通用动机人人都在喊，喊了等于没差异化
+    top_motivation = profile.motivations[0] if profile.motivations else ""
+    common_claims = [f"只喊「{item}」" for item in profile.motivations[:3]]
+    # 空位来源：未被正面回答的决策阻力
+    unmet_objections = list(profile.objections[:3])
+    # 可占位的证据型差异化：把「可提供的自证材料」摆在主张位置
+    evidence_angles = list(profile.proof_assets[:3])
+    case_angles = [f"{case.name}：{case.angle}" for case in cases]
+
+    audience = brief.audience or "目标人群"
+    brand = brief.brand or "本品牌"
+    product = brief.product or "本产品"
+    seed_parts = [
+        f"对「{audience}」而言，{brand} 不靠「{top_motivation}」取胜"
+        if top_motivation
+        else f"对「{audience}」而言，{brand} 需要一个不被行业口号淹没的角度",
+        f"而是正面回应「{unmet_objections[0]}」" if unmet_objections else "",
+        f"，并用「{evidence_angles[0]}」自证" if evidence_angles else "",
+    ]
+    positioning_seed = "".join(part for part in seed_parts if part) + f"（围绕 {product} 展开，待 A1 改写）"
+
+    lines = [
+        f"同质化区（避让）：{'；'.join(common_claims) or '（无）'}",
+        f"差异化空位（未被回应的阻力）：{'；'.join(unmet_objections) or '（无）'}",
+        f"可占位的证据角度（我方须能提供）：{'；'.join(evidence_angles) or '（无）'}",
+        f"可借鉴的差异化取角（案例库）：{'；'.join(case_angles) or '（无同类案例）'}",
+        f"定位句骨架（示例，须改写为 Brief 口径）：{positioning_seed}",
+        "（来源：内置行业洞察 + 案例库交叉推演——**非竞品投放数据**，"
+        "证据角度须先确认本品牌确实能提供该材料，否则不得写入信息屋）",
+    ]
+    return ToolOutcome(
+        summary=f"识别 {len(common_claims)} 类同质化主张、{len(unmet_objections)} 个差异化空位",
+        detail="\n".join(lines),
+        data={
+            "industry": brief.industry,
+            "common_claims": common_claims,
+            "unmet_objections": unmet_objections,
+            "evidence_angles": evidence_angles,
+            "case_angles": case_angles,
+            "positioning_seed": positioning_seed,
+        },
+    )
+
+
 TOOLS: list[Tool] = [
     Tool(
         name="industry_insight",
@@ -120,6 +176,18 @@ TOOLS: list[Tool] = [
         agent_ids=("A1",),
         handler=channel_landscape,
     ),
+    Tool(
+        name="differentiation_map",
+        description="同质化主张 → 差异化空位推演（非竞品实测数据）",
+        agent_ids=("A1",),
+        handler=differentiation_map,
+    ),
 ]
 
-__all__ = ["TOOLS", "industry_insight", "case_library", "channel_landscape"]
+__all__ = [
+    "TOOLS",
+    "industry_insight",
+    "case_library",
+    "channel_landscape",
+    "differentiation_map",
+]

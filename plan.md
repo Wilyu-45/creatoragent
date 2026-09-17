@@ -378,7 +378,7 @@ Turn Budget 限制每个 Session 的最大迭代轮数以防止失控成本和�
 | LangGraph 做流程编排 | ✅ 一致 | `StateGraph` + 条件边门禁环 + `interrupt()` 人工审批 + `SqliteSaver` 断点续跑 |
 | CrewAI 做 Agent 定义层 | ⏸️ 未引入 | 当前 11 个智能体均为「单次结构化生成」，LangGraph 节点 + Pydantic 契约已足够；引入 CrewAI 会增加一层抽象与失败面，留待需要 Agent 内部多步推理/工具循环时再评估 |
 | PostgreSQL + Redis 共享黑板 | ✅ 双后端实现 | file 模式（默认）：JSON 文件 + 进程内锁 + `intent` 租约满足单机并发正确性；`CREATOR_STORAGE=pg`：黑板/任务/记忆库/评估/数字人作业入 PostgreSQL（`payload jsonb`），意图租约改 Redis `SET NX PX` + Lua 原子脚本，检查点用 PostgresSaver（fail-loud）。契约（方法签名 / 不变量 / 表与 key 映射 / 触发条件）见 [`storage_contract.md`](storage_contract.md)，迁移与回归脚本齐备（`pg_migrate.py` / `pg_check.py`） |
-| MCP Server 统一接入 | ✅ 内置工具层 | `app/tools/*` 为 11 个智能体提供 33 个生成前工具（行业洞察/案例库/渠道规范/敏感词扫描/SEO 规则/视觉风格/经验基准/知识库统计），执行报告注入提示词与 LLM context，span 记为 `tools.*`；外部 MCP（搜索/图像生成）仍按需后接 |
+| MCP Server 统一接入 | ✅ 内置工具层 | `app/tools/*` 为 11 个智能体提供 48 个生成前工具（行业洞察/案例库/渠道规范/敏感词扫描/SEO 规则/视觉风格/经验基准/知识库统计/创作质量自检/历史查重/联网检索/多模态素材核验/确定性计算沙箱），执行报告注入提示词与 LLM context，span 记为 `tools.*`。三条纪律：**离线优先**（联网与读图均默认关闭，未启用时如实声明而非编造）、**失败隔离**（单工具异常只记报告）、**如实标注来源**（经验基准不冒充平台数据）；确定性计算走 `app/core/sandbox.py` 的 AST 白名单求值，**不开放任意代码执行**；外部 MCP（图像生成等）仍按需后接 |
 | OpenTelemetry + LangSmith | 🔁 事件总线 + SSE | `/api/metrics` 覆盖延迟 p99、成本、缓存、租约、门禁通过率、**评估分**等关键指标；全链路 Trace 待接入 |
 | LangSmith Eval / RAGAS（2.5 系统级） | 🔁 自建替代 | `app/core/judge.py` 双轨评估器（规则版可复现 + 模型版失败自动回退）+ `golden/` 黄金数据集与基线回归，见 2.5.1 / 2.5.2 |
 | 向量数据库 | 🔁 本地向量 + 关键词混合 | 记忆库用本地确定性 hashing embedding（可切 OpenAI `/embeddings`）+ 2-gram 关键词混合打分，零外部依赖；数据量增大后可替换为专用向量库 |

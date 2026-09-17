@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -11,12 +12,80 @@ from ..core.util import js_round
 ChatRole = str  # 'system' | 'user' | 'assistant'
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_DATA_URL_RE = re.compile(r"^data:([^;,]+)(;base64)?,", re.IGNORECASE)
+
+
+@dataclass
+class ImagePart:
+    """随消息发送的一张图片（多模态输入）。
+
+    两种引用形态，直接对应 OpenAI 协议的 ``image_url.url``：
+
+    * **remote**——``https://...`` 公网图片地址，由提供方自行拉取；
+    * **inline**——``data:image/png;base64,...`` 内联（本地素材在
+      ``app/core/assets.py`` 里读成 data URL 后传入，模型无需访问本机文件）。
+
+    ``alt`` 是这张图的**文字说明**：离线引擎与纯文本模型据此理解图片，
+    同时也是「图片内容」进入响应缓存指纹与日志的可读部分。
+    """
+
+    url: str
+    #: auto / low / high，透传给支持该字段的提供方
+    detail: str = "auto"
+    alt: str = ""
+
+    @property
+    def inline(self) -> bool:
+        return bool(_DATA_URL_RE.match(self.url))
+
+    def payload(self) -> dict[str, Any]:
+        """OpenAI 协议的图片内容块。"""
+        image_url: dict[str, Any] = {"url": self.url}
+        if self.detail and self.detail != "auto":
+            image_url["detail"] = self.detail
+        return {"type": "image_url", "image_url": image_url}
+
+    def fingerprint(self) -> str:
+        """缓存指纹片段：内联 data URL 是长 base64，必须哈希后再进缓存键。"""
+        digest = hashlib.sha1(self.url.encode("utf-8")).hexdigest()[:16]
+        return f"{digest}:{self.detail}:{self.alt}"
 
 
 @dataclass
 class ChatMessage:
     role: ChatRole
     content: str
+    #: 多模态附件；为空时协议层产出与纯文本时代完全一致的字符串 content
+    images: list[ImagePart] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        """纯文本视图：正文 + 各图的文字说明。
+
+        token 估算、缓存可读部分、日志都用这里——它们只需要「这张图是什么」，
+        不需要图片字节；body 不变时该视图与原实现逐字一致。
+        """
+        if not self.images:
+            return self.content
+        lines = [
+            f"[图片{i + 1}]{'：' + image.alt if image.alt else ''}"
+            for i, image in enumerate(self.images)
+        ]
+        return "\n".join([self.content, *lines]) if self.content else "\n".join(lines)
+
+    def payload_content(self) -> str | list[dict[str, Any]]:
+        """OpenAI 协议的 ``content``：无图时是字符串，有图时是内容块数组。"""
+        if not self.images:
+            return self.content
+        blocks: list[dict[str, Any]] = []
+        if self.content:
+            blocks.append({"type": "text", "text": self.content})
+        blocks.extend(image.payload() for image in self.images)
+        return blocks
+
+    def cache_fingerprint(self) -> list[Any]:
+        """响应缓存指纹片段（图片按哈希计，不把 base64 塞进缓存键）。"""
+        return [self.role, self.content, [image.fingerprint() for image in self.images]]
 
 
 @dataclass

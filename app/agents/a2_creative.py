@@ -26,6 +26,7 @@ from .base import (
     read_evidence,
     read_risks,
     system_prompt,
+    vision_attachments,
 )
 
 META = AgentMeta(
@@ -52,7 +53,17 @@ SYSTEM = system_prompt(
 - 创意方向之间必须有实质差异，不能是同一方向的措辞变化
 - 不得承诺效果、收益，不得使用绝对化用语
 - 每个方向都要说明适配度与风险，不要把创意建议写成事实
-- 只输出 JSON，不输出任何解释性文字""",
+- 只输出 JSON，不输出任何解释性文字
+
+工具用法：
+- direction_scoring 会对你给出的候选方向做五维启发式预评分（差异化/情绪张力/
+  可实证性/渠道适配/可延展），**它是启发式排序而非投放数据**：
+  可以参考它来调整推荐方向与 fit_score，但必须在 recommendation_reason 里
+  说明你采纳或推翻它排序的理由，不得把分数当作业绩预测写进正文
+- case_library / hook_patterns 给出的是同行业历史结构与案例方向，用于找差异空位；
+  引用时不得声称是竞品实际投放数据
+- web_search 返回带链接的外部案例时可在 reference_cases.source 里写明链接；
+  若工具说明「本轮未启用联网」，则不得引用任何在线案例""",
 )
 
 SCHEMA = """{
@@ -133,6 +144,8 @@ def run(ctx: AgentRunContext) -> AgentResult:
         user,
         "A2.creative",
         {"brief": brief.model_dump(mode="json"), "strategy": strategy, "memory": ctx.memory, "tools": tools.context()},
+        # 创意方向从素材本身找切入（产品细节/使用场景），图像随本次调用发送
+        images=vision_attachments(ctx),
     )
     content = normalize(result.data)
     directions = as_obj_array(content["directions"])

@@ -28,6 +28,7 @@ from .base import (
     read_evidence,
     read_risks,
     system_prompt,
+    vision_attachments,
 )
 
 META = AgentMeta(
@@ -61,7 +62,14 @@ SYSTEM = system_prompt(
 - claims 只声明**正文里真实出现过**的主张；每条必须给出 source。
   **没有来源的主张不要放进 claims 来「交给下游处理」** —— 那个数字本就不该写进正文。
 - 收到 revision_feedback 时，必须逐条落实修改，不得仅做措辞替换
-- 只输出 JSON，不输出任何解释性文字""",
+- 只输出 JSON，不输出任何解释性文字
+
+工具用法：
+- hook_strength 会对你本次输出前能看到的标题备选（A3 的 headline_candidates）
+  给开场钩子强度分并预检红线词：**分数高不等于可以写**，
+  命中红线词的标题一律不许进正文，先改写再使用
+- banned_words 是写前红线预览，请在下笔时规避；
+  工具判定与 A7/A6 的最终裁定冲突时，以审核智能体结论为准""",
 )
 
 SCHEMA = """{
@@ -184,6 +192,8 @@ def run(ctx: AgentRunContext) -> AgentResult:
             "tools": tools.context(),
         },
         schema=SCHEMA,
+        # 文案要和画面里实际有的东西对得上（颜色/包装/场景），图像随本次调用发送
+        images=vision_attachments(ctx),
     )
 
     content = normalize(result.data)

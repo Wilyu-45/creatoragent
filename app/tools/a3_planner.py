@@ -208,7 +208,7 @@ TOOLS: list[Tool] = [
     Tool(
         name="topic_dedupe",
         description="拟用角度与记忆库历史选题的重复度查重",
-        agent_ids=("A3",),
+        agent_ids=("A2", "A3"),
         handler=topic_dedupe,
     ),
 ]

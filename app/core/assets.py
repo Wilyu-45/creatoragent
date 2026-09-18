@@ -34,9 +34,9 @@ if TYPE_CHECKING:  # 仅类型标注：避免 core → llm 的运行时反向依
     from ..llm.types import ImagePart
 
 #: 单个素材的字节上限（超过则拒绝内联：base64 后膨胀 1/3，直接烧 token 与成本）
-MAX_ASSET_BYTES = 4 * 1024 * 1024
+MAX_ASSET_BYTES = 8 * 1024 * 1024
 #: 进入提示词的素材条数上限（素材清单是情报，不能挤占创作预算）
-MAX_ASSETS = 12
+MAX_ASSETS = 20
 
 _KIND_LABEL = {"image": "图片", "video": "视频", "document": "文档", "link": "链接"}
 _SOURCE_LABEL = {"remote": "公网地址", "inline": "内联数据", "local": "本地素材"}
@@ -344,18 +344,19 @@ def describe_asset(asset: Asset, index: int) -> str:
     return line
 
 
-def assets_prompt_block(raw: Any, *, title: str = "参考素材") -> str:
+def assets_prompt_block(raw: Any, *, title: str = "参考素材", agent_id: str = "") -> str:
     """渲染素材清单提示词块；**没有素材时返回空串**（提示词与历史逐字一致）。
 
     末行如实区分「图片已随消息附带」与「本模型不读图」——两种情况下智能体
     可用的信息不同，含糊其辞会诱导模型描述它其实看不到的画面。
+    ``agent_id`` 传入智能体 id 时按该智能体的模型覆盖判定读图能力。
     """
     assets = parse_assets(raw)
     if not assets:
         return ""
     from ..llm.engine import vision_enabled
 
-    seen_vision = vision_enabled() and any(asset.as_image_part() for asset in assets)
+    seen_vision = vision_enabled(agent_id) and any(asset.as_image_part() for asset in assets)
     lines = [f"【{title}】本次任务附带 {len(assets)} 条素材（由使用者提供，非系统生成）："]
     lines.extend(describe_asset(asset, index) for index, asset in enumerate(assets, start=1))
     lines.append(
@@ -368,15 +369,16 @@ def assets_prompt_block(raw: Any, *, title: str = "参考素材") -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def vision_parts(raw: Any, *, limit: int | None = None) -> list["ImagePart"]:
+def vision_parts(raw: Any, *, limit: int | None = None, agent_id: str = "") -> list["ImagePart"]:
     """取可随消息发送的图片块；多模态不可用时返回空列表。
 
+    ``agent_id`` 传入智能体 id 时按该智能体的模型覆盖判定读图能力。
     ``limit`` 默认取 ``LLM_VISION_MAX_IMAGES``——多模态输入按图片计费，
     且图多了会挤占文本预算。
     """
     from ..llm.engine import vision_enabled
 
-    if not vision_enabled():
+    if not vision_enabled(agent_id):
         return []
     if limit is None:
         raw_limit = getattr(get_config().llm, "vision_max_images", 3)

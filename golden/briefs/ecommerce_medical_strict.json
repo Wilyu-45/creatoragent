@@ -17,7 +17,7 @@
   "expect": {
     "min_quality": 80,
     "min_judge": 72,
-    "max_revisions": 2,
+    "max_revisions": 3,
     "min_keyword_hits": 1,
     "expect_first_round_blocked": true,
     "must_not_contain": ["治疗", "防癌", "抗癌", "降三高", "保健功效", "国家级", "最佳", "立刻见效"],

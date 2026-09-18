@@ -17,7 +17,14 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..agents.registry import PLANNED_AGENTS, all_agent_meta
-from ..config import RUBRIC_VERSION, get_config, public_config, update_config
+from ..config import (
+    RUBRIC_VERSION,
+    get_config,
+    llm_settings_for,
+    public_config,
+    save_persisted_settings,
+    update_config,
+)
 from ..core.blackboard import blackboard
 from ..core.clock import now_iso
 from ..core.digital_human import drop_task as drop_digital_human_jobs
@@ -222,6 +229,8 @@ def health() -> dict[str, Any]:
             "name": provider.name,
             "model": provider.model,
             "simulated": getattr(provider, "simulated", True),
+            # 有覆盖时部分智能体的实际提供方与全局默认不同（明细见 /api/metrics）
+            "agentOverrides": len(get_config().llm.agent_models),
         },
         # 断点续跑是否真的可用：sqlite = 可跨重启；memory = 重启后任务无法续跑
         "checkpointer": {
@@ -520,7 +529,50 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             patch[key] = value
 
+    # 站点监控（site_monitor 工具的待爬页面 URL，持久化到 data/settings.json）：
+    # 逐项校验 http(s) 前缀（SSRF 的私网拦截仍由 core/web.py 抓取时兜底）、strip、去重、上限 20
+    site_urls_changed = False
+    raw_site_urls = body.get("siteUrls")
+    if isinstance(raw_site_urls, list):
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for item in raw_site_urls:
+            if not isinstance(item, str):
+                continue
+            url = item.strip()
+            low = url.lower()
+            if not low.startswith(("http://", "https://")) or url in seen:
+                continue
+            seen.add(url)
+            cleaned.append(url)
+            if len(cleaned) >= 20:
+                break
+        patch["siteUrls"] = cleaned
+        site_urls_changed = True
+
+    # 每智能体模型覆盖（持久化到 data/settings.json）：键大写归一并限定 A<数字>
+    # 形态；apiKey 缺失 = 保留已存值、显式 "" = 清除（继承全局），仅收字符串字段
+    agent_models_changed = False
+    raw_agent_models = body.get("agentModels")
+    if isinstance(raw_agent_models, dict):
+        cleaned_models: dict[str, dict[str, str]] = {}
+        for raw_id, raw_spec in raw_agent_models.items():
+            if not isinstance(raw_spec, dict):
+                continue
+            aid = str(raw_id).strip().upper()
+            if not (aid.startswith("A") and aid[1:].isdigit()):
+                continue
+            spec: dict[str, str] = {}
+            for src, dst in (("model", "model"), ("baseUrl", "baseUrl"), ("apiKey", "apiKey")):
+                if isinstance(raw_spec.get(src), str):
+                    spec[dst] = raw_spec[src]
+            cleaned_models[aid] = spec
+        patch["agentModels"] = cleaned_models
+        agent_models_changed = True
+
     update_config(patch)
+    if site_urls_changed or agent_models_changed:
+        save_persisted_settings()
     log.info(
         f"运行时配置已更新：provider={get_config().llm.provider} model={get_config().llm.model}"
     )
@@ -916,6 +968,30 @@ def metrics(request: Request) -> dict[str, Any]:
     provider = resolve_provider()
     config = get_config()
 
+    # 提供方清单：全局默认 + 每个智能体覆盖的**实际生效**值（按 name+model 去重），
+    # agents 标注哪些智能体的覆盖指向这一行——否则面板只显示全局默认，
+    # 「A4 其实跑在本地 Ollama 上」就从界面上消失了
+    provider_rows: dict[tuple[str, str], dict[str, Any]] = {
+        (provider.name, provider.model): {
+            "name": provider.name,
+            "model": provider.model,
+            "simulated": getattr(provider, "simulated", True),
+            "agents": [],
+        }
+    }
+    for aid in sorted(config.llm.agent_models):
+        eff = resolve_provider(llm_settings_for(aid))
+        row = provider_rows.setdefault(
+            (eff.name, eff.model),
+            {
+                "name": eff.name,
+                "model": eff.model,
+                "simulated": getattr(eff, "simulated", True),
+                "agents": [],
+            },
+        )
+        row["agents"].append(aid)
+
     return {
         "system": {
             "total_tasks": len(tasks),
@@ -963,13 +1039,7 @@ def metrics(request: Request) -> dict[str, Any]:
             # 追踪（plan.md 2.4）：按 span 名聚合的耗时排行，定位「哪一层最贵」
             "tracing": {**tracer.stats(tenant=_tenant_of(request)), "otlp": otel.stats()},
         },
-        "providers": [
-            {
-                "name": provider.name,
-                "model": provider.model,
-                "simulated": getattr(provider, "simulated", True),
-            }
-        ],
+        "providers": list(provider_rows.values()),
         "agents": [
             {
                 "id": meta["id"],

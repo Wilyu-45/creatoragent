@@ -173,7 +173,7 @@ def call_with_prompts(
     # 素材清单在**所有**智能体的用户提示词前统一注入：它是 Brief 的组成部分，
     # 每个角色都需要知道「本次带了哪些素材」（合规看授权风险、审校看图文是否对得上、
     # 渠道看能不能用作封面）。没有素材时返回空串，提示词与历史逐字一致。
-    block = assets_block(ctx)
+    block = assets_block(ctx, meta.id)
     if block:
         user = f"{block}{user}"
 
@@ -183,7 +183,7 @@ def call_with_prompts(
     if images:
         from ..llm.engine import vision_enabled
 
-        if not vision_enabled():
+        if not vision_enabled(meta.id):
             images = None
 
     response = chat(
@@ -195,6 +195,8 @@ def call_with_prompts(
             ],
             context=context,
             json=True,
+            # 每智能体模型覆盖：engine 据此合并该角色的模型/端点/密钥设置
+            agent_id=meta.id,
         )
     )
 
@@ -217,11 +219,16 @@ def call_with_prompts(
         latency_ms=response.latency_ms,
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
-        cost_usd=cost_of(
-            response.model,
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            cached_tokens=usage.cached_tokens,
+        # 本地端点成本恒为 0（硬件归用户），与 cost_guard 的计费口径一致
+        cost_usd=(
+            0.0
+            if response.local
+            else cost_of(
+                response.model,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                cached_tokens=usage.cached_tokens,
+            )
         ),
         provider=response.provider,
         model=response.model,
@@ -387,22 +394,27 @@ def localization_block(ctx: AgentRunContext) -> str:
     return localization_directive(ctx.brief.channel, ctx.brief.language)
 
 
-def assets_block(ctx: AgentRunContext) -> str:
+def assets_block(ctx: AgentRunContext, agent_id: str = "") -> str:
     """渲染 Brief 素材清单（多模态输入的文字视图）。无素材时返回空串。
 
     这是「素材」在**离线与纯文本模型**下的唯一来源，因此素材相关的智能体
     （合规、审校、渠道）都接它，哪怕它们自己不读图。
+    ``agent_id`` 传入智能体 id 时按该智能体的模型覆盖判定读图能力，
+    保证「图片已附带/本模型不读图」的说法与实际发送的内容块一致。
     """
     from ..core.assets import assets_prompt_block
 
-    return assets_prompt_block(ctx.brief.assets)
+    return assets_prompt_block(ctx.brief.assets, agent_id=agent_id)
 
 
-def vision_attachments(ctx: AgentRunContext) -> list[ImagePart]:
-    """取可随本次调用发送的素材图片；多模态不可用时为空列表。"""
+def vision_attachments(ctx: AgentRunContext, agent_id: str = "") -> list[ImagePart]:
+    """取可随本次调用发送的素材图片；多模态不可用时为空列表。
+
+    ``agent_id`` 传入智能体 id 时按该智能体的模型覆盖判定读图能力。
+    """
     from ..core.assets import vision_parts
 
-    return vision_parts(ctx.brief.assets)
+    return vision_parts(ctx.brief.assets, agent_id=agent_id)
 
 
 def content_to_text(content: dict[str, Any]) -> str:

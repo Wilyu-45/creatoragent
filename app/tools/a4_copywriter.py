@@ -174,7 +174,7 @@ TOOLS: list[Tool] = [
     Tool(
         name="hook_strength",
         description="标题备选的开场钩子强度评分与红线词预检",
-        agent_ids=("A4",),
+        agent_ids=("A2", "A4"),
         handler=hook_strength,
     ),
 ]

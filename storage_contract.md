@@ -1,11 +1,15 @@
 # 存储层替换契约（Storage Contract）
 
+**读者**：要替换或扩展存储层的开发与部署方。**回答**：持久化了哪些实体、
+各自的落盘位置与方法签名契约、换成 PostgreSQL + Redis 时怎么一一对应。
+**不负责**：架构选型理由（见 `plan.md` 2.2）、使用操作（见 `USER_GUIDE.md`）。
+
 单机默认用 **JSON 文件 + SQLite**（零外部依赖、离线可跑）；k8s 清单因此写死
 `replicas: 1` + `strategy: Recreate`（有 `check_deploy.py` 断言守护）。要横向扩展
 （多副本），必须先按本契约把存储层替换为 **PostgreSQL + Redis**。本文列出全部
 持久化实体的落盘位置、方法签名契约与替换映射，替换时不必反向推导接口。
 
-> **实现状态（2026-09-15）**：本契约已全量实现。设置 `CREATOR_STORAGE=pg`
+> **实现状态**：本契约已全量实现。设置 `CREATOR_STORAGE=pg`
 > 即切换到 PostgreSQL + Redis 后端（默认 `file` 完全不变）；pg 依赖
 > （psycopg / redis / langgraph-checkpoint-postgres）只在 pg 分支内延迟 import，
 > file 模式保持零依赖。各实体的 PG 实现见 §2 表「实现模块」列；
@@ -189,7 +193,7 @@ doctor 同样守护「必须是真的 postgres」。
 
 ## 5. 替换后的回归验证（已落地为脚本）
 
-1. `python scripts/doctor.py`：file 模式跑出 16 项全绿（其中含反向断言
+1. `python scripts/doctor.py`：file 模式全绿（其中含反向断言
    「file 模式不得泄漏 psycopg/redis import」）；`CREATOR_STORAGE=pg` 下重跑，
    依赖检查与检查点后端断言自动切换为 postgres 口径；
 2. `python scripts/pg_check.py`：PG 存储层专项回归 —— 租户隔离、事实去重、

@@ -194,7 +194,7 @@ TOOLS: list[Tool] = [
     Tool(
         name="readability_metrics",
         description="可读性度量：句长分布/段落长度/标点密度/重复表达",
-        agent_ids=("A5",),
+        agent_ids=("A4", "A5"),
         handler=readability_metrics,
     ),
 ]

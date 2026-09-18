@@ -63,7 +63,12 @@ SYSTEM = system_prompt(
 - case_library / hook_patterns 给出的是同行业历史结构与案例方向，用于找差异空位；
   引用时不得声称是竞品实际投放数据
 - web_search 返回带链接的外部案例时可在 reference_cases.source 里写明链接；
-  若工具说明「本轮未启用联网」，则不得引用任何在线案例""",
+  若工具说明「本轮未启用联网」，则不得引用任何在线案例
+- topic_dedupe 会把你的候选方向与品牌历史选题做词面查重（2-gram 重合度）：
+  标为高重合的方向必须换切入角度，不要只改措辞；查重是词面比对，
+  未报警不等于不撞车，你仍要主动避开明显同质的题
+- hook_strength 可对每个方向的 sample_headline 做钩子强度预检：
+  低分钩子先改写再给出，命中红线词的标题一律换掉""",
 )
 
 SCHEMA = """{
@@ -145,7 +150,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
         "A2.creative",
         {"brief": brief.model_dump(mode="json"), "strategy": strategy, "memory": ctx.memory, "tools": tools.context()},
         # 创意方向从素材本身找切入（产品细节/使用场景），图像随本次调用发送
-        images=vision_attachments(ctx),
+        images=vision_attachments(ctx, META.id),
     )
     content = normalize(result.data)
     directions = as_obj_array(content["directions"])

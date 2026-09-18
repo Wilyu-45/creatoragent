@@ -265,7 +265,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
             "tools": tools.context(),
         },
         # 美术指导必须看到已有素材才能谈一致性（色调/构图/画幅），图像随本次调用发送
-        images=vision_attachments(ctx),
+        images=vision_attachments(ctx, META.id),
     )
 
     content = normalize(result.data, brief.channel)

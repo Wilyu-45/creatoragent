@@ -193,6 +193,11 @@ def main() -> int:
         "AUTO_APPROVE": "true",
         "PYTHONNOUSERSITE": "1",
         "LLM_PROVIDER": provider,
+        # 编排预算同样必须钉死（与 .env.example 默认一致）：.env 的临时调参若泄漏，
+        # 返工轮次会跟着变，曾把「返工 ≤2」期望的失败检查固化进基线
+        "TURN_BUDGET": "25",
+        "MAX_REVISIONS": "2",
+        "QUALITY_THRESHOLD": "75",
     }
     log_handle = (data_dir / "server.log").open("w", encoding="utf-8", errors="replace")
     proc = subprocess.Popen(

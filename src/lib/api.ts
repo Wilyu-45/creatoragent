@@ -66,6 +66,11 @@ export interface PublicConfigView {
     timeoutMs: number;
     apiKeySet: boolean;
     apiKeyMasked: string;
+    /** 每智能体模型覆盖（键 A1–A11；空字段=继承全局，密钥只回掩码） */
+    agentModels: Record<
+      string,
+      { model: string; baseUrl: string; apiKeySet: boolean; apiKeyMasked: string }
+    >;
   };
   /** A11 记忆库向量化设置 */
   embedding: {
@@ -103,6 +108,10 @@ export interface PublicConfigView {
     apiKeyMasked: string;
     timeoutMs: number;
   };
+  /** 联网检索网关设置（前端只回显站点监控 URL 列表，其余来自环境变量） */
+  search: {
+    siteUrls: string[];
+  };
   /** 分布式追踪设置（OTLP 导出为只读配置，来自环境变量） */
   tracing: {
     otlpEndpoint: string;
@@ -119,7 +128,7 @@ export interface HealthView {
   ok: boolean;
   time: string;
   config: PublicConfigView;
-  provider: { name: string; model: string; simulated: boolean };
+  provider: { name: string; model: string; simulated: boolean; agentOverrides?: number };
   /** 断点续跑后端：sqlite = 可跨重启；memory = 重启后无法续跑 */
   checkpointer: { kind: 'sqlite' | 'memory' | string; error: string };
   /** OTLP 导出状态（未配置时进程内追踪仍完整可用） */
@@ -330,7 +339,7 @@ export interface MetricsView {
     judge: JudgeMetricsView;
     tracing: TracingMetricsView;
   };
-  providers: { name: string; model: string; simulated: boolean }[];
+  providers: { name: string; model: string; simulated: boolean; agents?: string[] }[];
   agents: {
     id: string;
     name: string;

@@ -5,7 +5,7 @@
 网页正文，任何一处都能注入代码。因此这里只提供受限求值：
 
 * **允许**：数字字面量、变量引用、``+ - * / // % **``、一元正负、括号，
-  以及白名单数学函数（min/max/abs/round/ceil/floor/sqrt/log/log10/pow）；
+  以及白名单数学函数（min/max/abs/round/ceil/floor/sqrt/cbrt/exp/log/log2/log10/pow）；
 * **禁止**：属性访问、下标、推导式、lambda、赋值、字符串操作、``import`` ——
   一律按 AST 节点类型白名单判定（不用正则黑名单：正则挡不住 ``getattr``
   这类间接绕过，白名单被绕过的前提是「多出一种节点类型」）；
@@ -23,17 +23,17 @@ import operator
 from typing import Any
 
 #: 表达式字符数上限
-MAX_EXPRESSION_CHARS = 240
+MAX_EXPRESSION_CHARS = 600
 
 #: AST 节点数上限（复杂度闸门）
-MAX_NODES = 80
+MAX_NODES = 200
 
 #: 幂运算的指数与底数上限（防「大数连乘」把 CPU 吃满）
-MAX_EXPONENT = 12.0
-MAX_POW_BASE = 1e6
+MAX_EXPONENT = 24.0
+MAX_POW_BASE = 1e9
 
 #: 结果量级上限
-MAX_RESULT = 1e15
+MAX_RESULT = 1e18
 
 
 class SandboxError(ValueError):
@@ -54,10 +54,13 @@ _BINOP_FUNCS: dict[type[ast.operator], Any] = {
 #: 允许调用的数学函数（只认名字，不认属性调用）
 _ALLOWED_FUNCS: dict[str, Any] = {
     "abs": abs,
+    "cbrt": math.cbrt,
     "ceil": math.ceil,
+    "exp": math.exp,
     "floor": math.floor,
     "log": math.log,
     "log10": math.log10,
+    "log2": math.log2,
     "max": max,
     "min": min,
     "pow": pow,

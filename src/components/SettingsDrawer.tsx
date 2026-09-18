@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { KnowledgeView, PublicConfigView } from '../lib/api.ts';
+import type { AgentsResponse, KnowledgeView, PublicConfigView } from '../lib/api.ts';
 import { getApiToken, setApiToken } from '../lib/api.ts';
 import { GoldenPanel } from './GoldenPanel.tsx';
 import { KnowledgePanel } from './KnowledgePanel.tsx';
@@ -11,6 +11,7 @@ type Tab = 'runtime' | 'knowledge' | 'memory' | 'golden';
 export function SettingsDrawer({
   config,
   knowledge,
+  agents,
   saving,
   onClose,
   onSave,
@@ -18,6 +19,8 @@ export function SettingsDrawer({
 }: {
   config: PublicConfigView;
   knowledge: KnowledgeView | null;
+  /** 已实现的智能体清单（驱动「智能体模型覆盖」的行列表）；未加载时回落到 config 既有键 */
+  agents?: AgentsResponse | null;
   saving: boolean;
   onClose: () => void;
   onSave: (patch: Record<string, unknown>) => void;
@@ -50,6 +53,31 @@ export function SettingsDrawer({
   const [judgePassThreshold, setJudgePassThreshold] = useState(config.judge.passThreshold);
   const [judgeWeight, setJudgeWeight] = useState(config.judge.weight);
   const [apiToken, setApiTokenState] = useState(getApiToken());
+  const [siteUrlsText, setSiteUrlsText] = useState(config.search.siteUrls.join('\n'));
+  // 每智能体模型覆盖的本地编辑态：apiKey 永不回显，初始恒为空 = 保持不变
+  const [agentModels, setAgentModels] = useState<Record<string, { model: string; baseUrl: string; apiKey: string }>>(
+    () =>
+      Object.fromEntries(
+        Object.entries(config.llm.agentModels).map(([id, ov]) => [
+          id,
+          { model: ov.model, baseUrl: ov.baseUrl, apiKey: '' },
+        ]),
+      ),
+  );
+  // 行列表 = 已实现智能体 ∪ config 里已有的覆盖键（agents 未加载时仍能看到既有覆盖）
+  const agentRows: { id: string; name: string }[] = [
+    ...(agents?.implemented ?? []).map((a) => ({ id: a.id, name: a.name })),
+    ...Object.keys(config.llm.agentModels)
+      .filter((id) => !(agents?.implemented ?? []).some((a) => a.id === id))
+      .map((id) => ({ id, name: '自定义覆盖' })),
+  ];
+
+  const setAgentField = (id: string, field: 'model' | 'baseUrl' | 'apiKey', value: string): void => {
+    setAgentModels((prev) => ({
+      ...prev,
+      [id]: { ...(prev[id] ?? { model: '', baseUrl: '', apiKey: '' }), [field]: value },
+    }));
+  };
 
   const save = (): void => {
     const patch: Record<string, unknown> = {
@@ -76,6 +104,21 @@ export function SettingsDrawer({
       judgeProvider,
       judgePassThreshold,
       judgeWeight,
+      siteUrls: siteUrlsText
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean),
+      // 每智能体覆盖：apiKey 仅输入非空时携带（缺失 = 保留已存值，防止误清）；
+      // 三字段全空的条目由服务端删除该覆盖
+      agentModels: Object.fromEntries(
+        Object.entries(agentModels).map(([id, ov]) => {
+          const entry: { model?: string; baseUrl?: string; apiKey?: string } = {};
+          if (ov.model.trim()) entry.model = ov.model.trim();
+          if (ov.baseUrl.trim()) entry.baseUrl = ov.baseUrl.trim();
+          if (ov.apiKey.trim()) entry.apiKey = ov.apiKey.trim();
+          return [id, entry];
+        }),
+      ),
     };
     if (apiKey.trim()) patch.apiKey = apiKey.trim();
     if (embeddingApiKey.trim()) patch.embeddingApiKey = embeddingApiKey.trim();
@@ -137,6 +180,24 @@ export function SettingsDrawer({
               </div>
             </div>
 
+            <div className="row small" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' }}>
+              <span className="muted">本地模型（OpenAI 兼容端点）：</span>
+              {(
+                [
+                  ['Ollama', 'http://localhost:11434/v1'],
+                  ['LM Studio', 'http://localhost:1234/v1'],
+                  ['vLLM', 'http://localhost:8000/v1'],
+                ] as const
+              ).map(([label, url]) => (
+                <button key={label} type="button" className="btn btn-sm btn-ghost" onClick={() => setBaseUrl(url)}>
+                  {label}
+                </button>
+              ))}
+              <span className="muted">
+                本机 / 私网端点不计费（token 照记）；本地服务需暴露 OpenAI 兼容接口，多数文本模型无需 API Key。
+              </span>
+            </div>
+
             <div className="field" style={{ marginTop: 12 }}>
               <label>
                 API Key{' '}
@@ -174,6 +235,52 @@ export function SettingsDrawer({
                 <label>超时（ms）</label>
                 <input type="number" value={timeoutMs} onChange={(e) => setTimeoutMs(Number(e.target.value))} />
               </div>
+            </div>
+
+            <div className="section-h">智能体模型覆盖（可选）</div>
+            {agentRows.map(({ id, name }) => {
+              const ov = agentModels[id] ?? { model: '', baseUrl: '', apiKey: '' };
+              const info = config.llm.agentModels[id];
+              return (
+                <div className="form-grid" key={id} style={{ marginBottom: 8 }}>
+                  <div className="field">
+                    <label>
+                      {id} · {name}{' '}
+                      {info?.apiKeySet ? (
+                        <Chip tone="tone-ok" mono>
+                          密钥已设置 {info.apiKeyMasked}
+                        </Chip>
+                      ) : null}
+                    </label>
+                    <input
+                      placeholder="继承全局模型"
+                      value={ov.model}
+                      onChange={(e) => setAgentField(id, 'model', e.target.value)}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>Base URL</label>
+                    <input
+                      placeholder="同全局端点"
+                      value={ov.baseUrl}
+                      onChange={(e) => setAgentField(id, 'baseUrl', e.target.value)}
+                    />
+                  </div>
+                  <div className="field">
+                    <label>API Key</label>
+                    <input
+                      type="password"
+                      placeholder="留空保持不变"
+                      value={ov.apiKey}
+                      onChange={(e) => setAgentField(id, 'apiKey', e.target.value)}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+            <div className="muted small" style={{ marginTop: 6 }}>
+              留空 = 继承全局；要清除某智能体的覆盖，把模型留空保存即可。适合让个别角色走本地模型
+              （如 Ollama）或另一家网关；覆盖仅当「模型提供方 = openai」时生效。
             </div>
 
             <div className="section-h">编排与门禁</div>
@@ -438,6 +545,21 @@ export function SettingsDrawer({
               数字人渲染<strong>不在本系统内实现</strong>：HeyGen / D-ID / 腾讯智影等服务的协议差异由你在自己的网关层消化。
               任务产出视频脚本后，「数字人渲染」面板会出现创建入口；环境变量 <code>DIGITAL_HUMAN_API_URL</code>（可选{' '}
               <code>DIGITAL_HUMAN_API_KEY</code> / <code>DIGITAL_HUMAN_AVATAR</code>）切换到对接自建渲染网关。
+            </div>
+
+            <div className="section-h">站点监控</div>
+            <div className="field">
+              <label>待爬页面 URL（一行一个，最多 20 条，创作时由 site_monitor 工具现场抓取）</label>
+              <textarea
+                rows={4}
+                value={siteUrlsText}
+                placeholder={'https://example.com/pricing\nhttps://competitor.com/blog'}
+                onChange={(e) => setSiteUrlsText(e.target.value)}
+              />
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              每次创作时 A1 / A2 / A3 / A6 / A10 会抓取这些页面的正文作为参考（仅限公开页面，
+              每页最多注入 1200 字）。未配置时智能体如实声明「未配置站点监控」，不引用站点数据。
             </div>
 
             <div className="section-h">访问令牌{config.authRequired ? '（已启用鉴权）' : ''}</div>

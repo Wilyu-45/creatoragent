@@ -1688,10 +1688,10 @@ def check_compute() -> bool:
 
     catalog = tool_catalog()
     names = {item["name"] for item in catalog}
-    catalog_ok = len(catalog) == 48 and {
-        "funnel_sensitivity", "publish_timeline", "actuals_audit", "brief_keyword_audit"
+    catalog_ok = len(catalog) == 49 and {
+        "funnel_sensitivity", "publish_timeline", "actuals_audit", "brief_keyword_audit", "site_monitor"
     } <= names
-    print(f"    {'✓' if catalog_ok else '✗'} 工具注册表：共 {len(catalog)} 个工具（含 4 个确定性计算工具）")
+    print(f"    {'✓' if catalog_ok else '✗'} 工具注册表：共 {len(catalog)} 个工具（含 4 个确定性计算工具与站点监控）")
 
     ok = all([not unblocked, math_ok, funnel_ok, timeline_ok, actuals_ok, partial_ok, keyword_ok, catalog_ok])
     if not ok:

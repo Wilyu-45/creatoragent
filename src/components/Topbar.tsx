@@ -32,8 +32,14 @@ export function Topbar({
 
       <div className="topbar-spacer" />
 
-      <Chip tone={provider?.simulated ? 'tone-warn' : 'tone-ok'} mono>
-        {provider ? `${provider.name} · ${provider.model}` : '连接中…'}
+      <Chip
+        tone={provider?.simulated ? 'tone-warn' : 'tone-ok'}
+        mono
+        title={provider?.agentOverrides ? `${provider.agentOverrides} 个智能体使用自定义模型覆盖（详见运行指标）` : undefined}
+      >
+        {provider
+          ? `${provider.name} · ${provider.model}${provider.agentOverrides ? ` ｜${provider.agentOverrides} 覆盖` : ''}`
+          : '连接中…'}
       </Chip>
       <Chip tone="tone-info">任务 {totalCount}</Chip>
       {runningCount > 0 ? <Chip tone="tone-run">运行中 {runningCount}</Chip> : null}

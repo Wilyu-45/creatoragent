@@ -136,7 +136,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
         "A1.strategy",
         {"brief": brief.model_dump(mode="json"), "memory": ctx.memory, "tools": tools.context()},
         # 策略是最需要「看懂产品长什么样」的一步：素材图片随本次调用一并发送
-        images=vision_attachments(ctx),
+        images=vision_attachments(ctx, META.id),
     )
     content = normalize(result.data, brief.audience)
 

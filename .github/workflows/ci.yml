@@ -3,10 +3,10 @@ name: CI
 # 为什么这些关卡能做成 CI
 # ------------------------
 # 本项目的验证脚本全部设计为「无外部依赖 + 退出码即结论」：
-#   · doctor.py            环境与能力自检（八项，含断点续跑后端与回归判定器）
-#   · golden_eval.py       黄金数据集回归（固定 10 条 Brief，与基线逐项对比）
+#   · doctor.py            环境与能力自检（覆盖范围以脚本输出清单为准）
+#   · golden_eval.py       黄金数据集回归（固定 Brief 用例，与基线逐项对比）
 #   · smoke_api.py         端到端验收（真实 uvicorn + 全部 /api 契约 + 租户隔离）
-#   · verify_contracts.py  约 10 秒的快速契约核验
+#   · verify_contracts.py  快速契约核验（秒级，不拉真实网关）
 #   · stress_llm.py        并发正确性（黑板租约残留必须归零）
 # 默认走内置离线引擎（LLM_PROVIDER=mock），因此**不需要任何模型密钥**，
 # 这也让「质量回归」能在 PR 阶段就拦住，而不是等到上线前才发现 Prompt 改坏了。
@@ -59,7 +59,7 @@ jobs:
           npm run build
 
       # 1) 能力自检：环境、智能体链路、租户隔离、检查点后端、评估器、回归判定器、多语言
-      - name: doctor.py（16 项自检）
+      - name: doctor.py（环境与能力自检）
         run: python scripts/doctor.py
 
       # 2) 黄金数据集回归：分数回退超过容差 / 返工轮次增加 / 监管用例未被拦截 → 失败
@@ -135,7 +135,7 @@ jobs:
             fi
           }
           check README.md     "快速开始"
-          check README.md     "需要人工协助的事项"
+          check README.md     "上线前人工事项"
           check creator.md    "LLM-as-a-Judge"
           check creator.md    "记忆库隔离"
           check creator.md    "黄金数据集"

@@ -79,9 +79,9 @@ SYSTEM = system_prompt(
 - 不得把一次性的事实（如某次活动的具体数字）包装成通用规律
 - 只输出 JSON，不输出任何解释性文字
 
-输出体量（控制 token，超量从简）：
-- knowledge_cards ≤4 张、templates ≤3 个、gaps ≤3 条
-- 每张卡片 content ≤150 字：写「可复用的结论」，不复述创作过程""",
+输出体量（内容优先于条数；确有增量再增加，不为凑数注水）：
+- knowledge_cards ≥1 张（建议 2-6 张）；templates / gaps 按实际需要，不凑数
+- 每张卡片 content ≤300 字：写「可复用的结论」，不复述创作过程""",
 )
 
 SCHEMA = """{

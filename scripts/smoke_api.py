@@ -273,6 +273,10 @@ def main() -> int:
                 "judgeProvider": "offline",
                 "judgePassThreshold": 70,
                 "judgeWeight": 0.2,
+                # 每智能体模型覆盖：小写键应被归一为 A4；密钥不回明文
+                "agentModels": {
+                    "a4": {"model": "local-qwen", "baseUrl": "http://localhost:11434/v1", "apiKey": "sk-smoke-key-123"}
+                },
             },
         ).json()
         print(f"  threshold {before['qualityThreshold']} → {updated['qualityThreshold']} "
@@ -289,6 +293,11 @@ def main() -> int:
         ok = ok and updated["judge"]["mode"] == "advisory"
         ok = ok and updated["judge"]["passThreshold"] == 70
         ok = ok and bool(updated["judge"]["rubric"])
+        a4 = updated["llm"]["agentModels"].get("A4") or {}
+        ok = ok and a4.get("model") == "local-qwen" and a4.get("apiKeySet") is True and "apiKey" not in a4
+        # 清空覆盖：三字段全空的条目会被丢弃，整体传 {} 即全部清除
+        cleared_models = call("PUT", "/api/settings", json={"agentModels": {}}).json()
+        ok = ok and cleared_models["llm"]["agentModels"] == {}
         # 立刻清空 webhook：下面的「自动投递」要在无 webhook 的离线语义下验证（不真发请求）
         cleared = call("PUT", "/api/settings", json={"publishWebhookUrl": ""}).json()
         ok = ok and cleared["publish"]["webhookSet"] is False

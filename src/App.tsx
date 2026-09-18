@@ -424,6 +424,7 @@ export function App() {
         <SettingsDrawer
           config={config}
           knowledge={knowledge}
+          agents={agents}
           saving={saving}
           onClose={() => setShowSettings(false)}
           onSave={handleSaveSettings}

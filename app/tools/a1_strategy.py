@@ -167,7 +167,7 @@ TOOLS: list[Tool] = [
     Tool(
         name="case_library",
         description="检索同行业、同渠道的历史案例",
-        agent_ids=("A1",),
+        agent_ids=("A1", "A4"),
         handler=case_library,
     ),
     Tool(

@@ -69,7 +69,11 @@ SYSTEM = system_prompt(
   给开场钩子强度分并预检红线词：**分数高不等于可以写**，
   命中红线词的标题一律不许进正文，先改写再使用
 - banned_words 是写前红线预览，请在下笔时规避；
-  工具判定与 A7/A6 的最终裁定冲突时，以审核智能体结论为准""",
+  工具判定与 A7/A6 的最终裁定冲突时，以审核智能体结论为准
+- case_library 给出同行业同渠道的历史案例方向，用于参考表达与结构；
+  不得把案例当作竞品实际投放数据来引用
+- readability_metrics 可在定稿前自查句长分布、段落长度与重复表达：
+  超长句与堆砌的排比先自改，再交 A5 审校""",
 )
 
 SCHEMA = """{
@@ -193,7 +197,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
         },
         schema=SCHEMA,
         # 文案要和画面里实际有的东西对得上（颜色/包装/场景），图像随本次调用发送
-        images=vision_attachments(ctx),
+        images=vision_attachments(ctx, META.id),
     )
 
     content = normalize(result.data)

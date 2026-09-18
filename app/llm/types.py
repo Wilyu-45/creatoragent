@@ -99,6 +99,9 @@ class LLMRequest:
     max_tokens: int | None = None
     #: 期望返回 JSON
     json: bool = False
+    #: 发起调用的智能体 id（形如 ``A4``）；engine 据此应用「每智能体模型覆盖」
+    #: （见 ``config.llm_settings_for``）。空串 = 非智能体调用（如 judge），用全局设置。
+    agent_id: str = ""
 
 
 @dataclass
@@ -127,6 +130,10 @@ class LLMResponse:
     finish_reason: str = ""
     #: 降级说明（例如真实模型不可用、成本熔断）
     degraded_reason: str | None = None
+    #: True 表示本次调用走的是**本地推理端点**（Ollama / LM Studio / vLLM 等
+    #: 私网地址）：硬件归用户所有、无云单价可依，成本按 0 计（token 照记），
+    #: 避免保守估价（pricing.DEFAULT_PRICE）误触成本熔断。
+    local: bool = False
 
 
 @runtime_checkable

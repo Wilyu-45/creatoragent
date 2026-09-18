@@ -68,8 +68,14 @@ export function MetricsPanel({ metrics }: { metrics: MetricsView | null }) {
             累计成本 {formatCost(system.tokens.cost_usd)}
           </Chip>
           {providers.map((provider) => (
-            <Chip key={provider.name} tone={provider.simulated ? 'tone-warn' : 'tone-ok'} mono>
+            <Chip
+              key={`${provider.name}:${provider.model}`}
+              tone={provider.simulated ? 'tone-warn' : 'tone-ok'}
+              mono
+              title={provider.agents?.length ? `覆盖来源：${provider.agents.join('、')}` : undefined}
+            >
               {provider.name} · {provider.model}
+              {provider.agents?.length ? `（${provider.agents.join('、')}）` : ''}
               {provider.simulated ? '（离线）' : ''}
             </Chip>
           ))}

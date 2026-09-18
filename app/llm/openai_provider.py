@@ -36,6 +36,7 @@ class OpenAICompatibleProvider:
         self._temperature = settings.temperature
         self._max_tokens = settings.max_tokens
         self._timeout_ms = settings.timeout_ms
+        self._thinking = settings.thinking
 
     def chat(self, request: LLMRequest) -> LLMResponse:
         started = time.monotonic()
@@ -58,6 +59,11 @@ class OpenAICompatibleProvider:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        # DeepSeek 思考模式开关（默认 disabled）：官方默认 enabled，思维链在
+        # reasoning_content 里按 output 价计费，长提示词下会耗尽 max_tokens 让
+        # content 为空；显式下发 disabled，其他 OpenAI 兼容实现忽略该字段。
+        if self._thinking == "disabled":
+            payload["thinking"] = {"type": "disabled"}
 
         try:
             response = httpx.post(

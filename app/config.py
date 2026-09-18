@@ -6,8 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -82,6 +83,19 @@ RUBRIC_VERSION = "2026-09-13.judge-v1"
 
 
 @dataclass
+class AgentModelOverride:
+    """单个智能体的模型覆盖（``LLMSettings.agent_models`` 的值）。
+
+    三个字段**空串都表示继承全局** ``llm`` 设置；用途是让某个智能体改用
+    不同的模型或端点（例如 A10 分析走本地 Ollama，其余走云端 DeepSeek）。
+    """
+
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+
+
+@dataclass
 class LLMSettings:
     """模型接入设置。`base_url` 兼容一切 OpenAI 协议服务（DeepSeek/通义/豆包/vLLM/Ollama）。"""
 
@@ -99,7 +113,19 @@ class LLMSettings:
     #: 确认所用模型支持读图后打开；素材的**文字清单**不受此项影响，始终可用。
     vision: bool = False
     #: 单次创作最多注入的图片数：多模态输入按图片计费，且图多了会挤占文本预算
-    vision_max_images: int = 3
+    vision_max_images: int = 6
+    #: DeepSeek 思考模式开关（``{"thinking": {"type": ...}}``，仅 DeepSeek 网关识别，
+    #: 其他 OpenAI 兼容实现会忽略未知字段）。**默认 disabled**：
+    #: 官方默认 enabled，思维链输出在 ``reasoning_content`` 且按 output 价计费——
+    #: 长提示词下思维链会耗尽 ``max_tokens`` 导致 ``content`` 为空（real_check 实测
+    #: A5 稳定复现），且思考模式下 temperature 等采样参数不生效。
+    #: 本项目是提示词已含完整推理脚手架的结构化 JSON 流水线，默认关闭；要换更强
+    #: 推理时设 ``LLM_THINKING=enabled`` 并调大 ``LLM_MAX_TOKENS``。
+    thinking: str = "disabled"
+    #: 每智能体模型覆盖：键为 ``A1``–``A99`` 形态的智能体 id，仅 model / base_url /
+    #: api_key 三项可覆盖，空字段继承全局。与 site_urls 同属「用户在设置界面维护的
+    #: 资产」，持久化到 ``SETTINGS_FILE``（见 ``_load_persisted_settings``）。
+    agent_models: dict[str, AgentModelOverride] = field(default_factory=dict)
 
 
 @dataclass
@@ -203,13 +229,18 @@ class SearchSettings:
     #: 调用上述端点的鉴权头（以 ``Bearer `` 前缀拼接）
     api_key: str = ""
     #: 单次检索返回的结果条数上限（同时限制进入提示词的篇幅）
-    max_results: int = 5
+    max_results: int = 8
     #: 单次请求超时（毫秒）；检索是旁路能力，超时必须短于创作链路可接受时延
-    timeout_ms: int = 8_000
+    timeout_ms: int = 15_000
     #: 是否允许 ``page_fetch`` 抓取检索结果页正文（关掉则只给标题与摘要）
     fetch_pages: bool = True
     #: 单次 ``page_fetch`` 最多抓取的页面数
-    max_pages: int = 2
+    max_pages: int = 4
+    #: 「站点监控」：用户在运行时设置里配置的待爬页面 URL 列表，
+    #: ``site_monitor`` 工具创作时现场抓取正文（与搜索网关无关，独立开关）。
+    #: 仅此字段持久化到 ``SETTINGS_FILE``（界面设置不在 storage_contract.md 的
+    #: PostgreSQL 实体清单内，pg 模式同样走本地文件，不做迁移）。
+    site_urls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -301,7 +332,12 @@ def _build_config() -> RuntimeConfig:
             max_tokens=_int(os.environ.get("LLM_MAX_TOKENS"), 2048),
             timeout_ms=_int(os.environ.get("LLM_TIMEOUT_MS"), 60_000),
             vision=_bool(os.environ.get("LLM_VISION"), False),
-            vision_max_images=min(8, max(0, _int(os.environ.get("LLM_VISION_MAX_IMAGES"), 3))),
+            vision_max_images=min(12, max(0, _int(os.environ.get("LLM_VISION_MAX_IMAGES"), 6))),
+            thinking=(
+                "enabled"
+                if (os.environ.get("LLM_THINKING") or "").strip().lower() == "enabled"
+                else "disabled"
+            ),
         ),
         embedding=EmbeddingSettings(
             provider=_embedding_provider(),
@@ -395,9 +431,82 @@ def _sampler() -> str:
 _config: RuntimeConfig = _build_config()
 
 
+def _load_persisted_settings() -> None:
+    """启动时从 ``data/settings.json`` 读回用户在设置界面保存的资产。
+
+    运行时设置本为纯内存（重启丢失、回退 env）；仅两类「用户精心维护的
+    资产」持久化：站点监控 URL 清单（``siteUrls``）与每智能体模型覆盖
+    （``agentModels``）。旧文件只含 siteUrls 也兼容。
+    """
+    if not SETTINGS_FILE.exists():
+        return
+    try:
+        payload = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    urls = payload.get("siteUrls")
+    if isinstance(urls, list):
+        _config.search.site_urls = [
+            item.strip() for item in urls if isinstance(item, str) and item.strip()
+        ]
+    raw_models = payload.get("agentModels")
+    if isinstance(raw_models, dict):
+        models: dict[str, AgentModelOverride] = {}
+        for raw_id, raw_spec in raw_models.items():
+            aid = str(raw_id).strip().upper()
+            spec = raw_spec if isinstance(raw_spec, dict) else {}
+            entry = AgentModelOverride(
+                model=str(spec.get("model") or "").strip(),
+                base_url=str(spec.get("baseUrl") or "").strip(),
+                api_key=str(spec.get("apiKey") or ""),
+            )
+            if entry.model or entry.base_url or entry.api_key:
+                models[aid] = entry
+        _config.llm.agent_models = models
+
+
+_load_persisted_settings()
+
+
+def save_persisted_settings() -> None:
+    """把两类持久化资产原子写入 ``SETTINGS_FILE``（PUT /api/settings 调用）。"""
+    payload = json.dumps(
+        {
+            "siteUrls": list(_config.search.site_urls),
+            "agentModels": {
+                aid: {"model": ov.model, "baseUrl": ov.base_url, "apiKey": ov.api_key}
+                for aid, ov in sorted(_config.llm.agent_models.items())
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SETTINGS_FILE.with_suffix(".tmp")
+    tmp.write_text(payload + "\n", encoding="utf-8")
+    os.replace(tmp, SETTINGS_FILE)
+
+
 def get_config() -> RuntimeConfig:
     """返回全局配置单例（就地修改）。"""
     return _config
+
+
+def llm_settings_for(agent_id: str) -> LLMSettings:
+    """按智能体合并 LLM 设置：该 id 无覆盖（或覆盖字段全空）时返回全局设置。"""
+    override = _config.llm.agent_models.get((agent_id or "").strip().upper())
+    if override is None:
+        return _config.llm
+    patch: dict[str, str] = {}
+    if override.model:
+        patch["model"] = override.model
+    if override.base_url:
+        patch["base_url"] = override.base_url
+    if override.api_key:
+        patch["api_key"] = override.api_key
+    return replace(_config.llm, **patch) if patch else _config.llm
 
 
 def update_config(patch: dict[str, Any]) -> RuntimeConfig:
@@ -429,6 +538,30 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
             elif attr == "vision_max_images":
                 value = min(8, max(0, _int(str(value), 3))) if isinstance(value, (int, float, str)) else 3
             setattr(_config.llm, attr, value)
+    # 每智能体模型覆盖：整体替换（前端恒传全量，缺失的条目即被清除）。
+    # apiKey 缺失 = 保留已存值；显式 "" = 清除（继承全局）——前端只在用户
+    # 输入非空时才带该键，防止「打开设置点保存」误清已存的覆盖密钥。
+    if isinstance(patch.get("agentModels"), dict):
+        merged: dict[str, AgentModelOverride] = {}
+        for raw_id, raw_spec in patch["agentModels"].items():
+            aid = str(raw_id).strip().upper()
+            if not (aid.startswith("A") and aid[1:].isdigit()):
+                continue
+            spec = raw_spec if isinstance(raw_spec, dict) else {}
+            existing = _config.llm.agent_models.get(aid)
+            api_key = (
+                str(spec["apiKey"]).strip()
+                if "apiKey" in spec
+                else (existing.api_key if existing else "")
+            )
+            entry = AgentModelOverride(
+                model=str(spec.get("model") or "").strip(),
+                base_url=str(spec.get("baseUrl") or "").strip(),
+                api_key=api_key,
+            )
+            if entry.model or entry.base_url or entry.api_key:
+                merged[aid] = entry
+        _config.llm.agent_models = merged
     _apply_flat(
         patch,
         _config.embedding,
@@ -484,6 +617,8 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
             "searchTimeoutMs": ("timeout_ms", None),
             "searchFetchPages": ("fetch_pages", None),
             "searchMaxPages": ("max_pages", None),
+            # site_urls 的逐项校验与去重在 routes 层做，这里原样写入（空数组 = 清空）
+            "siteUrls": ("site_urls", None),
         },
     )
     return _config
@@ -570,6 +705,16 @@ def public_config() -> dict[str, Any]:
             "visionMaxImages": llm.vision_max_images,
             "apiKeySet": len(llm.api_key) > 0,
             "apiKeyMasked": _mask(llm.api_key),
+            # 每智能体模型覆盖：只回显 model / baseUrl 与密钥掩码，绝不回明文
+            "agentModels": {
+                aid: {
+                    "model": ov.model,
+                    "baseUrl": ov.base_url,
+                    "apiKeySet": len(ov.api_key) > 0,
+                    "apiKeyMasked": _mask(ov.api_key),
+                }
+                for aid, ov in sorted(llm.agent_models.items())
+            },
         },
         "embedding": {
             "provider": embedding.provider,
@@ -615,6 +760,7 @@ def public_config() -> dict[str, Any]:
             "timeoutMs": _config.search.timeout_ms,
             "fetchPages": _config.search.fetch_pages,
             "maxPages": _config.search.max_pages,
+            "siteUrls": list(_config.search.site_urls),
             "configured": _config.search.provider == "http" and bool(_config.search.api_url),
         },
         "tracing": {

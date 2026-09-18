@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-09-13T10:57:11.992Z",
+  "updated_at": "2026-09-18T15:07:18.337Z",
   "rubric": "2026-09-13.judge-v1",
   "engine": "mock",
   "note": "由 scripts/golden_eval.py --update-baseline 生成",
@@ -28,8 +28,8 @@
       ],
       "first_round_blocked": false,
       "predicted_ctr": 0.0,
-      "duration_ms": 6000,
-      "task_id": "task_3041207d",
+      "duration_ms": 6327,
+      "task_id": "task_fbe4d5e1",
       "error": "",
       "checks": [
         {
@@ -154,8 +154,8 @@
       ],
       "first_round_blocked": false,
       "predicted_ctr": 0.0,
-      "duration_ms": 5719,
-      "task_id": "task_00185c80",
+      "duration_ms": 5718,
+      "task_id": "task_a41fc5ba",
       "error": "",
       "checks": [
         {
@@ -270,8 +270,8 @@
       ],
       "first_round_blocked": true,
       "predicted_ctr": 0.0,
-      "duration_ms": 7233,
-      "task_id": "task_c0b4fa1e",
+      "duration_ms": 7516,
+      "task_id": "task_de7226b8",
       "error": "",
       "checks": [
         {
@@ -350,7 +350,7 @@
           "detail": "实际 81.5"
         },
         {
-          "rule": "返工轮次 ≤ 2",
+          "rule": "返工轮次 ≤ 3",
           "ok": true,
           "detail": "实际 2 轮"
         },
@@ -405,8 +405,8 @@
       ],
       "first_round_blocked": true,
       "predicted_ctr": 0.0,
-      "duration_ms": 6016,
-      "task_id": "task_3cb24355",
+      "duration_ms": 6030,
+      "task_id": "task_edb18acf",
       "error": "",
       "checks": [
         {
@@ -511,8 +511,8 @@
       ],
       "first_round_blocked": true,
       "predicted_ctr": 0.0,
-      "duration_ms": 7250,
-      "task_id": "task_ffe3d761",
+      "duration_ms": 7202,
+      "task_id": "task_412a1e88",
       "error": "",
       "checks": [
         {
@@ -581,7 +581,7 @@
           "detail": "实际 82.4"
         },
         {
-          "rule": "返工轮次 ≤ 2",
+          "rule": "返工轮次 ≤ 3",
           "ok": true,
           "detail": "实际 2 轮"
         },
@@ -636,8 +636,8 @@
       ],
       "first_round_blocked": true,
       "predicted_ctr": 0.0,
-      "duration_ms": 5718,
-      "task_id": "task_bf01f25e",
+      "duration_ms": 5735,
+      "task_id": "task_a7095118",
       "error": "",
       "checks": [
         {
@@ -746,8 +746,8 @@
       ],
       "first_round_blocked": false,
       "predicted_ctr": 0.0,
-      "duration_ms": 6047,
-      "task_id": "task_5b2aa280",
+      "duration_ms": 6327,
+      "task_id": "task_9f370958",
       "error": "",
       "checks": [
         {
@@ -866,8 +866,8 @@
       ],
       "first_round_blocked": true,
       "predicted_ctr": 0.0,
-      "duration_ms": 6030,
-      "task_id": "task_3e6157ac",
+      "duration_ms": 6031,
+      "task_id": "task_bcd4df01",
       "error": "",
       "checks": [
         {
@@ -991,8 +991,8 @@
       ],
       "first_round_blocked": true,
       "predicted_ctr": 0.0,
-      "duration_ms": 6015,
-      "task_id": "task_2848b3f8",
+      "duration_ms": 5422,
+      "task_id": "task_41e142c2",
       "error": "",
       "checks": [
         {
@@ -1116,8 +1116,8 @@
       ],
       "first_round_blocked": true,
       "predicted_ctr": 0.0,
-      "duration_ms": 5139,
-      "task_id": "task_6f1c6717",
+      "duration_ms": 6014,
+      "task_id": "task_32757b40",
       "error": "",
       "checks": [
         {
@@ -1211,8 +1211,8 @@
       ],
       "first_round_blocked": false,
       "predicted_ctr": 0.0,
-      "duration_ms": 5750,
-      "task_id": "task_537c355e",
+      "duration_ms": 5735,
+      "task_id": "task_f3754cc8",
       "error": "",
       "checks": [
         {

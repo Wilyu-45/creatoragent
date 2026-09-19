@@ -39,9 +39,26 @@ _LONG_SENTENCE_CHARS = 35
 #: 易读阈值（平均句长，字）
 _EASY_AVG_CHARS = 18
 
+#: 扫描 Brief 约束/交付物里的字数区间（与 a4_copywriter._WORD_RANGE_RE 同口径：
+#: A4 对上界 ≥1500 的区间启动分篇并承诺产量，A5 在此审计该承诺是否兑现）
+_WORD_RANGE_RE = re.compile(r"(\d{3,5})\s*[-–—~至]\s*(\d{3,5})\s*字")
+
+
+def _expected_word_range(brief: Any) -> tuple[int, int] | None:
+    """取约束+交付物里上界最大的字数区间，上界 ≥1500 才认定是产量要求。"""
+    best: tuple[int, int] | None = None
+    for text in [*getattr(brief, "constraints", []), *getattr(brief, "deliverables", [])]:
+        for match in _WORD_RANGE_RE.finditer(str(text)):
+            lo, hi = int(match.group(1)), int(match.group(2))
+            if lo > hi:
+                lo, hi = hi, lo
+            if best is None or hi > best[1]:
+                best = (lo, hi)
+    return best if best and best[1] >= 1500 else None
+
 
 def draft_metrics(ctx: "AgentRunContext") -> ToolOutcome:
-    """草稿硬指标：标题字数 vs 平台上限、正文字数、标签数量。"""
+    """草稿硬指标：标题字数 vs 平台上限、正文字数 vs 约束区间、标签数量。"""
     from ..llm.json_utils import as_str, as_str_array
 
     brief = ctx.brief
@@ -49,29 +66,39 @@ def draft_metrics(ctx: "AgentRunContext") -> ToolOutcome:
     if not versions:
         return ToolOutcome(summary="上游暂无文案草稿，跳过度量", data={})
     limit = title_limit(brief.channel)
+    expected = _expected_word_range(brief)
     lines: list[str] = []
     metrics: list[dict[str, Any]] = []
     for version in versions:
         title = as_str(version.get("title"))
         body = as_str(version.get("body"))
         hashtags = as_str_array(version.get("hashtags"))
+        body_chars = len(_WHITESPACE_RE.sub("", body))
         word_count = len(_WHITESPACE_RE.sub("", f"{title}{body}"))
+        in_range = (expected[0] <= body_chars <= expected[1]) if expected else None
         metrics.append(
             {
                 "id": as_str(version.get("id")),
                 "title_length": len(title),
-                "body_chars": len(_WHITESPACE_RE.sub("", body)),
+                "body_chars": body_chars,
                 "word_count": word_count,
                 "hashtag_count": len(hashtags),
                 "title_ok": len(title) <= limit,
+                **({"body_in_range": in_range} if expected else {}),
             }
         )
         mark = "（主推）" if version is target else ""
+        range_text = ""
+        if expected:
+            state = "✓" if in_range else f"⚠️未达 {expected[0]}-{expected[1]} 区间"
+            range_text = f"，正文 {body_chars} 字 {state}"
         lines.append(
             f"{as_str(version.get('id'))}{mark}：标题 {len(title)}/{limit} 字"
             f"{'⚠️超限' if len(title) > limit else '✓'}，"
-            f"去空白 {word_count} 字，标签 {len(hashtags)} 个"
+            f"去空白 {word_count} 字，标签 {len(hashtags)} 个{range_text}"
         )
+    if expected:
+        lines.append(f"（约束要求正文 {expected[0]}-{expected[1]} 字/篇；短篇即提示扩写）")
     lines.append(f"（渠道长度基准：{channel_rule(brief.channel).length_hint}）")
     return ToolOutcome(
         summary=f"度量 {len(versions)} 个版本的硬指标",

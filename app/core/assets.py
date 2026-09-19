@@ -216,8 +216,12 @@ def _mime_of(ref: str) -> str:
     return _MIME_BY_EXT.get(path[dot:].lower(), "")
 
 
-def _load_local(ref: str) -> tuple[bytes | None, str]:
-    """读取 ``ASSETS_DIR`` 下的本地素材，返回 ``(字节, 不可用原因)``。"""
+def load_local(ref: str) -> tuple[bytes | None, str]:
+    """读取 ``ASSETS_DIR`` 下的本地素材，返回 ``(字节, 不可用原因)``。
+
+    这是本地文件读取的**唯一安全边界**（拒绝绝对路径与 ``..`` 越界、
+    8MB 上限），文档研读（``core/digest.py``）同样走这里，不另开读文件的口子。
+    """
     parts = [seg for seg in ref.replace("\\", "/").split("/") if seg not in ("", ".")]
     if not parts or any(seg == ".." for seg in parts):
         return None, "本地素材只接受 assets/ 目录内的相对文件名（拒绝绝对路径与 .. 越界）"
@@ -283,7 +287,7 @@ def parse_asset(raw: Any) -> Asset:
         asset.mime = mime or "image/*"
     else:
         asset.source = "local"
-        data, issue = _load_local(ref)
+        data, issue = load_local(ref)
         asset.issue = issue
         if data is None:
             return asset
@@ -412,6 +416,7 @@ __all__ = [
     "describe_asset",
     "image_size",
     "inventory",
+    "load_local",
     "parse_asset",
     "parse_assets",
     "vision_parts",

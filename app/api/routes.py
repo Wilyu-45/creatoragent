@@ -14,10 +14,12 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from ..agents.registry import PLANNED_AGENTS, all_agent_meta
 from ..config import (
+    DATA_DIR,
+    EXPORTS_DIR,
     RUBRIC_VERSION,
     get_config,
     llm_settings_for,
@@ -493,7 +495,7 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
             patch[key] = body[key]
     if isinstance(body.get("autoApprove"), bool):
         patch["autoApprove"] = body["autoApprove"]
-    for key in ("costBudgetUsd", "tokenBudget"):
+    for key in ("costBudgetUsd", "tokenBudget", "digestMaxCalls"):
         value = body.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             patch[key] = value
@@ -623,6 +625,26 @@ def get_task(task_id: str, request: Request) -> dict[str, Any]:
         "events": [event.model_dump(mode="json") for event in event_bus.history(task_id)],
         "blackboard": blackboard.snapshot(task_id).model_dump(mode="json"),
     }
+
+
+@router.get("/tasks/{task_id}/export")
+def export_delivery(task_id: str, request: Request) -> FileResponse:
+    """下载审批通过后的成品 txt（全部版本，连载类内容不丢篇）。
+
+    只信任 final_delivery 产物里由交付环节写入的 ``export_path``，且解析后
+    必须落在 ``EXPORTS_DIR`` 根目录下——不放开任意路径，避免越权读文件。
+    """
+    _require_task(task_id, request)
+    artifact = blackboard.latest_artifact(task_id, "final_delivery")
+    relative = ""
+    if artifact is not None:
+        relative = str((artifact.content or {}).get("export_path") or "").strip()
+    if not relative:
+        raise HTTPException(status_code=404, detail="任务尚无成品导出文件")
+    path = (DATA_DIR / relative).resolve()
+    if path.parent != EXPORTS_DIR.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail="成品导出文件不存在")
+    return FileResponse(path, media_type="text/plain; charset=utf-8", filename=path.name)
 
 
 @router.delete("/tasks/{task_id}")

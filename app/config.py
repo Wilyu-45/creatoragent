@@ -34,6 +34,9 @@ MEMORY_FILE = DATA_DIR / "memory.json"
 #: 由 ``app/core/assets.py`` 读取并内联为 data URL。**不接受任意绝对路径** ——
 #: Brief 可来自 API 调用方，放开绝对路径等于给模型一个本机文件读取原语。
 ASSETS_DIR = DATA_DIR / "assets"
+#: 成品导出目录：审批通过后由交付环节把全部版本渲染成 txt 落盘，
+#: 供 ``GET /api/tasks/{id}/export`` 下载（只写本目录，不碰任意路径）。
+EXPORTS_DIR = DATA_DIR / "exports"
 #: LLM-as-a-Judge 评估历史（plan.md 4.3 D14），用于 Prompt 回归与黄金集评测。
 EVAL_FILE = DATA_DIR / "evaluations.json"
 #: LangGraph checkpointer 的落地位置：用于人工审批中断后的断点续跑。
@@ -279,6 +282,8 @@ class RuntimeConfig:
     cost_budget_usd: float = 0.5
     #: 单任务 token 上限，对应 plan.md 2.4「单 Session token 消耗 > 50K 触发审查」
     token_budget: int = 50_000
+    #: 单任务文档研读（digest）的 LLM 调用上限：块数超出时按序截断并在产物里如实记录
+    digest_max_calls: int = 12
     #: 是否启用 LLM 响应缓存（plan.md 4.5）
     llm_cache: bool = True
     llm: LLMSettings = field(default_factory=LLMSettings)
@@ -322,6 +327,7 @@ def _build_config() -> RuntimeConfig:
         auto_approve=_bool(os.environ.get("AUTO_APPROVE"), False),
         cost_budget_usd=_num(os.environ.get("COST_BUDGET_USD"), 0.5),
         token_budget=_int(os.environ.get("TOKEN_BUDGET"), 50_000),
+        digest_max_calls=max(1, _int(os.environ.get("DIGEST_MAX_CALLS"), 12)),
         llm_cache=_bool(os.environ.get("LLM_CACHE"), True),
         llm=LLMSettings(
             provider=provider,  # type: ignore[arg-type]
@@ -523,6 +529,8 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
         _config.cost_budget_usd = max(0.0, float(patch["costBudgetUsd"]))
     if patch.get("tokenBudget") is not None:
         _config.token_budget = max(0, int(patch["tokenBudget"]))
+    if patch.get("digestMaxCalls") is not None:
+        _config.digest_max_calls = max(1, min(60, int(patch["digestMaxCalls"])))
     if patch.get("llmCache") is not None:
         _config.llm_cache = bool(patch["llmCache"])
     llm_patch = patch.get("llm") or {}
@@ -685,6 +693,7 @@ def public_config() -> dict[str, Any]:
         "autoApprove": _config.auto_approve,
         "costBudgetUsd": _config.cost_budget_usd,
         "tokenBudget": _config.token_budget,
+        "digestMaxCalls": _config.digest_max_calls,
         "llmCache": _config.llm_cache,
         "authRequired": auth_enabled(),
         # 存储后端概要：mode 用于前端/运维确认当前落库方式；
@@ -813,3 +822,4 @@ def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     TASK_DIR.mkdir(parents=True, exist_ok=True)
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)

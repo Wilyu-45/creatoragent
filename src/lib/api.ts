@@ -688,6 +688,30 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** 下载任务成品导出 txt：带鉴权头走 blob 触发下载（裸链接无法携带 token）。 */
+export async function downloadExport(id: string): Promise<void> {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(id)}/export`, {
+    headers: { ...authHeaders() },
+  });
+  if (!response.ok) {
+    let message = `导出失败 (${response.status})`;
+    try {
+      const parsed = (await response.json()) as { detail?: string };
+      if (parsed.detail) message = parsed.detail;
+    } catch {
+      /* 非 JSON 错误体，保留默认文案 */
+    }
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `${id}.txt`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   health: () => request<HealthView>('/api/health'),
   agents: () => request<AgentsResponse>('/api/agents'),

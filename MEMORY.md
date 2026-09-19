@@ -80,6 +80,15 @@ npm run build && npm run dev:web                               # 前端构建 / 
 28. **「模型返回空内容」按瞬态可重试**：real_check 实测 deepseek-flash 会间歇返回空 content，命中即降级离线引擎会连锁引发 A6「无来源」返工、拉低全任务质量分；故纳入 `_RETRIABLE_RE`（engine.py）重试，3 次仍空才降级；400 等参数错误仍不重试。
 29. **本地推理端点计 0 元但不跳过记账**：Ollama / LM Studio / vLLM 等私网端点（engine.py `_is_local_endpoint`）硬件归用户、无云单价可依，`cost_guard.charge` 仍必须调用、成本传 0——charge 同时驱动 token 熔断，跳过会让 token 预算彻底失效；span 与 `AgentMetrics.cost_usd` 同口径记 0（`LLMResponse.local`）。
 
+**素材研读与长文分篇（core/digest.py + A4 分篇）**
+
+30. **研读「降级」看 `degraded_reason` 而不是 `simulated`**：mock 引擎常态就是 simulated=True，拿它判定会把每次离线自检误报成「研读已降级」；只有熔断/引擎回退才置 degraded_reason（digest.py 单点判定），simulated 只做 sources 的诚实标注。
+31. **新增 Artifact type 要过四处契约**：`core/types.py` 的 Literal + `ARTIFACT_LABEL`、前端 `src/lib/types.ts` 联合类型、`ArtifactViewer` 标签——漏 Literal 会在 A0 写黑板时被 Pydantic 判死整个任务（真实踩坑：`document_digest` 首跑 failed）；doctor 第 19 项已加「研读产物过黑板写入」断言守护。
+32. **A4 分篇的字数区间取「上界最大的一组」**：`_WORD_RANGE_RE` 扫 constraints+deliverables，期望交付物写「合计 8000-10000 字」会被当成每篇字数 → prompt 撑爆；合计口径要写「约 N 字」。
+33. **`PUT /api/settings` 的 patch 白名单与 `config.update_config` 必须同步扩**：只扩后者会出现「设置返回成功但值不生效」（`digestMaxCalls` 曾漏，白名单在 routes.py）。
+34. **研读切块配额「每文档保底 1 块 + 按字数比例」**：按「全文统一块长 + 按文档顺序截断」会让长文档吃光 `digestMaxCalls` 配额、把排在后面的短文档（往期成稿、风格 skill）整份挤出研读——真实链路踩过（6 份素材 16 块，前三卷杂谈全部落空）。配额少于文档数时按字符数保长文档，落选文档如实计入 dropped。
+35. **导出拼装时 cta 与正文结尾同句则不重复拼接**：模型常把收尾句同时写进正文结尾和 cta 字段（真实链路「咱们下回再见。」连出两次），忽略尾部标点差异后判重。同理：新加的自检断言必须实跑全绿再报完成——研读写黑板检查曾因 `Artifact.id` 默认空串而从未真正通过过（doctor 构造时须传 `new_id("art")`）。
+
 ---
 
 ## 3. 未完成的开发待办

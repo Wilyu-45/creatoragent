@@ -21,6 +21,7 @@ from .base import (
     build_result,
     call_with_prompts,
     content_to_text,
+    documents_block,
     read_confidence,
     read_evidence,
     read_risks,
@@ -55,6 +56,12 @@ SYSTEM = system_prompt(
     但只能写工具给出的原文要点，不得据此延伸出链接里没有的结论
 - 数值型断言（百分比、倍数、天数、样本量）若无来源，一律视为高风险
 - 情绪化、主观的最高级表述应标记为 exaggerated
+- 任务附带「素材文档研读要点」时的口径：
+  - 主张与要点中的事实/摘录一致 → verified，source 写「任务素材文档：<标题>」，
+    note 注明依据的具体要点；
+  - 主张与要点明确矛盾 → contradicted；
+  - 要点中查不到的主张仍按原规则处理（要点是研读产物而非全文，查不到 ≠ 不实）；
+  - 要点只作比对基准，不得反向脑补原文没有的数字或结论
 - 只输出 JSON，不输出任何解释性文字
 
 职责边界（避免与其他审核智能体重复判定）：
@@ -141,7 +148,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 【作者声明的主张及来源】
 {claims_text or '（作者未声明主张，请自行从正文中抽取）'}
 
-行业：{brief.industry}
+{documents_block(ctx, facts_only=True)}行业：{brief.industry}
 {tools.prompt_block()}请逐条核查并给出风险等级与修改要求，严格要求 JSON 结构如下：
 {SCHEMA}"""
 

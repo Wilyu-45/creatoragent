@@ -34,7 +34,9 @@ _mock = MockProvider()
 #: 用 thread-local 而不是给每个智能体加参数：编排线程与任务一一对应，
 #: 这样「重试时放大 token 上限」这件事对智能体完全透明。
 _MAX_TOKENS_BOOST_RATIO = 2.0
-_MAX_TOKENS_CEILING = 16384
+#: 放大上限：须 ≥ 常用 base（.env 的 LLM_MAX_TOKENS）× 加成比，否则放大重试
+#: 会被 min(ceiling, …) 压回比 base 还小的值（base=131072 时曾如此）。
+_MAX_TOKENS_CEILING = 262144
 _token_boost = threading.local()
 
 
@@ -43,6 +45,7 @@ def boost_max_tokens(factor: float = _MAX_TOKENS_BOOST_RATIO, *, ceiling: int = 
     base = int(getattr(_token_boost, "value", 0) or 0)
     source = base or get_config().llm.max_tokens
     boosted = min(ceiling, max(source + 1, int(source * factor)))
+    boosted = max(boosted, source)  # ceiling 低于当前上限时保持原值——放大绝不缩小
     _token_boost.value = boosted
     return boosted
 

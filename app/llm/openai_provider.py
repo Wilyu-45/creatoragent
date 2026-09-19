@@ -34,7 +34,9 @@ class OpenAICompatibleProvider:
         self._base_url = settings.base_url.rstrip("/")
         self._api_key = settings.api_key
         self._temperature = settings.temperature
-        self._max_tokens = settings.max_tokens
+        # 输出上限不走构造时快照：每次请求都取 effective_max_tokens()
+        #（config 的 LLM_MAX_TOKENS + 截断重试的 thread-local 放大），
+        # 否则重试仍会拿到同一个被截断的上限，重试等于没试。
         self._timeout_ms = settings.timeout_ms
         self._thinking = settings.thinking
 

@@ -34,10 +34,13 @@
 18. 校验 **确定性计算沙箱**：越权语法（导入/属性/下标/推导式/字符串/超大幂次/
     除零）逐条拦截、公式求值可复现，以及量级换算 / 排期推算 / 回填核算三个
     换算工具的结果可复核、缺失项如实列出
+19. 校验 **素材研读与长文分篇**：kind=document 素材的 map-reduce 研读
+    （产物形状、要点取自原文、问题如实入档）、无文档时零调用（基线不受影响）、
+    A4 字数区间检测与 ``A4.copy.version`` 单版本契约
 
 检查项的**计数会随合并/拆分变化**（第十轮新增「视频脚本」时是 17 项；第十二轮把
 传播/采样与数字人样例并入既有项后回到 16 项；随后新增「Brief 素材（多模态）」为 17 项，
-本轮新增「确定性计算沙箱」为 18 项），因此文档统一写「18 项」，
+本轮新增「确定性计算沙箱」为 18 项、素材研读为 19 项），因此文档统一写「19 项」，
 最终以本脚本实际输出的清单为准。
 
 注意：本脚本默认写入**项目内**的 ``.doctor-data/`` 临时目录，避免自检污染开发环境的
@@ -1706,6 +1709,110 @@ def _mask_url_for_print() -> str:
     return mask_url(database_url())
 
 
+def check_digest_export() -> bool:
+    """校验素材文档研读通路与 A4 长文分篇。
+
+    ① ``kind=document`` 素材走 ``digest_documents``：产物形状完整、要点取自
+       原文（不是生成器凭空造的）、无问题入档，``DOC.digest.map/reduce`` 已注册；
+    ② 无文档素材时 digest **零调用零产物**——这是黄金基线不受新通路影响的前提；
+    ③ A4 长文分篇：字数区间检测命中/不命中，``A4.copy.version`` 单版本契约
+       （version 而非 versions，id 按需选取）。
+    """
+    from app.agents.a4_copywriter import VERSION_STYLES, _word_range
+    from app.config import ASSETS_DIR
+    from app.core.blackboard import blackboard
+    from app.core.digest import digest_documents
+    from app.core.types import Artifact, Brief
+    from app.llm.mock import GENERATORS
+
+    print("\n[素材研读与成品导出]")
+
+    purposes_ok = all(
+        name in GENERATORS for name in ("DOC.digest.map", "DOC.digest.reduce", "A4.copy.version")
+    )
+    print(f"    {'✓' if purposes_ok else '✗'} mock 用途注册：DOC.digest.map / DOC.digest.reduce / A4.copy.version")
+
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    sample = ASSETS_DIR / "doctor_digest.txt"
+    sample.write_text(
+        "第一章 臣虎的伪装\n臣虎在匣庭扮作番长，直到第三封信被互换。\n"
+        "他说：「臣服不是软弱，是我选的姿态。」\n"
+        "第二章 米芙露的选择\n米芙露亲吻了左脸颊，Kingmaker 的棋局自此翻面。\n",
+        encoding="utf-8",
+    )
+    doc_brief = Brief(
+        brand="自检品牌", product="自检产品", channel="小红书", industry="消费品",
+        assets=[{"kind": "document", "ref": "doctor_digest.txt", "title": "自检文档"}],
+    )
+    content = digest_documents(doc_brief)
+    docs = [d for d in (content.get("documents") or []) if isinstance(d, dict)]
+    facts = [str(f) for f in (docs[0].get("key_facts") if docs else [])]
+    digest_ok = (
+        len(docs) == 1
+        and bool(content.get("creative_brief"))
+        and bool(content.get("sources"))
+        and content["sources"][0].get("chunks") == 1
+        and not content.get("issues")
+        and any("臣虎" in fact or "米芙露" in fact for fact in facts)
+    )
+    print(
+        f"    {'✓' if digest_ok else '✗'} 文档研读：1 份文档 1 块 → 事实要点 {len(facts)} 条"
+        f"（取自原文）+ 创作参考，无问题入档"
+    )
+
+    # 研读产物必须能作为 Artifact 通过黑板写入（Literal 类型校验是真实失败面）
+    from app.core.events import new_id
+
+    stored = blackboard.put_artifact(
+        Artifact(task_id="doctor-selfcheck", agent_id="A0", type="document_digest",
+                 id=new_id("art"), title="自检研读", content=content)
+    )
+    blackboard_ok = bool(stored.id) and blackboard.latest_artifact(
+        "doctor-selfcheck", "document_digest"
+    ) is not None
+    print(f"    {'✓' if blackboard_ok else '✗'} 研读产物可写入黑板：type=document_digest 通过契约校验")
+
+    plain_brief = Brief(brand="自检品牌", product="自检产品", channel="小红书", industry="消费品")
+    empty = digest_documents(plain_brief)
+    zero_ok = (
+        not empty.get("documents")
+        and not empty.get("issues")
+        and (empty.get("stats") or {}).get("map_calls") == 0
+        and (empty.get("stats") or {}).get("reduce_calls") == 0
+    )
+    print(f"    {'✓' if zero_ok else '✗'} 无文档素材：零调用零产物（提示词与历史逐字一致）")
+
+    long_brief = Brief(
+        brand="自检品牌", product="自检产品", channel="小红书", industry="消费品",
+        constraints=["连载三篇，每篇 2500-3200 字"],
+    )
+    wr = _word_range(long_brief)
+    wr_none = _word_range(plain_brief)
+    range_ok = wr == (2500, 3200) and wr_none is None
+    print(f"    {'✓' if range_ok else '✗'} 长文检测：2500-3200 字 → 分篇 {wr}；无字数约束 → 整版路径（{wr_none}）")
+
+    version_out = GENERATORS["A4.copy.version"](
+        {"brief": long_brief.model_dump(mode="json"), "version_style": "V2"}
+    )
+    version = version_out.get("version") if isinstance(version_out.get("version"), dict) else {}
+    version_ok = (
+        "versions" not in version_out
+        and str(version.get("id") or "") == "V2"
+        and isinstance(version_out.get("claims"), list)
+        and bool(str(version.get("body") or "").strip())
+    )
+    styles_ok = [style for _, style in VERSION_STYLES] == ["主推版", "理性版", "感性版"]
+    print(
+        f"    {'✓' if version_ok and styles_ok else '✗'} 分篇单版本契约："
+        f"version.id={version.get('id')}｜claims {len(version_out.get('claims') or [])} 条｜正文 {len(str(version.get('body') or ''))} 字"
+    )
+
+    ok = all([purposes_ok, digest_ok, blackboard_ok, zero_ok, range_ok, version_ok, styles_ok])
+    if not ok:
+        print("    ! 研读/分篇异常：产物形状或缺零调用保证不成立，黄金基线可能被新通路扰动")
+    return ok
+
+
 def main() -> int:
     storage_mode = (os.environ.get("CREATOR_STORAGE") or "file").strip().lower()
     if storage_mode == "pg" and (os.environ.get("CREATOR_DOCTOR_PG") or "") != "1":
@@ -1743,6 +1850,7 @@ def main() -> int:
         dhuman = check_digital_human()
         multimodal = check_multimodal()
         computed = check_compute()
+        digest = check_digest_export()
     except Exception as error:  # noqa: BLE001
         print(f"\n[失败] 自检演练异常：{type(error).__name__}: {error}")
         import traceback
@@ -1769,6 +1877,7 @@ def main() -> int:
         "数字人渲染样例": dhuman,
         "Brief 素材（多模态）": multimodal,
         "确定性计算沙箱": computed,
+        "素材研读与长文分篇": digest,
     }
     print()
     if all(checks.values()):

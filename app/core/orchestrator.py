@@ -40,7 +40,7 @@ from langgraph.types import Command, interrupt
 
 from ..agents.base import AgentRunContext
 from ..agents.registry import get_agent
-from ..config import CHECKPOINT_FILE, RUBRIC_VERSION, get_config
+from ..config import CHECKPOINT_FILE, EXPORTS_DIR, RUBRIC_VERSION, get_config
 from ..knowledge.industry import publish_slots, title_limit
 from ..knowledge.language import (
     is_multilingual,
@@ -53,6 +53,7 @@ from ..llm.cost import cost_guard
 from ..logger import create_logger
 from .blackboard import INTENT_TTL_MS, blackboard
 from .clock import now_iso
+from .digest import digest_documents
 from .evaluations import build_record, evaluation_store
 from .events import event_bus, new_id
 from .gatekeeper import build_scorecard, decide_gate, to_gate_records
@@ -144,6 +145,21 @@ class PipelineState(TypedDict, total=False):
 # ------------------------------------------------------------------ #
 # 编排器                                                              #
 # ------------------------------------------------------------------ #
+
+
+#: 尾部标点/空白（判定 cta 是否与正文结尾同句时忽略）
+_TAIL_PUNCT = "。，、！!？?…；;：:～~-—*# \u3000\t\r\n"
+
+
+def _body_ends_with(body: str, tail: str) -> bool:
+    """正文（去掉尾部标点后）是否以 ``tail``（同样去尾标点）结尾。"""
+    stripped = body.rstrip()
+    while stripped and stripped[-1] in _TAIL_PUNCT:
+        stripped = stripped[:-1].rstrip()
+    target = tail.rstrip()
+    while target and target[-1] in _TAIL_PUNCT:
+        target = target[:-1].rstrip()
+    return bool(target) and stripped.endswith(target)
 
 
 class Orchestrator:
@@ -792,6 +808,9 @@ class Orchestrator:
             tags=["编排", "任务卡"],
         )
 
+        # 文档素材研读：在任务卡下发后、A1 之前完成（无素材时零调用零产物）
+        self._digest_documents(task)
+
         node.status = "done"
         node.finished_at = now_iso()
         node.summary = f"拆解出 {len(task.packets)} 张任务卡，编排 {len(PIPELINE) - 1} 个阶段"
@@ -816,6 +835,47 @@ class Orchestrator:
 
         self._publish(task, "agent.finish", node.summary, {"agent_id": "A0"})
         self._save(task)
+
+    def _digest_documents(self, task: TaskRecord) -> None:
+        """研读 Brief 附带的文档素材（map-reduce），产物供 A2/A3/A4/A6 引用。
+
+        这是「人工精读原文 → 手写素材包塞进 constraints」的内化：没有可用
+        文档素材时零调用、零产物（任务行为与历史完全一致）；研读失败写进
+        产物的 issues，不阻断流水线。
+        """
+
+        def emit(message: str, payload: dict[str, Any] | None = None, level: str = "info") -> None:
+            self._publish(
+                task, "doc.digest", message, {**(payload or {}), "agent_id": "A0"}, level
+            )
+
+        content = digest_documents(task.brief, emit)
+        if not content["documents"] and not content["issues"]:
+            return
+
+        lines: list[str] = []
+        if content["creative_brief"]:
+            lines.append(content["creative_brief"])
+        for doc in content["documents"]:
+            lines.append(f"【{doc.get('title')}】{doc.get('summary')}")
+            facts = doc.get("key_facts") or []
+            quotes = doc.get("quotes") or []
+            if facts:
+                lines.append("要点：" + "；".join(str(f) for f in facts[:10]))
+            if quotes:
+                lines.append("摘录：" + "；".join(str(q) for q in quotes[:5]))
+        for issue in content["issues"]:
+            lines.append(f"问题：{issue}")
+
+        self._write_artifact(
+            task,
+            agent_id="A0",
+            type_="document_digest",
+            title="素材文档研读要点",
+            content=content,
+            text="\n".join(lines),
+            tags=["素材", "研读"],
+        )
 
     # ---------------------------------------------------------------- #
     # 单步执行                                                          #
@@ -1095,18 +1155,27 @@ class Orchestrator:
         if agent_id == "A1":
             return {}
         if agent_id == "A2":
-            return {"strategy": get("strategy_brief")}
+            return {"strategy": get("strategy_brief"), "documents": get("document_digest")}
         if agent_id == "A3":
-            return {"strategy": get("strategy_brief"), "creative": get("creative_concept")}
+            return {
+                "strategy": get("strategy_brief"),
+                "creative": get("creative_concept"),
+                "documents": get("document_digest"),
+            }
         if agent_id == "A4":
             return {
                 "strategy": get("strategy_brief"),
                 "creative": get("creative_concept"),
                 "plan": get("content_plan"),
+                "documents": get("document_digest"),
             }
         if agent_id == "A5":
             return {"plan": get("content_plan"), "draft": self._effective_draft(task, False)}
-        if agent_id in ("A6", "A7"):
+        if agent_id == "A6":
+            # A6 额外拿到素材文档研读要点：与文档一致的主张可判「已核实」，
+            # 书评/考据类内容（来源=原文而非网页）不再被整条误伤
+            return {"draft": self._effective_draft(task, True), "documents": get("document_digest")}
+        if agent_id == "A7":
             return {"draft": self._effective_draft(task, True)}
         if agent_id == "A8":
             return {
@@ -2029,6 +2098,44 @@ class Orchestrator:
             "approved_by": "human",
             "approval_comment": comment,
         }
+
+        # 成品导出：把全部版本渲染为可直接使用的 txt 落盘（过去要人工拼装）。
+        # 连载类内容的 3 个版本是 3 篇正文，只导出主推版会丢内容，因此全量导出。
+        all_versions = [v for v in versions if isinstance(v, dict)]
+        export_path = ""
+        if all_versions:
+            recommended_id = str(draft.get("recommended_version") or "")
+            blocks = []
+            for item in all_versions:
+                mark = "【主推】" if str(item.get("id") or "") == recommended_id else ""
+                body_text = str(item.get("body") or "")
+                # 模型常把同一句收尾既写进正文结尾、又填进 cta 字段（真实链路实测
+                # 「咱们下回再见。」连出两次）；导出是可直接使用的全文，尾部已含
+                # 同句时不再重复拼接（忽略尾部标点差异）。
+                cta_text = str(item.get("cta") or "").strip()
+                if cta_text and _body_ends_with(body_text, cta_text):
+                    cta_text = ""
+                item_tags = item.get("hashtags")
+                item_tags = item_tags if isinstance(item_tags, list) else []
+                blocks.append(
+                    f"{mark}【{item.get('style') or item.get('id') or ''}】"
+                    f"{item.get('title') or ''}\n\n{body_text}"
+                    + (f"\n\n{cta_text}" if cta_text else "")
+                    + (
+                        f"\n\n{' '.join(str(tag) for tag in item_tags)}"
+                        if item_tags
+                        else ""
+                    )
+                )
+            try:
+                EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                (EXPORTS_DIR / f"{task.id}.txt").write_text(
+                    "\n\n————————\n\n".join(blocks), encoding="utf-8"
+                )
+                export_path = f"exports/{task.id}.txt"
+            except OSError as error:
+                self._publish(task, "log", f"成品导出失败：{error}", {}, "warn")
+        content["export_path"] = export_path
 
         artifact = self._write_artifact(
             task,

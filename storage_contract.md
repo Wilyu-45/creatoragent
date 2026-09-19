@@ -41,7 +41,8 @@
 | 5 | `checkpoints.sqlite` | `app/core/orchestrator.py`（LangGraph `SqliteSaver`） | 断点续跑检查点 | `langgraph-checkpoint-postgres` `PostgresSaver`（**fail-loud，不静默退回**） |
 | 6 | `traces/<task_id>.json` | `app/core/tracing.py`（`EXPORT_DIR`） | OTel 形状的 trace 导出 | 不替换（导出面保留文件；生产观测走 OTLP collector） |
 | 7 | `digital_human.json` | `app/core/digital_human.py`（`STORE_FILE`） | 数字人渲染作业 | `dh_jobs_pg.py` `PgJobBackend`（表 `digital_human_jobs`） |
-| 8 | （内存） | `app/llm/cache.py` `ResponseCache` | LLM 响应缓存（TTL + 容量，不落盘） | 不替换（纯内存；可选 Redis，miss 只影响成本不影响正确性） |
+| 8 | `exports/<task_id>.txt` | `app/core/orchestrator.py`（`EXPORTS_DIR`） | 审批通过后的成品导出文本（final_delivery 渲染） | 不替换（导出面保留文件，与 traces 同口径；下载走 `GET /api/tasks/{id}/export`） |
+| 9 | （内存） | `app/llm/cache.py` `ResponseCache` | LLM 响应缓存（TTL + 容量，不落盘） | 不替换（纯内存；可选 Redis，miss 只影响成本不影响正确性） |
 
 ---
 

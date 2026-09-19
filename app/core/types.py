@@ -191,7 +191,8 @@ class TaskPacket(BaseModel):
 # ------------------------------------------------------------------ #
 
 ArtifactType = Literal[
-    "task_plan", "strategy_brief", "creative_concept", "content_plan", "copy_draft",
+    "task_plan", "document_digest", "strategy_brief", "creative_concept",
+    "content_plan", "copy_draft",
     "edited_copy", "fact_check_report", "compliance_report", "visual_brief",
     "video_script", "channel_adaptation", "publish_plan", "effect_report",
     "knowledge_card", "final_delivery",
@@ -200,6 +201,7 @@ ArtifactType = Literal[
 #: 产物类型 → 中文标题（UI 与归档时使用）。
 ARTIFACT_LABEL: dict[str, str] = {
     "task_plan": "任务计划",
+    "document_digest": "素材研读要点",
     "strategy_brief": "策略简报",
     "creative_concept": "创意概念",
     "content_plan": "内容策划",

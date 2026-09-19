@@ -192,6 +192,14 @@ try:
         check("事件带 span_id", len(linked) > 0, True)
         check("事件 trace_id 一致", {e["trace_id"] for e in events if e.get("trace_id")} == {trace["trace_id"]}, True)
 
+        print("[GET /api/tasks/{id}/export（成品导出）]")
+        missing = client.get("/api/tasks/verify-no-such-task/export")
+        check("无任务 → 404", missing.status_code, 404)
+        export = client.get(f"/api/tasks/{tid}/export")
+        check("有 final_delivery → 200", export.status_code, 200)
+        check("导出为 text/plain", "text/plain" in export.headers.get("content-type", ""), True)
+        check("导出内容非空", len(export.content) > 0, True)
+
         print("[GET /api/metrics → system.tracing]")
         tracing = client.get("/api/metrics").json()["system"]["tracing"]
         check("tracing.traces", tracing["traces"] >= 1, True)

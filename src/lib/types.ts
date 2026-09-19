@@ -196,6 +196,7 @@ export interface TaskPacket {
 
 export type ArtifactType =
   | 'task_plan'
+  | 'document_digest'
   | 'strategy_brief'
   | 'creative_concept'
   | 'content_plan'

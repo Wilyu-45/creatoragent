@@ -20,6 +20,7 @@ from .base import (
     build_result,
     call_with_prompts,
     content_to_text,
+    documents_block,
     memory_block,
     normalize_confidence,
     read_confidence,
@@ -139,7 +140,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 使用场景：{'；'.join(as_str_array(audience.get('scenarios')))}
 核心动机：{'；'.join(as_str_array(audience.get('motivations')))}
 
-{memory_block(ctx)}{tools.prompt_block()}请给出 Big Idea、2-3 个创意方向与调性指南，严格要求 JSON 结构如下：
+{documents_block(ctx)}{memory_block(ctx)}{tools.prompt_block()}请给出 Big Idea、2-3 个创意方向与调性指南，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(

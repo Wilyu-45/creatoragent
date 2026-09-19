@@ -1093,6 +1093,96 @@ def generate_copy(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ #
+# 文档研读（DOC.digest）与 A4 分篇                                    #
+# ------------------------------------------------------------------ #
+
+
+def _digest_sentences(text: str) -> list[str]:
+    """把文档节选切成可用的句子（去空白、去超短句），供占位研读取材。"""
+    parts = [seg.strip() for seg in (text or "").replace("\n", "。").split("。")]
+    return [seg for seg in parts if len(seg) >= 8]
+
+
+def generate_digest_map(ctx: dict[str, Any]) -> dict[str, Any]:
+    """单块研读的离线占位：形状与真实 map 输出一致，内容从节选里如实截取。"""
+    documents = [rec(item) for item in as_obj_array(ctx.get("documents"))]
+    doc = documents[0] if documents else {}
+    title = as_str(doc.get("title"), "未命名文档")
+    chunk_index = int(as_num(doc.get("chunk_index"), 1))
+    chunk_total = int(as_num(doc.get("chunk_total"), 1))
+    sentences = _digest_sentences(as_str(doc.get("text")))
+
+    summary = "；".join(sentences[:2])[:200] if sentences else f"{title} 第 {chunk_index}/{chunk_total} 块（无可读正文）"
+    key_facts = [f"{title}｜{seg[:60]}" for seg in sentences[:15]] or [f"{title}｜本块未提取到明确事实"]
+    quotes = [seg[:80] for seg in sentences[2:10]] or [summary[:80]]
+    style_notes = [f"节选 {chunk_index}/{chunk_total}：以原文摘录为主，未附加外部解读"]
+
+    return {
+        "title": title,
+        "chunk_index": chunk_index,
+        "chunk_total": chunk_total,
+        "summary": summary,
+        "key_facts": key_facts,
+        "quotes": quotes,
+        "style_notes": style_notes,
+    }
+
+
+def generate_digest_reduce(ctx: dict[str, Any]) -> dict[str, Any]:
+    """研读汇总的离线占位：按文档聚合 map 结果，不新增事实。"""
+    maps = [rec(item) for item in as_obj_array(ctx.get("maps"))]
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in maps:
+        grouped.setdefault(as_str(item.get("title"), "未命名文档"), []).append(item)
+
+    documents: list[dict[str, Any]] = []
+    for title, items in grouped.items():
+        facts: list[str] = []
+        quotes: list[str] = []
+        for item in items:
+            for fact in as_str_array(item.get("key_facts")):
+                if fact not in facts:
+                    facts.append(fact)
+            for quote in as_str_array(item.get("quotes")):
+                if quote not in quotes:
+                    quotes.append(quote)
+        summaries = [as_str(item.get("summary")) for item in items if as_str(item.get("summary"))]
+        documents.append(
+            {
+                "title": title,
+                "summary": "；".join(summaries)[:400],
+                "key_facts": facts[:40],
+                "quotes": quotes[:10],
+                "style_notes": as_str_array(items[0].get("style_notes"))[:5],
+            }
+        )
+
+    brief_line = "；".join(f"{doc['title']}：{doc['summary'][:80]}" for doc in documents)
+    creative_brief = (
+        f"本次任务附带 {len(documents)} 份素材文档，研读要点如下，供选题与创作参考：{brief_line}"
+        if documents
+        else "（本次任务没有可研读的文档素材）"
+    )
+    return {"documents": documents, "creative_brief": creative_brief[:5000]}
+
+
+def generate_copy_version(ctx: dict[str, Any]) -> dict[str, Any]:
+    """A4 分篇生成的离线占位：复用整版生成器，按 version_style 取出单版本。"""
+    full = generate_copy(ctx)
+    wanted = as_str(ctx.get("version_style"), "V1")
+    versions = [rec(item) for item in as_obj_array(full.get("versions"))]
+    version = next((item for item in versions if as_str(item.get("id")) == wanted), versions[0] if versions else {})
+    return {
+        "version": version,
+        "claims": [rec(item) for item in as_obj_array(full.get("claims"))],
+        "revision_notes": [rec(item) for item in as_obj_array(full.get("revision_notes"))],
+        "confidence": as_num(full.get("confidence"), 0.81),
+        "risks": as_str_array(full.get("risks")),
+        "evidence": [rec(item) for item in as_obj_array(full.get("evidence"))],
+    }
+
+
+# ------------------------------------------------------------------ #
 # A5 编辑审校                                                         #
 # ------------------------------------------------------------------ #
 
@@ -3451,6 +3541,9 @@ GENERATORS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "A10.review": generate_analysis_review,
     "A11.memory": generate_memory,
     "judge.evaluate": generate_judge,
+    "DOC.digest.map": generate_digest_map,
+    "DOC.digest.reduce": generate_digest_reduce,
+    "A4.copy.version": generate_copy_version,
 }
 
 

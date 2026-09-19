@@ -21,6 +21,7 @@ from .base import (
     build_result,
     call_with_prompts,
     content_to_text,
+    documents_block,
     read_confidence,
     read_evidence,
     read_risks,
@@ -139,7 +140,7 @@ def run(ctx: AgentRunContext) -> AgentResult:
 Big Idea：{as_str(big_idea.get('title'))} —— {as_str(big_idea.get('statement'))}
 推荐方向：{as_str(creative.get('recommended_direction'))}
 
-{tools.prompt_block()}请输出选题清单、内容大纲与渠道适配表，严格要求 JSON 结构如下：
+{documents_block(ctx)}{tools.prompt_block()}请输出选题清单、内容大纲与渠道适配表，严格要求 JSON 结构如下：
 {SCHEMA}"""
 
     result = call_with_prompts(

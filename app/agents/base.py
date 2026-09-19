@@ -417,6 +417,54 @@ def vision_attachments(ctx: AgentRunContext, agent_id: str = "") -> list[ImagePa
     return vision_parts(ctx.brief.assets, agent_id=agent_id)
 
 
+def documents_block(ctx: AgentRunContext, *, facts_only: bool = False) -> str:
+    """渲染素材文档研读要点（A0 的 map-reduce 产物）。无文档素材时返回空串。
+
+    与 ``assets_block`` 的「素材清单」不同，这里给的是**内容**：关键事实、
+    可引用摘录与风格要点。首行如实标注来源（系统研读，非模型直接阅读全文），
+    防止智能体误以为自己读过原文全文。
+    ``facts_only=True`` 供核查类智能体使用：只要事实与摘录，不要创作向导语。
+    """
+    digest = ctx.upstream_of("documents")
+    docs = digest.get("documents")
+    docs = docs if isinstance(docs, list) else []
+    docs = [doc for doc in docs if isinstance(doc, dict)]
+    if not docs and facts_only:
+        return ""
+    issues = [str(item) for item in (digest.get("issues") or []) if str(item)]
+
+    lines: list[str] = []
+    if not docs:
+        # 有文档但研读全部失败：如实说明，让智能体按「无素材」口径工作
+        lines.append("【素材文档研读要点】本次附带的文档素材研读失败，请勿引用其内容。")
+    else:
+        lines.append(
+            "【素材文档研读要点】（由系统对任务附带文档做要点研读生成，"
+            "非模型直接阅读全文；引用时以「任务素材文档：<标题>」为来源）"
+            if not facts_only
+            else "【素材文档研读要点】（系统研读产物，用作事实比对基准）"
+        )
+        for doc in docs:
+            title = str(doc.get("title") or "未命名文档")
+            lines.append(f"◆ {title}")
+            summary = str(doc.get("summary") or "")
+            if summary and not facts_only:
+                lines.append(f"  概要：{summary}")
+            for fact in [str(f) for f in (doc.get("key_facts") or []) if str(f)]:
+                lines.append(f"  事实：{fact}")
+            for quote in [str(q) for q in (doc.get("quotes") or []) if str(q)]:
+                lines.append(f"  摘录：「{quote}」")
+            if not facts_only:
+                for note in [str(n) for n in (doc.get("style_notes") or []) if str(n)]:
+                    lines.append(f"  风格：{note}")
+        brief_text = str(digest.get("creative_brief") or "")
+        if brief_text and not facts_only:
+            lines.append(f"创作参考：{brief_text}")
+    for issue in issues:
+        lines.append(f"  研读问题：{issue}")
+    return "\n".join(lines) + "\n\n"
+
+
 def content_to_text(content: dict[str, Any]) -> str:
     """把结构化产物压平成可读文本，用于版本 diff、关键词检索与全文合规扫描。"""
     lines: list[str] = []
@@ -468,6 +516,7 @@ __all__ = [
     "localization_block",
     "assets_block",
     "vision_attachments",
+    "documents_block",
     "content_to_text",
     "as_num",
     "as_obj",

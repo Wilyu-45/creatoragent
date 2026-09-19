@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import type { ArtifactType, TaskRecord } from '../lib/types.ts';
+import { downloadExport } from '../lib/api.ts';
 import { diffLines, formatTime, gateTone, scoreTone, severityTone } from '../lib/format.ts';
 import { asNumber, asRecord, asRecordArray, asText, asTextArray } from '../lib/value.ts';
 import { Bullets, Card, Chip, Empty, Kv, Section, Table } from './ui.tsx';
@@ -20,6 +21,7 @@ const TYPE_LABEL: Record<ArtifactType, string> = {
   publish_plan: '多平台发布排期',
   effect_report: '效果预估报告',
   knowledge_card: '知识沉淀卡片',
+  document_digest: '素材研读要点',
   final_delivery: '最终交付物',
 };
 
@@ -1389,6 +1391,7 @@ export function ArtifactViewer({ task }: { task: TaskRecord }) {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showDiff, setShowDiff] = useState(false);
+  const [exportState, setExportState] = useState<'idle' | 'busy' | 'error'>('idle');
 
   const selected = useMemo(() => {
     if (selectedId) {
@@ -1453,7 +1456,25 @@ export function ArtifactViewer({ task }: { task: TaskRecord }) {
                   <span>{formatTime(selected.created_at)}</span>
                 </div>
               </div>
-              {previous ? (
+              {selected.type === 'final_delivery' ? (
+                <div className="row" style={{ gap: 8 }}>
+                  {exportState === 'error' ? (
+                    <span className="muted small">导出失败，请重试或检查服务日志</span>
+                  ) : null}
+                  <button
+                    className="btn btn-sm"
+                    disabled={exportState === 'busy'}
+                    onClick={() => {
+                      setExportState('busy');
+                      downloadExport(task.id)
+                        .then(() => setExportState('idle'))
+                        .catch(() => setExportState('error'));
+                    }}
+                  >
+                    {exportState === 'busy' ? '导出中…' : '导出成品'}
+                  </button>
+                </div>
+              ) : previous ? (
                 <button className="btn btn-sm" onClick={() => setShowDiff((value) => !value)}>
                   {showDiff ? '返回正文' : `对比 v${previous.version}`}
                 </button>

@@ -106,12 +106,15 @@
 
 - 门禁不通过时自动**返工**，最多 `MAX_REVISIONS` 轮；超限升级为**人工裁决**。
 - 成本或 token 超预算时**熔断**，后续步骤自动切离线引擎，任务继续跑完不受影响。
+- Brief 附带 `kind=document` 素材时，A0 先做 map-reduce **研读**，产物「素材研读要点」供 A2/A3/A4/A6 引用（A6 把与素材一致的主张判为已核实）；研读与正文都吃 token，跑长素材前先调高下节的 token 上限与「文档研读调用数」。
+- 硬性约束写明「每篇 N–M 字」（上界 ≥1500）时，A4 自动**分篇**按三种风格逐篇生成长文（注意：别把「合计 X–Y 字」写进期望交付物，会被误当作每篇字数）。
 
 ### 4.3 人工审批
 
 全部自动审核通过（或门禁升级）时，任务挂起并弹出审批横幅：
 
 - **通过**：生成多平台发布排期 → 归档交付 → 触发 A11 知识沉淀。
+  产物列表的「最终交付物」出现**导出成品**按钮，或直接 `GET /api/tasks/{id}/export` 下载归档文本。
 - **退回返工**：带着意见回到上游重跑（消耗返工轮次）。
 - **驳回**：任务终止为「已驳回」。
 
@@ -196,7 +199,7 @@ INIT → STRATEGY → CREATIVE → PLANNING → DRAFTING → REVIEW → EDITING
 | 模型 | 提供方（mock / openai）、模型名、Base URL（含本地端点一键填入）、API Key、Temperature、Max Tokens、超时 |
 | 智能体模型覆盖 | 每个智能体可单独覆盖 模型 / Base URL / API Key（留空继承全局；与站点监控同为持久化设置） |
 | 编排与门禁 | Turn Budget、最大返工轮次、质量分阈值、自动审批 |
-| 成本与缓存 | 单任务成本上限（USD）、单任务 token 上限、是否启用响应缓存 |
+| 成本与缓存 | 单任务成本上限（USD）、单任务 token 上限、是否启用响应缓存、文档研读调用数（`digestMaxCalls`） |
 | 向量检索 | 提供方（local / openai）、模型、语义权重（0–1）、API Key |
 | 发布投递 | webhook 地址、失败重试次数、是否自动投递 |
 | 质量评估 | 介入方式（off / advisory / blocking）、评估器（offline / llm）、通过线、权重 |
@@ -561,6 +564,7 @@ cat data/traces/<task_id>.json                                                  
 | POST | `/api/tasks/{id}/evaluate` | 按需评估 |
 | POST | `/api/tasks/{id}/publish` · `/publish/dispatch` | 登记发布 / 自动投递 |
 | POST | `/api/tasks/{id}/feedback` | 回填真实效果，触发 A10 复盘 |
+| GET | `/api/tasks/{id}/export` | 下载成品导出文本（仅终稿任务） |
 | GET | `/api/evaluations` | 评估历史与全库聚合 |
 | POST | `/api/golden/run` · GET `/api/golden/status` | 触发黄金回归 / 轮询进度 |
 | GET | `/api/memory` · POST `/api/memory/search` | 记忆库列表 / 检索 |

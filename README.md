@@ -40,20 +40,18 @@ python -m app.main          # 默认 http://127.0.0.1:8787
 
 开发模式（前后端热更新）：`npm run dev` —— 同时起 `python -m app.main`（:8787）与 Vite（:5273）。
 
-### Docker 一键起（含 Jaeger）
+### 部署（多种方案）
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build     # 容器一键起（应用 + Jaeger）
 #   应用   http://127.0.0.1:8787
 #   Jaeger http://127.0.0.1:16686
 ```
 
-- 只要应用：`docker compose up -d --build app`
-- 受限网络（Docker Hub 不可达）：`DOCKERFILE=Dockerfile.offline docker compose up -d --build`
+- 只要应用：`docker compose up -d --build app`；受限网络：`DOCKERFILE=Dockerfile.offline docker compose up -d --build`
 - **数据在 `/data`，必须挂卷**，否则容器重建即丢任务与记忆库
-- k8s 清单副本数固定为 1（本地 JSON + SQLite，多副本会状态分裂）
 
-单容器、k8s、探针与存储迁移等部署细节见 [`USER_GUIDE.md`](USER_GUIDE.md)。
+**裸机（systemd）/ Windows 任务计划 / Nginx·Caddy 反向代理 / k8s 的完整方案见 [`DEPLOYMENT.md`](DEPLOYMENT.md)**。
 
 ### 接入真实模型
 
@@ -82,7 +80,8 @@ OPENAI_API_KEY=sk-xxx OPENAI_MODEL=deepseek-chat python -m app.main
 | 发布闭环 | 审批 → 排期 → 登记发布 / webhook 自动投递 → 回填真实效果 → A10 复盘 → A/B 结论 |
 | 多语言与视频脚本 | 中/英/日/韩/西**原生创作**（非翻译）；短视频产出独立 `video_script` 产物 |
 | 多租户与可观测 | 令牌 → 租户，任务与记忆库双向隔离；span 树覆盖整个 session，可选 OTLP 导出 |
-| 容器化 | 多阶段镜像 + docker compose（含 Jaeger）+ k8s 清单 |
+| MCP 插件 | `app/mcp_server.py` 暴露 9 个 MCP 工具（stdio / streamable-http 双传输），DeepSeek harness、Claude Code、Trae 等 agent 可直接驱动流水线 |
+| 部署 | 裸机 systemd / Docker·compose / k8s / Windows 任务计划 + Nginx·Caddy 反代样例，含清单静态核验 |
 
 ---
 
@@ -156,7 +155,7 @@ python scripts/smoke_api.py
 # 快速契约核验（评估 / 租户 / 轨迹 / 传播采样 / 数字人样例闭环）
 python scripts/verify_contracts.py
 
-# 容器化清单核验（不需要 Docker daemon）
+# 部署清单核验（不需要 Docker daemon）
 python scripts/check_deploy.py
 
 # 并发正确性 / 性能基线
@@ -177,6 +176,7 @@ PR 阶段就能拦住质量回归。各脚本的覆盖范围与用法见 [`USER_
 |---|---|
 | [`README.md`](README.md) | 本文件：项目是什么、怎么跑起来、上线前必须由人做什么 |
 | [`USER_GUIDE.md`](USER_GUIDE.md) | **使用与运营**：界面操作、运行时配置与环境变量、评估 / 回归 / 排障步骤 |
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | **部署方案**：裸机 / 容器 / Windows / 反向代理的选择、安装、升级与自检 |
 | [`creator.md`](creator.md) | **架构与角色**：智能体职责、协作流程、状态机、数据契约、门禁与权限设计 |
 | [`plan.md`](plan.md) | **技术选型与排期**：框架对比、分层架构、测试策略、验收指标、as-built 对照 |
 | [`storage_contract.md`](storage_contract.md) | **存储契约**：file / pg 双后端接口签名、不变量、实体映射与切换步骤 |

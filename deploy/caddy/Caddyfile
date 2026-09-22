@@ -1,0 +1,20 @@
+# Creator Agent Studio —— Caddy 反向代理样例（自动 HTTPS）
+#
+# 安装：
+#   sudo cp deploy/caddy/Caddyfile /etc/caddy/Caddyfile
+#   # 把域名换成你的（DNS 需先指向本机），然后：
+#   sudo systemctl reload caddy
+#
+# Caddy 会自动为域名签发并续期证书，无需 certbot；纯内网可用
+# `http://creator.lan { ... }` 形式（显式 http:// 前缀即关闭自动 HTTPS）。
+#
+# SSE（`/api/tasks/{id}/events` 事件流）是长连接：`flush_interval -1`
+# 表示逐条即时下发（Caddy 默认做响应缓冲以便压缩，事件会被「攒着不发」，
+# 等价于 Nginx 的 proxy_buffering off）。scripts/check_deploy.py 对该项
+# 做静态核验，改配置时不要删。
+
+creator.example.com {
+	reverse_proxy 127.0.0.1:8787 {   # 端口与 PORT 默认值一致（应用只监听本机）
+		flush_interval -1
+	}
+}

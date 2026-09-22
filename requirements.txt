@@ -24,6 +24,10 @@ langgraph-checkpoint-postgres>=3.0,<4
 python-dotenv>=1.0.0
 httpx>=0.27.0
 
+# ---- MCP 插件（app/mcp_server.py，供 DeepSeek harness / Claude Code / Trae 等 agent 接入）----
+# 本模块是 REST API 的协议适配层：stdio 与 streamable-http 两种传输，状态仍归主服务
+mcp>=2.2,<3
+
 # ---- 分布式追踪：OTLP 导出（可选能力，见 app/core/otel.py） ----
 # 这三个包**只在 OTLP_ENDPOINT 配置后才被 import**：未配置时进程内追踪完全自实现，
 # 不产生任何 OTel 依赖，因此「零外部依赖、离线可跑通」的默认体验不受影响。

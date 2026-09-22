@@ -32,12 +32,15 @@ FROM python:3.12-slim AS runtime
 
 # PYTHONUNBUFFERED: 日志实时输出（否则 docker logs 会延迟甚至丢日志）
 # PYTHONDONTWRITEBYTECODE: 不留 .pyc，保持镜像层干净
+# HOST=0.0.0.0: 端口发布（-p / ports）的流量 DNAT 到容器 eth0，进程必须监听
+#   非 loopback 才能收到；绑 127.0.0.1 时容器内探针照常通过、宿主机却连不上。
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONNOUSERSITE=1 \
     PIP_NO_CACHE_DIR=1 \
     CREATOR_DATA_DIR=/data \
-    PORT=8787
+    PORT=8787 \
+    HOST=0.0.0.0
 
 # curl 仅用于 HEALTHCHECK（python:3.12-slim 不带）
 RUN apt-get update \
@@ -54,7 +57,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY scripts ./scripts
 COPY golden ./golden
-COPY creator.md plan.md MEMORY.md USER_GUIDE.md ./
+COPY creator.md plan.md MEMORY.md USER_GUIDE.md DEPLOYMENT.md ./
 COPY --from=web /web/dist ./dist
 
 # 非 root 运行：容器内不需要任何特权

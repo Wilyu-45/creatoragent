@@ -124,7 +124,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 校验四份文档的关键章节存在
+      - name: 校验各文档的关键章节存在
         run: |
           set -e
           fail=0
@@ -147,7 +147,10 @@ jobs:
           check USER_GUIDE.md "质量评估"
           check USER_GUIDE.md "回归测试"
           check USER_GUIDE.md "调用轨迹"
-          check USER_GUIDE.md "容器化"
+          check USER_GUIDE.md "DEPLOYMENT.md"
+          check DEPLOYMENT.md "systemd"
+          check DEPLOYMENT.md "反向代理"
+          check DEPLOYMENT.md "Windows"
           exit $fail
 
       - name: 校验新增接口已写入接口速查

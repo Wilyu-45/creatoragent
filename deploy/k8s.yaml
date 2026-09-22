@@ -25,6 +25,8 @@ metadata:
   namespace: creator
 data:
   PORT: "8787"
+  # Pod 内端口要经 Service / Ingress 转发，必须监听非 loopback
+  HOST: "0.0.0.0"
   CREATOR_DATA_DIR: "/data"
   LLM_PROVIDER: "mock"
   OPENAI_BASE_URL: "https://api.openai.com/v1"

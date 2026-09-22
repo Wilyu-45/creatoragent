@@ -58,13 +58,15 @@ USER root
 
 # dify 镜像把 venv 放在 PATH 前面，而那个 venv 里没有 pip。
 # 这里把系统 Python 放回最前，让 pip / python 都落到 /usr/local。
+# HOST=0.0.0.0 同标准 Dockerfile：端口发布要求监听非 loopback，否则宿主机连不上。
 ENV PATH="/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONNOUSERSITE=1 \
     PIP_NO_CACHE_DIR=1 \
     CREATOR_DATA_DIR=/data \
-    PORT=8787
+    PORT=8787 \
+    HOST=0.0.0.0
 
 WORKDIR /app
 
@@ -83,7 +85,7 @@ RUN /usr/local/bin/python -m pip install --no-cache-dir \
 COPY app ./app
 COPY scripts ./scripts
 COPY golden ./golden
-COPY creator.md plan.md MEMORY.md USER_GUIDE.md README.md ./
+COPY creator.md plan.md MEMORY.md USER_GUIDE.md DEPLOYMENT.md README.md ./
 COPY --from=web /web/dist ./dist
 
 # 非 root 运行

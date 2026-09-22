@@ -127,6 +127,10 @@
     必须覆盖提供方真实计费维度（忽略缓存命中价会高估成本数倍 → 过早熔断），
     模型名匹配长名优先。
 44. **重试只认可重试错误**：400 之类的参数错误重试没有意义。
+45. **服务监听地址必须可配置，容器清单要显式声明**：进程绑 `127.0.0.1` 是安全默认，
+   但容器端口发布的流量 DNAT 到容器 eth0 —— 绑 loopback 时**容器内探针照常通过、
+   宿主机却连不上**，自检与冒烟全绿；只有把 `HOST` 三处声明（Dockerfile / compose /
+   k8s）升级为静态断言才能提前拦住（`check_deploy.py` 第 7 项）。
 
 ## 七、文档规范（Documentation Schema）
 
@@ -144,6 +148,7 @@
 | 使用操作、配置项、评估/回归/排障步骤 | `USER_GUIDE.md` | 链接 |
 | 工程约定与历史教训 | `ENGINEERING_PRINCIPLES.md` | 链接 |
 | 存储契约（实体 / 签名 / 不变量 / 替换映射） | `storage_contract.md` | 链接 |
+| 部署方案、清单与升级流程 | `DEPLOYMENT.md` | 链接 |
 | 未完成开发待办、非显然的设计决策 | `MEMORY.md` | 链接 |
 | 门面、快速开始、验证命令、上线前人工事项、文档导航 | `README.md` | — |
 
@@ -174,6 +179,7 @@
 | `plan.md` | 400 行 |
 | `ENGINEERING_PRINCIPLES.md` | 220 行 |
 | `storage_contract.md` | 250 行 |
+| `DEPLOYMENT.md` | 250 行 |
 | `MEMORY.md` | 250 行 |
 
 ### 7.5 更新时机

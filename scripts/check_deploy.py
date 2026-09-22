@@ -1,8 +1,10 @@
-"""校验容器化清单与代码的一致性（可离线跑，不需要 Docker daemon）。
+"""校验部署清单与代码的一致性（可离线跑，不需要 Docker daemon）。
 
 **为什么需要这个检查**：Dockerfile 的 COPY 路径或 compose 的环境变量一旦写错，
-只有真正 `docker build` 时才会暴露 —— 而 CI/开发机上经常没有 daemon。
-把「清单里引用的东西是否存在」变成静态检查，就能在没有 daemon 的环境里提前拦住。
+只有真正 `docker build` 时才会暴露 —— 而 CI/开发机上经常没有 daemon；
+systemd / 反代 / Windows 脚本同理，写错也只有在目标环境上才暴露。
+把「清单里引用的东西是否存在、各处口径是否一致」变成静态检查，
+就能在没有目标环境的机器上提前拦住。
 
 检查项：
 1. Dockerfile 的每个 ``COPY`` / ``ADD`` 源路径在构建上下文中存在（且未被 .dockerignore 排除）
@@ -13,6 +15,14 @@
 6. k8s 必须 ``replicas: 1`` 且发布策略为 ``Recreate`` —— 共享黑板 / 检查点 / 记忆库
    都在本地 JSON + SQLite，多副本或滚动更新会状态分裂；这条约束此前只写在清单注释里，
    改动者不一定看注释，所以升级为断言
+7. 容器清单（Dockerfile / compose / k8s）必须显式声明 ``HOST=0.0.0.0`` ——
+   端口发布的流量 DNAT 到容器 eth0，进程绑 loopback 时容器内探针照常通过、
+   宿主机却连不上（只有真跑容器才暴露的错）
+8. systemd 单元的 ``Environment`` 变量有效、入口命令存在，且数据目录出现在
+   ``ReadWritePaths``（ProtectSystem=strict 下写不了数据目录 → SQLite 检查点静默降级）
+9. 反代样例（nginx / caddy）保留 SSE 关键项（关闭响应缓冲 + 长超时），
+   且反代目标端口与镜像 EXPOSE 端口一致
+10. Windows 计划任务脚本引用的包装脚本存在、启动命令与入口模块一致
 """
 
 from __future__ import annotations
@@ -29,6 +39,11 @@ DOCKERFILE = ROOT / "Dockerfile"
 DOCKERIGNORE = ROOT / ".dockerignore"
 COMPOSE = ROOT / "docker-compose.yml"
 K8S = ROOT / "deploy" / "k8s.yaml"
+SYSTEMD_UNIT = ROOT / "deploy" / "systemd" / "creator.service"
+NGINX_CONF = ROOT / "deploy" / "nginx" / "creator.conf"
+CADDYFILE = ROOT / "deploy" / "caddy" / "Caddyfile"
+WIN_RUNNER = ROOT / "deploy" / "windows" / "run-server.ps1"
+WIN_INSTALLER = ROOT / "deploy" / "windows" / "install-task.ps1"
 
 failures: list[str] = []
 
@@ -205,11 +220,112 @@ def main() -> int:
         "滚动更新会出现新旧副本并存，必须用 Recreate 避免状态分裂",
     )
 
+    print("\n[7] 容器清单的监听地址（HOST）")
+    # 端口发布（-p / ports / Service）的流量 DNAT 到容器 eth0；进程绑 loopback
+    # 时容器内探针照常通过、宿主机却连不上 —— 把三处显式声明升级为断言。
+    check(
+        "Dockerfile HOST=0.0.0.0",
+        "HOST=0.0.0.0" in text,
+        "端口发布要求监听非 loopback，缺了宿主机连不上",
+    )
+    check(
+        'compose app HOST: "0.0.0.0"',
+        'HOST: "0.0.0.0"' in app_section,
+        "端口发布要求监听非 loopback，缺了宿主机连不上",
+    )
+    check(
+        'k8s ConfigMap HOST: "0.0.0.0"',
+        'HOST: "0.0.0.0"' in k8s_text,
+        "Pod 端口要经 Service / Ingress 转发，必须监听非 loopback",
+    )
+
+    print("\n[8] systemd 单元（deploy/systemd/creator.service）")
+    unit = SYSTEMD_UNIT.read_text(encoding="utf-8")
+    for match in re.finditer(r"^Environment=([A-Z0-9_]+)=", unit, re.MULTILINE):
+        name = match.group(1)
+        if name in runtime_vars:
+            print(f"  SKIP {name}（Python 运行时变量）")
+            continue
+        check(f"unit Environment {name}", name in known, "后端从未读取该变量")
+    check(
+        "ExecStart 用 -m app.main",
+        "-m app.main" in unit and (ROOT / "app" / "main.py").exists(),
+        "启动命令与入口模块不一致",
+    )
+    # ProtectSystem=strict 下数据目录不可写 → SQLite 检查点静默降级
+    #（自检全绿但断点续跑失效），因此数据目录必须出现在 ReadWritePaths。
+    data_dir = re.search(r"Environment=CREATOR_DATA_DIR=(\S+)", unit)
+    read_write = re.search(r"ReadWritePaths=(.+)", unit)
+    check(
+        "数据目录在 ReadWritePaths 中",
+        bool(data_dir) and bool(read_write) and data_dir.group(1) in read_write.group(1).split(),
+        "ProtectSystem=strict 下数据目录不可写，SQLite 检查点会静默降级",
+    )
+
+    print("\n[9] 反向代理样例（nginx / caddy）")
+    expose = re.search(r"EXPOSE\s+(\d+)", text)
+    expose_port = expose.group(1) if expose else "8787"
+    nginx_text = NGINX_CONF.read_text(encoding="utf-8")
+    check(
+        "nginx 关闭响应缓冲（SSE）",
+        "proxy_buffering off" in nginx_text,
+        "SSE 事件流会被攒着不发，前端看起来像卡死",
+    )
+    nginx_timeout = re.search(r"proxy_read_timeout\s+(\d+)s", nginx_text)
+    check(
+        "nginx 读超时 ≥ 600s",
+        bool(nginx_timeout) and int(nginx_timeout.group(1)) >= 600,
+        "长任务的事件间隔可达分钟级，默认 60s 会周期性断流",
+    )
+    nginx_target = re.search(r"proxy_pass\s+http://127\.0\.0\.1:(\d+)", nginx_text)
+    check(
+        f"nginx 指向 127.0.0.1:{expose_port}",
+        bool(nginx_target) and nginx_target.group(1) == expose_port,
+        "反代目标端口与镜像 EXPOSE 端口不一致",
+    )
+    caddy_text = CADDYFILE.read_text(encoding="utf-8")
+    check(
+        "caddy 关闭响应缓冲（SSE）",
+        "flush_interval -1" in caddy_text,
+        "SSE 事件流会被攒着不发",
+    )
+    caddy_target = re.search(r"reverse_proxy\s+127\.0\.0\.1:(\d+)", caddy_text)
+    check(
+        f"caddy 指向 127.0.0.1:{expose_port}",
+        bool(caddy_target) and caddy_target.group(1) == expose_port,
+        "反代目标端口与镜像 EXPOSE 端口不一致",
+    )
+
+    print("\n[10] Windows 计划任务脚本（deploy/windows）")
+    check("run-server.ps1 存在", WIN_RUNNER.exists(), "缺少服务包装脚本")
+    check("install-task.ps1 存在", WIN_INSTALLER.exists(), "缺少安装脚本")
+    if WIN_RUNNER.exists():
+        check(
+            "run-server.ps1 启动 app.main",
+            "-m app.main" in WIN_RUNNER.read_text(encoding="utf-8"),
+            "启动命令与入口模块不一致",
+        )
+    if WIN_INSTALLER.exists():
+        installer_text = WIN_INSTALLER.read_text(encoding="utf-8")
+        check(
+            "install-task.ps1 引用 run-server.ps1",
+            "run-server.ps1" in installer_text,
+            "任务动作引用的包装脚本名与仓库内文件不一致",
+        )
+        check(
+            "install-task.ps1 注册计划任务",
+            "Register-ScheduledTask" in installer_text,
+            "安装脚本必须能创建计划任务",
+        )
+
     print()
     if failures:
-        print(f"容器化清单核验未通过：{len(failures)} 项 → {'、'.join(failures)}")
+        print(f"部署清单核验未通过：{len(failures)} 项 → {'、'.join(failures)}")
         return 1
-    print("容器化清单核验通过：COPY 路径、环境变量、探针、单副本约束均与代码一致。")
+    print(
+        "部署清单核验通过：COPY 路径、环境变量、探针、单副本、监听地址、"
+        "systemd / 反代 / Windows 脚本均与代码一致。"
+    )
     return 0
 
 

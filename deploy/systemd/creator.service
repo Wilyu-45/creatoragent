@@ -1,0 +1,55 @@
+# Creator Agent Studio —— systemd 服务单元（Linux 裸机部署）
+#
+# 安装（完整步骤见 DEPLOYMENT.md「Linux 裸机」）：
+#   sudo cp deploy/systemd/creator.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now creator
+#   journalctl -u creator -f          # 看日志
+#
+# 设计说明
+# --------
+# * **代码与数据分离**：代码在 /opt/creator-agent-studio（升级时整目录替换），
+#   数据在 /var/lib/creator（StateDirectory 自动创建并 chown 给运行用户，
+#   升级 / 回滚都不触碰数据）。路径如需调整，必须同步改下方三处 ——
+#   scripts/check_deploy.py 会校验 CREATOR_DATA_DIR 与 ReadWritePaths 一致。
+# * **只监听 127.0.0.1**：对外流量一律经反向代理（deploy/nginx 或 deploy/caddy），
+#   应用不直接暴露；反代与应用同机时连 127.0.0.1:8787，无需改 HOST。
+# * **配置唯一来源 /etc/creator/creator.env**（KEY=VALUE，与 .env 同语法）；
+#   前缀 "-" 表示可缺省（缺省时全部走内置默认值，离线引擎照样跑通全流程）。
+#   注意它是**进程环境变量**，优先级高于项目目录内的 .env。
+# * **ProtectSystem=strict**：文件系统整体只读，仅 ReadWritePaths 放行数据目录 ——
+#   应用写不了数据目录时 SQLite 检查点会静默降级（见 ENGINEERING_PRINCIPLES），
+#   因此 check_deploy.py 把「数据目录出现在 ReadWritePaths」升级成了清单断言。
+
+[Unit]
+Description=Creator Agent Studio（多智能体内容创作台）
+Documentation=file:///opt/creator-agent-studio/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=creator
+Group=creator
+WorkingDirectory=/opt/creator-agent-studio
+
+# 配置（可缺省）；数据目录；不写 .pyc（只读文件系统下避免无谓的静默失败）
+EnvironmentFile=-/etc/creator/creator.env
+Environment=CREATOR_DATA_DIR=/var/lib/creator
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+ExecStart=/opt/creator-agent-studio/.venv/bin/python -m app.main
+
+Restart=on-failure
+RestartSec=3
+
+# 最小权限加固
+StateDirectory=creator
+ReadWritePaths=/var/lib/creator
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

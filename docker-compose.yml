@@ -36,6 +36,9 @@ services:
       - creator-data:/data
     environment:
       PORT: "8787"
+      # 容器端口发布要求监听非 loopback（DNAT 目标是容器 eth0）；
+      # 这不是「更开放」——应用的真实入口是宿主 8787，健康检查仍走容器内 loopback。
+      HOST: "0.0.0.0"
       CREATOR_DATA_DIR: /data
 
       # ---- 模型：默认离线引擎，无需密钥即可跑通全流程 ----

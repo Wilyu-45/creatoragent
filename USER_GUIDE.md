@@ -22,10 +22,11 @@
 11. [调用轨迹与性能排障](#11-调用轨迹与性能排障)
 12. [多语言创作与视频脚本](#12-多语言创作与视频脚本)
 13. [接口速查](#13-接口速查)
-14. [容器化部署](#14-容器化部署)
+14. [部署](#14-部署)
 15. [数据文件与持久化](#15-数据文件与持久化)
 16. [自检与验收](#16-自检与验收)
 17. [常见问题](#17-常见问题)
+18. [MCP 插件接入（agent harness）](#18-mcp-插件接入agent-harness)
 
 ---
 
@@ -217,7 +218,7 @@ INIT → STRATEGY → CREATIVE → PLANNING → DRAFTING → REVIEW → EDITING
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PORT` | `8787` | 服务端口 |
+| `PORT` / `HOST` | `8787` / `127.0.0.1` | 服务端口 / 监听地址（容器清单固定 `0.0.0.0`；局域网直连改 `0.0.0.0`，暴露前必设令牌） |
 | `LLM_PROVIDER` | `mock` | `mock` / `openai` |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI 兼容网关地址 |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | 空 / `gpt-4o-mini` | 密钥与模型名 |
@@ -578,45 +579,24 @@ cat data/traces/<task_id>.json                                                  
 
 ---
 
-## 14. 容器化部署
+## 14. 部署
+
+部署方案的唯一归属是 [`DEPLOYMENT.md`](DEPLOYMENT.md)（裸机 systemd + 反代 / Docker·compose / k8s /
+Windows 任务计划的选择、安装、升级与回滚）。本文只留最短路径与三个最易踩的点：
 
 ```bash
-docker compose up -d --build                                 # 应用 + Jaeger
-docker compose up -d --build app                             # 只要应用
-DOCKERFILE=Dockerfile.offline docker compose up -d --build   # 受限网络（Docker Hub 不可达）
-docker compose logs -f app                                   # 看日志
-docker compose down                                          # 停止（加 -v 会连数据卷一起删）
+docker compose up -d --build     # 容器：应用 + Jaeger（数据在命名卷，勿省挂卷）
+python -m app.main               # 裸机 / 开发：默认 http://127.0.0.1:8787
+python scripts/check_deploy.py   # 部署清单自检（不需要 Docker daemon）
 ```
 
-数据落在命名卷 `creator-data`（容器内 `/data`）。**不挂卷则容器重建即丢任务与记忆库。**
+- **数据必须持久化**（`/data` 或 `<项目根>/data`）：不挂卷则容器重建即丢任务与记忆库；
+- **对外暴露前必须设置 `CREATOR_API_TOKENS`**（决定租户隔离边界，为空则完全不鉴权）；
+- **应用默认只监听 127.0.0.1**：对外访问经反向代理（样例 `deploy/nginx` / `deploy/caddy`）；
+  容器清单已显式设 `HOST=0.0.0.0`，裸机直连在 `.env` 里改。
 
-**单容器**：
-
-```bash
-docker build -t creator-agent-studio:latest .
-docker run -d --name creator -p 8787:8787 -v creator-data:/data \
-  -e AUTO_APPROVE=true -e CREATOR_API_TOKENS=acme:tok_aaa,beta:tok_bbb \
-  creator-agent-studio:latest
-```
-
-**Kubernetes**：`kubectl apply -f deploy/k8s.yaml`（清单含 Namespace / ConfigMap / Secret / PVC /
-Deployment / Service / Ingress）。两点须知：
-
-- **副本数固定为 1**（`Recreate` 策略）：默认 file 模式是本地 JSON + SQLite，多副本会状态分裂。
-  要横向扩展先切到 `CREATOR_STORAGE=pg`（切换步骤见 [`storage_contract.md`](storage_contract.md)），
-  再由部署方调整副本数与托管库连接串。
-- **探针用免鉴权的 `/api/health`**，因此开启 `CREATOR_API_TOKENS` 也能正常探活。
-
-生产环境请务必设置 `CREATOR_API_TOKENS`（决定租户隔离边界），并在 Secret 里放模型密钥。
-
-**部署前清单自检**（不需要 Docker daemon）：
-
-```bash
-python scripts/check_deploy.py
-```
-
-它静态核对：Dockerfile 的 `COPY` 路径是否存在且未被 `.dockerignore` 排除、
-compose/k8s 声明的环境变量是否真被后端读取、探针路径是否等于免鉴权路径。
+> k8s 清单副本数固定 1（`Recreate`）：默认 file 存储多副本会状态分裂；横向扩展先切 `CREATOR_STORAGE=pg`
+> （步骤见 [`storage_contract.md`](storage_contract.md)）。
 
 ---
 
@@ -654,7 +634,7 @@ python scripts/golden_eval.py            # 黄金数据集回归（分数层 + �
 python scripts/golden_eval.py --coverage # 只看渠道覆盖矩阵
 python scripts/smoke_api.py              # 端到端验收：拉起真实服务，逐条核对 /api/* 与 SSE 契约
 python scripts/verify_contracts.py       # 快速契约核验：评估 / 租户 / 轨迹 / 传播采样 / 数字人样例闭环
-python scripts/check_deploy.py           # 容器化清单核验（不需要 Docker daemon）
+python scripts/check_deploy.py           # 部署清单核验（不需要 Docker daemon）
 python scripts/pg_check.py               # PG 存储层专项回归（需 CREATOR_STORAGE=pg + 本地 postgres/redis）
 python scripts/pg_migrate.py --dry-run   # file → pg 存量迁移预览（幂等）
 python scripts/real_check.py --tasks 1   # 真实网关链路核验（延迟 / token / 成本 / 缓存 / 门禁）
@@ -692,6 +672,23 @@ npm run typecheck && npm run build       # 前端
 **Q：记忆库检索不到我刚沉淀的知识？** 依次排查：①是否**同一租户**；②`score` 是否低于阈值；③是否被当作当前任务自己的卡片被排除；④是否已超龄被自动下线。
 
 **Q：顶栏出现「断点续跑不可用」？** 说明 SQLite 检查点初始化失败（通常是数据目录不可写），系统已退回内存检查点，**运行中任务在进程重启后无法续跑**。检查 `CREATOR_DATA_DIR` 权限后重启；`GET /api/health` 的 `checkpointer` 字段可看到具体错误。
+
+---
+
+## 18. MCP 插件接入（agent harness）
+
+把本项目当**工具插件**接入支持 MCP（Model Context Protocol）的 harness / agent（DeepSeek harness、Claude Code、Trae、Cursor 等）。适配层 [`app/mcp_server.py`](app/mcp_server.py) 只是 REST API 的协议转换：**状态唯一归属主服务**，harness 起的任务在 Web 界面同步可见，鉴权与租户判定复用上游。工具 9 个：`creator_health` / `creator_list_tasks` / `creator_create_task` / `creator_get_task` / `creator_wait_task`（轮询到待审批或终态）/ `creator_decide`（approve/revise/reject 人工裁决）/ `creator_export`（成品全文）/ `creator_search_memory` / `creator_trace`。
+
+**stdio（本机，推荐）**：先启动服务（`python -m app.main`），在 harness 的 MCP 配置里加：
+
+```json
+{ "mcpServers": { "creator": {
+    "command": "python", "args": ["-m", "app.mcp_server"], "cwd": "<项目根>" } } }
+```
+
+**HTTP（远程 harness）**：`python -m app.mcp_server --http --port 8766`，接入点 `http://<host>:8766/mcp`（streamable-http）。暴露到本机以外前务必给上游服务配置 `CREATOR_API_TOKENS`：HTTP 模式只透传请求自带的 Authorization / X-API-Token（租户判定在上游完成）；stdio 模式用 `CREATOR_MCP_TOKEN` / `CREATOR_MCP_BASE_URL` 指定令牌与上游地址，完整清单见 [.env.example](.env.example)「MCP 插件」。
+
+典型链路：`creator_health` 确认配置 → `creator_create_task` 提交 Brief → 反复 `creator_wait_task` 等待 → `awaiting_approval` 时 `creator_decide` 拍板 → `creator_export` 取全文。
 
 ---
 

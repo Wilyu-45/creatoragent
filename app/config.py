@@ -274,6 +274,10 @@ class RuntimeConfig:
     """编排与质量门禁的运行时参数。"""
 
     port: int = 8787
+    #: 监听地址（HOST）。默认 127.0.0.1（仅本机，配合反向代理使用）；
+    #: 容器端口发布要求进程监听非 loopback（容器清单已显式设 0.0.0.0），
+    #: 局域网直连同样设 0.0.0.0 —— 暴露到本机以外前务必设置访问令牌。
+    host: str = "127.0.0.1"
     turn_budget: int = 25
     max_revisions: int = 2
     quality_threshold: int = 75
@@ -321,6 +325,7 @@ def _build_config() -> RuntimeConfig:
         provider = "mock"
     return RuntimeConfig(
         port=_int(os.environ.get("PORT"), 8787),
+        host=(os.environ.get("HOST") or "127.0.0.1").strip() or "127.0.0.1",
         turn_budget=_int(os.environ.get("TURN_BUDGET"), 25),
         max_revisions=_int(os.environ.get("MAX_REVISIONS"), 2),
         quality_threshold=_int(os.environ.get("QUALITY_THRESHOLD"), 75),

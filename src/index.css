@@ -949,3 +949,174 @@ table.data tr:hover td {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------------------------- 动效工场 ---------------------------- */
+
+.motion-studio {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 22px 40px;
+}
+
+.motion-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.motion-grid {
+  display: grid;
+  grid-template-columns: 268px 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.motion-list {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 12px;
+  max-height: 68vh;
+  overflow-y: auto;
+}
+
+.motion-list-group {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin: 10px 4px 6px;
+}
+
+.motion-list-group:first-child {
+  margin-top: 0;
+}
+
+.motion-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+}
+
+.motion-item:hover {
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.motion-item.active {
+  border-color: rgba(99, 102, 241, 0.7);
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.18), rgba(99, 102, 241, 0.06));
+}
+
+.motion-stage-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.motion-stage {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: radial-gradient(900px 540px at 50% -10%, #1b2b52 0%, #0a0f1e 62%);
+}
+
+.motion-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 9px 12px;
+  flex-wrap: wrap;
+}
+
+.motion-desc {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.motion-ended {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(7, 10, 18, 0.62);
+  backdrop-filter: blur(3px);
+}
+
+.motion-ended-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-2);
+}
+
+.motion-ended-btns {
+  display: flex;
+  gap: 10px;
+}
+
+.motion-script-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 5fr) 7fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.motion-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.motion-json {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.65;
+  min-height: 420px;
+  white-space: pre;
+}
+
+.motion-error {
+  border: 1px solid rgba(251, 113, 133, 0.5);
+  background: rgba(251, 113, 133, 0.12);
+  color: #ffd3da;
+  border-radius: var(--radius-sm);
+  padding: 8px 11px;
+  font-size: 12.5px;
+}
+
+@media (max-width: 1080px) {
+  .motion-grid,
+  .motion-script-grid {
+    grid-template-columns: 1fr;
+  }
+  .motion-list {
+    max-height: 34vh;
+  }
+}

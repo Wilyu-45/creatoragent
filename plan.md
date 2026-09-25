@@ -350,6 +350,7 @@ MCP 做工具接入 + OpenTelemetry/LangSmith 做可观测性**；4 周 MVP 节�
 | 向量数据库 | 🔁 本地向量 + 关键词混合 | 记忆库用本地确定性 hashing embedding（可切 OpenAI `/embeddings`）+ 2-gram 关键词混合打分，零外部依赖；数据量增大后可替换为专用向量库 |
 | PostgreSQL + Redis 的多租户数据隔离 | ✅ 语义已落地 | 存储仍是 JSON 文件，但**任务与记忆库都按租户分区**（鉴权令牌 → 租户，越权 404，见 creator.md 7.1） |
 | 长文档素材靠人工精读 / 长文单次调用必截断 | ✅ 内置研读与分篇 | Brief 附 `kind=document` 素材时 A0 先 map-reduce 研读（`core/digest.py`，块数按「每文档保底 1 块 + 按字数比例」分配、`digestMaxCalls` 封顶），要点注入 A2/A3/A4/A6，A6 把与素材一致的主张判已核实；A4 检出「每篇 N–M 字」（上界≥1500）按三风格分篇（`A4.copy.version`×3），A5 按同口径审计正文是否达字数区间；成品落 `data/exports/`（cta 与正文结尾同句不重复拼接）供 `GET /api/tasks/{id}/export` 下载 | 把「用户自己精读素材、人工补长文」内化为系统能力；代价是分篇放大 3 倍 prompt 成本、研读吃 token（需调高预算） |
+| 视频动效靠专业工具 / 引入 Remotion 才能预览 | ✅ 纯 React 动效工场 | `src/motion/` 时间驱动动效库（缓动求解 + 播放时钟 + Sequence/Stagger 时序 + 22 个预设：入场/强调/出场/转场）+ JSON 时间轴脚本渲染器（`script.tsx`，未来 video_script → 动效的桥接格式）+ `MotionStudio` 试演面板（顶栏进入，播完出「重播/回到起点」） | Remotion-ready（秒→帧即可迁移），零运行时依赖；浏览器预览先行，MP4 导出留待渲染服务 |
 
 ### 5.2 排期任务完成情况（对应 4.3）
 

@@ -7,12 +7,14 @@ export function Topbar({
   runningCount,
   onNewTask,
   onOpenSettings,
+  onOpenStudio,
 }: {
   health: HealthView | null;
   totalCount: number;
   runningCount: number;
   onNewTask: () => void;
   onOpenSettings: () => void;
+  onOpenStudio: () => void;
 }) {
   const provider = health?.provider;
   const checkpointer = health?.checkpointer;
@@ -54,6 +56,9 @@ export function Topbar({
         </Chip>
       ) : null}
 
+      <button className="btn btn-ghost" onClick={onOpenStudio}>
+        ✦ 动效工场
+      </button>
       <button className="btn btn-ghost" onClick={onOpenSettings}>
         设置
       </button>

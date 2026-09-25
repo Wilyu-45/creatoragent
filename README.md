@@ -81,6 +81,7 @@ OPENAI_API_KEY=sk-xxx OPENAI_MODEL=deepseek-chat python -m app.main
 | 多语言与视频脚本 | 中/英/日/韩/西**原生创作**（非翻译）；短视频产出独立 `video_script` 产物 |
 | 多租户与可观测 | 令牌 → 租户，任务与记忆库双向隔离；span 树覆盖整个 session，可选 OTLP 导出 |
 | MCP 插件 | `app/mcp_server.py` 暴露 9 个 MCP 工具（stdio / streamable-http 双传输），DeepSeek harness、Claude Code、Trae 等 agent 可直接驱动流水线 |
+| 动效工场 | 纯前端视频动效组件库（`src/motion/`，22 预设 + JSON 时间轴脚本），浏览器试演与预演，Remotion-ready |
 | 部署 | 裸机 systemd / Docker·compose / k8s / Windows 任务计划 + Nginx·Caddy 反代样例，含清单静态核验 |
 
 ---
@@ -164,6 +165,8 @@ python scripts/stress_llm.py -n 8 -c 4
 # 前端
 npm run typecheck && npm run build
 ```
+
+一键入口：`make verify`（全量门禁）/ `make release`（发行版自检）/ `make help`；Windows 用根目录 `make.bat`，版本号在 `VERSION`。
 
 全部关卡已接入 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：**无外部依赖、退出码即结论**，
 PR 阶段就能拦住质量回归。各脚本的覆盖范围与用法见 [`USER_GUIDE.md`](USER_GUIDE.md)。

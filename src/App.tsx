@@ -6,6 +6,7 @@ import { BriefForm } from './components/BriefForm.tsx';
 import { DigitalHumanPanel } from './components/DigitalHumanPanel.tsx';
 import { JudgePanel } from './components/JudgePanel.tsx';
 import { MetricsPanel } from './components/MetricsPanel.tsx';
+import { MotionStudio } from './components/MotionStudio.tsx';
 import { Pipeline } from './components/Pipeline.tsx';
 import { PublishPanel } from './components/PublishPanel.tsx';
 import { Scorecard } from './components/Scorecard.tsx';
@@ -27,6 +28,9 @@ import { api, subscribeTask } from './lib/api.ts';
 import { formatCost, formatDateTime, STATUS_LABEL, statusTone } from './lib/format.ts';
 
 type Tab = 'pipeline' | 'artifacts' | 'judge' | 'trace' | 'timeline' | 'metrics';
+
+/** 顶层视图：任务台 / 动效工场（互斥替换 layout 区）。 */
+type View = 'tasks' | 'motion';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'pipeline', label: '流水线看板' },
@@ -52,6 +56,7 @@ export function App() {
   const [health, setHealth] = useState<HealthView | null>(null);
 
   const [tab, setTab] = useState<Tab>('pipeline');
+  const [view, setView] = useState<View>('tasks');
   const [showBrief, setShowBrief] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -250,8 +255,12 @@ export function App() {
         runningCount={runningCount}
         onNewTask={() => setShowBrief(true)}
         onOpenSettings={() => setShowSettings(true)}
+        onOpenStudio={() => setView('motion')}
       />
 
+      {view === 'motion' ? (
+        <MotionStudio onBack={() => setView('tasks')} />
+      ) : (
       <div className="layout">
         <aside className="sidebar">
           <div className="sidebar-head">
@@ -410,6 +419,7 @@ export function App() {
           )}
         </main>
       </div>
+      )}
 
       {showBrief ? (
         <BriefForm

@@ -15,6 +15,7 @@ import { TaskList } from './components/TaskList.tsx';
 import { Timeline } from './components/Timeline.tsx';
 import { Topbar } from './components/Topbar.tsx';
 import { TracePanel } from './components/TracePanel.tsx';
+import { VideoStudio } from './components/VideoStudio.tsx';
 import { Chip, Empty, Spinner } from './components/ui.tsx';
 import type {
   AgentsResponse,
@@ -29,8 +30,8 @@ import { formatCost, formatDateTime, STATUS_LABEL, statusTone } from './lib/form
 
 type Tab = 'pipeline' | 'artifacts' | 'judge' | 'trace' | 'timeline' | 'metrics';
 
-/** 顶层视图：任务台 / 动效工场（互斥替换 layout 区）。 */
-type View = 'tasks' | 'motion';
+/** 顶层视图：任务台 / 动效工场 / 视频工场（互斥替换 layout 区）。 */
+type View = 'tasks' | 'motion' | 'video';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'pipeline', label: '流水线看板' },
@@ -256,10 +257,13 @@ export function App() {
         onNewTask={() => setShowBrief(true)}
         onOpenSettings={() => setShowSettings(true)}
         onOpenStudio={() => setView('motion')}
+        onOpenVideo={() => setView('video')}
       />
 
       {view === 'motion' ? (
         <MotionStudio onBack={() => setView('tasks')} />
+      ) : view === 'video' ? (
+        <VideoStudio onBack={() => setView('tasks')} />
       ) : (
       <div className="layout">
         <aside className="sidebar">

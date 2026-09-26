@@ -1120,3 +1120,150 @@ table.data tr:hover td {
     max-height: 34vh;
   }
 }
+
+/* ============================== 视频工场 ============================== */
+
+.vs-studio {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px 28px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.vs-grid {
+  display: grid;
+  grid-template-columns: 400px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.vs-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.vs-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  position: sticky;
+  top: 16px;
+}
+
+.vs-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.vs-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--text-2);
+}
+
+.vs-subtitle {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  min-height: 150px;
+  max-height: 240px;
+  white-space: pre;
+}
+
+.vs-lint {
+  margin-top: 10px;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  background: rgba(251, 191, 36, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 8px 11px;
+  color: #ffe1a6;
+}
+
+.vs-lint-item {
+  padding: 1px 0;
+}
+
+.vs-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+}
+
+.vs-form-grid .field:first-child,
+.vs-form-grid .field:nth-child(2) {
+  grid-column: auto;
+}
+
+.vs-form-grid input[type='text'],
+.vs-form-grid input:not([type]) {
+  width: 100%;
+}
+
+.vs-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.vs-meta {
+  margin-top: -4px;
+}
+
+.vs-export-bar {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: var(--panel-2);
+}
+
+.vs-progress {
+  height: 8px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+}
+
+.vs-progress-fill {
+  height: 100%;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.2s linear;
+}
+
+.vs-result {
+  margin-top: 10px;
+  border: 1px solid rgba(52, 211, 153, 0.45);
+  background: rgba(52, 211, 153, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+@media (max-width: 1180px) {
+  .vs-grid {
+    grid-template-columns: 1fr;
+  }
+  .vs-side {
+    max-height: none;
+  }
+  .vs-main {
+    position: static;
+  }
+}

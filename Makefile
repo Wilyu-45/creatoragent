@@ -24,16 +24,16 @@ else
 VERSION := 0.1.0
 endif
 
-# 仅 run / dev 走 .env 真实模型；其余目标（含默认 help）注入离线引擎
+# 仅 run / dev / app 走 .env 真实模型；其余目标（含默认 help）注入离线引擎
 ifneq ($(strip $(MAKECMDGOALS)),)
-ifeq ($(strip $(filter-out run dev,$(MAKECMDGOALS))),)
+ifeq ($(strip $(filter-out run dev app,$(MAKECMDGOALS))),)
 else
 export LLM_PROVIDER := mock
 endif
 endif
 export PYTHONIOENCODING := utf-8
 
-.PHONY: help install compile typecheck build run dev doctor golden contracts \
+.PHONY: help install compile typecheck build app run dev doctor golden contracts \
         deploy-check smoke stress verify release tag clean
 
 help:
@@ -42,6 +42,7 @@ help:
 	@echo   compile        byte-compile python sources - syntax gate
 	@echo   typecheck      frontend type check with tsc
 	@echo   build          build frontend bundle to dist
+	@echo   app            package desktop exe (release/CreatorStudio.exe)
 	@echo   run            start server via .env config - real provider
 	@echo   dev            backend plus vite hot-reload dev mode
 	@echo   doctor         environment and capability self-check
@@ -68,6 +69,15 @@ typecheck:
 
 build:
 	$(NPM) run build
+
+#: 桌面版发行物：单文件 exe（内嵌前端 dist/），数据落在 exe 旁 data/
+app: build
+	$(PYTHON) -m PyInstaller --noconfirm --clean --onefile \
+		--name CreatorStudio \
+		--distpath release --workpath build/pyinstaller \
+		--add-data "dist;dist" \
+		app/desktop.py
+	@echo packaged: release/CreatorStudio.exe
 
 run:
 	$(PYTHON) -m app.main
@@ -115,4 +125,4 @@ tag:
 	@echo tag v$(VERSION) created. push it with: git push origin v$(VERSION)
 
 clean:
-	@$(PYTHON) -c "import pathlib,shutil;shutil.rmtree('dist',ignore_errors=True);[shutil.rmtree(p,ignore_errors=True) for p in list(pathlib.Path('app').rglob('__pycache__'))+list(pathlib.Path('scripts').rglob('__pycache__'))];print('cleaned: dist and __pycache__')"
+	@$(PYTHON) -c "import pathlib,shutil;shutil.rmtree('dist',ignore_errors=True);shutil.rmtree('release',ignore_errors=True);shutil.rmtree('build',ignore_errors=True);[shutil.rmtree(p,ignore_errors=True) for p in list(pathlib.Path('app').rglob('__pycache__'))+list(pathlib.Path('scripts').rglob('__pycache__'))];print('cleaned: dist, release, build, __pycache__')"

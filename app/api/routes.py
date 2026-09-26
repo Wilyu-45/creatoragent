@@ -475,21 +475,81 @@ def read_settings() -> dict[str, Any]:
     return public_config()
 
 
+# PUT /api/settings 白名单（分组设置）：与 update_config 各分支一一对应
+_SETTINGS_STR_KEYS = (
+    "host",
+    "embeddingBaseUrl",
+    "embeddingApiKey",
+    "embeddingModel",
+    "publishWebhookUrl",
+    "judgeModel",
+    "dhApiUrl",
+    "dhApiKey",
+    "dhAvatar",
+    "searchApiUrl",
+    "searchApiKey",
+    "tracingOtlpEndpoint",
+    "tracingServiceName",
+    "tracingOtlpHeaders",
+)
+_SETTINGS_NUM_KEYS = (
+    "port",
+    "embeddingDim",
+    "embeddingWeight",
+    "publishRetry",
+    "publishTickSeconds",
+    "judgePassThreshold",
+    "judgeWeight",
+    "dhTimeoutMs",
+    "searchMaxResults",
+    "searchTimeoutMs",
+    "searchMaxPages",
+    "tracingSampleRatio",
+)
+_SETTINGS_BOOL_KEYS = ("searchFetchPages",)
+_SETTINGS_ENUM_KEYS: dict[str, tuple[str, ...]] = {
+    "embeddingProvider": ("local", "openai"),
+    "dhProvider": ("sample", "http"),
+    "searchProvider": ("none", "http"),
+    "tracingSampler": (
+        "parentbased_always_on",
+        "parentbased_traceidratio",
+        "always_on",
+        "always_off",
+        "traceidratio",
+    ),
+}
+
+
 @router.put("/settings")
 def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    """运行时设置更新：按白名单收口后交 ``update_config``，并把全量快照持久化。
+
+    白名单与 ``update_config`` 的各分支一一对应（llm 走嵌套合并，其余为扁平键）。
+    ``host`` / ``port`` 属启动期参数，写回后随快照持久化、**下次启动生效**。
+    """
     body: dict[str, Any] = payload or {}
+    patch: dict[str, Any] = {}
+
+    # ---- LLM 全局设置（update_config 的 llm 嵌套合并分支）----
     llm_patch: dict[str, Any] = {}
     if body.get("provider") in ("mock", "openai"):
         llm_patch["provider"] = body["provider"]
     for key in ("baseUrl", "model", "apiKey"):
         if isinstance(body.get(key), str):
             llm_patch[key] = body[key]
-    for key in ("temperature", "maxTokens", "timeoutMs"):
+    for key in ("temperature", "maxTokens", "timeoutMs", "visionMaxImages"):
         value = body.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             llm_patch[key] = value
+    if isinstance(body.get("vision"), bool):
+        llm_patch["vision"] = body["vision"]
+    if body.get("thinking") in ("enabled", "disabled"):
+        llm_patch["thinking"] = body["thinking"]
+    if llm_patch:
+        patch["llm"] = llm_patch
 
-    patch: dict[str, Any] = {"llm": llm_patch}
+    # ---- 运行参数 ----
     for key in ("turnBudget", "maxRevisions", "qualityThreshold"):
         if isinstance(body.get(key), (int, float)) and not isinstance(body.get(key), bool):
             patch[key] = body[key]
@@ -502,38 +562,25 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
     if isinstance(body.get("llmCache"), bool):
         patch["llmCache"] = body["llmCache"]
 
-    # 记忆库向量检索（plan.md 2.2.3）与发布投递（plan.md v2.0）
-    for key in ("embeddingProvider", "embeddingBaseUrl", "embeddingApiKey", "embeddingModel"):
+    # ---- 分组设置（embedding / publish / judge / 数字人 / 联网检索 / 追踪）----
+    for key in _SETTINGS_STR_KEYS:
         if isinstance(body.get(key), str):
             patch[key] = body[key]
-    for key in ("embeddingDim", "embeddingWeight"):
+    for key in _SETTINGS_NUM_KEYS:
         value = body.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             patch[key] = value
-    if isinstance(body.get("publishWebhookUrl"), str):
-        patch["publishWebhookUrl"] = body["publishWebhookUrl"]
-    for key in ("publishRetry", "publishTickSeconds"):
-        value = body.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-            patch[key] = value
-    if isinstance(body.get("publishAutoDispatch"), bool):
-        patch["publishAutoDispatch"] = body["publishAutoDispatch"]
+    for key in _SETTINGS_BOOL_KEYS:
+        if isinstance(body.get(key), bool):
+            patch[key] = body[key]
+    for key, allowed in _SETTINGS_ENUM_KEYS.items():
+        if body.get(key) in allowed:
+            patch[key] = body[key]
+    if isinstance(patch.get("port"), bool) or not isinstance(patch.get("port"), (int, float)):
+        patch.pop("port", None)
 
-    # LLM-as-a-Judge 评估（plan.md 4.3 D14）
-    if body.get("judgeMode") in ("off", "advisory", "blocking"):
-        patch["judgeMode"] = body["judgeMode"]
-    if body.get("judgeProvider") in ("offline", "llm"):
-        patch["judgeProvider"] = body["judgeProvider"]
-    if isinstance(body.get("judgeModel"), str):
-        patch["judgeModel"] = body["judgeModel"]
-    for key in ("judgePassThreshold", "judgeWeight"):
-        value = body.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-            patch[key] = value
-
-    # 站点监控（site_monitor 工具的待爬页面 URL，持久化到 data/settings.json）：
-    # 逐项校验 http(s) 前缀（SSRF 的私网拦截仍由 core/web.py 抓取时兜底）、strip、去重、上限 20
-    site_urls_changed = False
+    # 站点监控（site_monitor 工具的待爬页面 URL）：逐项校验 http(s) 前缀
+    # （SSRF 的私网拦截仍由 core/web.py 抓取时兜底）、strip、去重、上限 20
     raw_site_urls = body.get("siteUrls")
     if isinstance(raw_site_urls, list):
         seen: set[str] = set()
@@ -550,11 +597,9 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
             if len(cleaned) >= 20:
                 break
         patch["siteUrls"] = cleaned
-        site_urls_changed = True
 
-    # 每智能体模型覆盖（持久化到 data/settings.json）：键大写归一并限定 A<数字>
-    # 形态；apiKey 缺失 = 保留已存值、显式 "" = 清除（继承全局），仅收字符串字段
-    agent_models_changed = False
+    # 每智能体模型覆盖：键大写归一并限定 A<数字> 形态；apiKey 缺失 = 保留已存值、
+    # 显式 "" = 清除（继承全局），仅收字符串字段
     raw_agent_models = body.get("agentModels")
     if isinstance(raw_agent_models, dict):
         cleaned_models: dict[str, dict[str, str]] = {}
@@ -570,10 +615,10 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
                     spec[dst] = raw_spec[src]
             cleaned_models[aid] = spec
         patch["agentModels"] = cleaned_models
-        agent_models_changed = True
 
-    update_config(patch)
-    if site_urls_changed or agent_models_changed:
+    if patch:
+        update_config(patch)
+        # 任一设置变更都持久化全量快照 —— 设置界面的修改重启后依然生效
         save_persisted_settings()
     log.info(
         f"运行时配置已更新：provider={get_config().llm.provider} model={get_config().llm.model}"

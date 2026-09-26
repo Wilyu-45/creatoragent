@@ -34,15 +34,23 @@ export function SettingsDrawer({
   const [temperature, setTemperature] = useState(config.llm.temperature);
   const [maxTokens, setMaxTokens] = useState(config.llm.maxTokens);
   const [timeoutMs, setTimeoutMs] = useState(config.llm.timeoutMs);
+  const [vision, setVision] = useState(config.llm.vision);
+  const [visionMaxImages, setVisionMaxImages] = useState(config.llm.visionMaxImages);
+  const [thinking, setThinking] = useState(config.llm.thinking);
+  const [host, setHost] = useState(config.host);
+  const [port, setPort] = useState(config.port);
   const [turnBudget, setTurnBudget] = useState(config.turnBudget);
   const [maxRevisions, setMaxRevisions] = useState(config.maxRevisions);
   const [qualityThreshold, setQualityThreshold] = useState(config.qualityThreshold);
   const [autoApprove, setAutoApprove] = useState(config.autoApprove);
   const [costBudgetUsd, setCostBudgetUsd] = useState(config.costBudgetUsd);
   const [tokenBudget, setTokenBudget] = useState(config.tokenBudget);
+  const [digestMaxCalls, setDigestMaxCalls] = useState(config.digestMaxCalls);
   const [llmCache, setLlmCache] = useState(config.llmCache);
   const [embeddingProvider, setEmbeddingProvider] = useState(config.embedding.provider);
+  const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState(config.embedding.baseUrl);
   const [embeddingModel, setEmbeddingModel] = useState(config.embedding.model);
+  const [embeddingDim, setEmbeddingDim] = useState(config.embedding.dim);
   const [embeddingWeight, setEmbeddingWeight] = useState(config.embedding.weight);
   const [embeddingApiKey, setEmbeddingApiKey] = useState('');
   const [publishWebhookUrl, setPublishWebhookUrl] = useState(config.publish.webhookUrl);
@@ -50,8 +58,26 @@ export function SettingsDrawer({
   const [publishRetry, setPublishRetry] = useState(config.publish.retry);
   const [judgeMode, setJudgeMode] = useState(config.judge.mode);
   const [judgeProvider, setJudgeProvider] = useState(config.judge.provider);
+  const [judgeModel, setJudgeModel] = useState(config.judge.model);
   const [judgePassThreshold, setJudgePassThreshold] = useState(config.judge.passThreshold);
   const [judgeWeight, setJudgeWeight] = useState(config.judge.weight);
+  const [dhProvider, setDhProvider] = useState(config.digitalHuman.provider);
+  const [dhApiUrl, setDhApiUrl] = useState(config.digitalHuman.apiUrl);
+  const [dhAvatar, setDhAvatar] = useState(config.digitalHuman.avatar);
+  const [dhApiKey, setDhApiKey] = useState('');
+  const [dhTimeoutMs, setDhTimeoutMs] = useState(config.digitalHuman.timeoutMs);
+  const [searchProvider, setSearchProvider] = useState(config.search.provider);
+  const [searchApiUrl, setSearchApiUrl] = useState(config.search.apiUrl);
+  const [searchApiKey, setSearchApiKey] = useState('');
+  const [searchMaxResults, setSearchMaxResults] = useState(config.search.maxResults);
+  const [searchTimeoutMs, setSearchTimeoutMs] = useState(config.search.timeoutMs);
+  const [searchFetchPages, setSearchFetchPages] = useState(config.search.fetchPages);
+  const [searchMaxPages, setSearchMaxPages] = useState(config.search.maxPages);
+  const [tracingOtlpEndpoint, setTracingOtlpEndpoint] = useState(config.tracing.otlpEndpoint);
+  const [tracingServiceName, setTracingServiceName] = useState(config.tracing.serviceName);
+  const [tracingOtlpHeaders, setTracingOtlpHeaders] = useState('');
+  const [tracingSampler, setTracingSampler] = useState(config.tracing.sampler);
+  const [tracingSampleRatio, setTracingSampleRatio] = useState(config.tracing.sampleRatio);
   const [apiToken, setApiTokenState] = useState(getApiToken());
   const [siteUrlsText, setSiteUrlsText] = useState(config.search.siteUrls.join('\n'));
   // 每智能体模型覆盖的本地编辑态：apiKey 永不回显，初始恒为空 = 保持不变
@@ -87,23 +113,45 @@ export function SettingsDrawer({
       temperature,
       maxTokens,
       timeoutMs,
+      vision,
+      visionMaxImages,
+      thinking,
+      host: host.trim(),
       turnBudget,
       maxRevisions,
       qualityThreshold,
       autoApprove,
       costBudgetUsd,
       tokenBudget,
+      digestMaxCalls,
       llmCache,
       embeddingProvider,
+      embeddingBaseUrl: embeddingBaseUrl.trim(),
       embeddingModel,
+      embeddingDim,
       embeddingWeight,
       publishWebhookUrl,
       publishAutoDispatch,
       publishRetry,
       judgeMode,
       judgeProvider,
+      judgeModel: judgeModel.trim(),
       judgePassThreshold,
       judgeWeight,
+      dhProvider,
+      dhApiUrl: dhApiUrl.trim(),
+      dhAvatar: dhAvatar.trim(),
+      dhTimeoutMs,
+      searchProvider,
+      searchApiUrl: searchApiUrl.trim(),
+      searchMaxResults,
+      searchTimeoutMs,
+      searchFetchPages,
+      searchMaxPages,
+      tracingOtlpEndpoint: tracingOtlpEndpoint.trim(),
+      tracingServiceName: tracingServiceName.trim(),
+      tracingSampler,
+      tracingSampleRatio,
       siteUrls: siteUrlsText
         .split('\n')
         .map((line) => line.trim())
@@ -120,8 +168,14 @@ export function SettingsDrawer({
         }),
       ),
     };
+    const portNum = Number(port);
+    if (Number.isInteger(portNum) && portNum >= 1 && portNum <= 65535) patch.port = portNum;
     if (apiKey.trim()) patch.apiKey = apiKey.trim();
     if (embeddingApiKey.trim()) patch.embeddingApiKey = embeddingApiKey.trim();
+    if (dhApiKey.trim()) patch.dhApiKey = dhApiKey.trim();
+    if (searchApiKey.trim()) patch.searchApiKey = searchApiKey.trim();
+    // OTLP 鉴权头仅输入非空时携带（缺失 = 保留已存值，防止误清）
+    if (tracingOtlpHeaders.trim()) patch.tracingOtlpHeaders = tracingOtlpHeaders.trim();
     onSave(patch);
   };
 
@@ -235,7 +289,29 @@ export function SettingsDrawer({
                 <label>超时（ms）</label>
                 <input type="number" value={timeoutMs} onChange={(e) => setTimeoutMs(Number(e.target.value))} />
               </div>
+              <div className="field">
+                <label>深度思考</label>
+                <select value={thinking} onChange={(e) => setThinking(e.target.value as 'enabled' | 'disabled')}>
+                  <option value="disabled">disabled（默认，响应更快）</option>
+                  <option value="enabled">enabled（网关支持时先生成推理）</option>
+                </select>
+              </div>
             </div>
+            <label className="row small" style={{ marginTop: 12, cursor: 'pointer' }}>
+              <input type="checkbox" checked={vision} onChange={(e) => setVision(e.target.checked)} style={{ width: 'auto' }} />
+              多模态输入（Brief 附带图片时随请求发送；仅对支持读图的模型生效）
+            </label>
+            {vision ? (
+              <div className="field" style={{ marginTop: 8 }}>
+                <label>单次请求图片上限</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={visionMaxImages}
+                  onChange={(e) => setVisionMaxImages(Number(e.target.value))}
+                />
+              </div>
+            ) : null}
 
             <div className="section-h">智能体模型覆盖（可选）</div>
             {agentRows.map(({ id, name }) => {
@@ -301,6 +377,15 @@ export function SettingsDrawer({
                   onChange={(e) => setQualityThreshold(Number(e.target.value))}
                 />
               </div>
+              <div className="field">
+                <label>素材研读调用上限</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={digestMaxCalls}
+                  onChange={(e) => setDigestMaxCalls(Number(e.target.value))}
+                />
+              </div>
             </div>
 
             <label className="row small" style={{ marginTop: 12, cursor: 'pointer' }}>
@@ -360,6 +445,14 @@ export function SettingsDrawer({
               <div className="field">
                 <label>Embedding 模型</label>
                 <input value={embeddingModel} onChange={(e) => setEmbeddingModel(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>Embedding Base URL</label>
+                <input value={embeddingBaseUrl} placeholder="同全局端点可留空" onChange={(e) => setEmbeddingBaseUrl(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>向量维度</label>
+                <input type="number" min="16" value={embeddingDim} onChange={(e) => setEmbeddingDim(Number(e.target.value))} />
               </div>
               <div className="field">
                 <label>语义权重（0–1）</label>
@@ -464,6 +557,10 @@ export function SettingsDrawer({
                 </select>
               </div>
               <div className="field">
+                <label>评估模型</label>
+                <input value={judgeModel} placeholder="留空继承全局模型" onChange={(e) => setJudgeModel(e.target.value)} />
+              </div>
+              <div className="field">
                 <label>通过线（0–100）</label>
                 <input
                   type="number"
@@ -496,55 +593,190 @@ export function SettingsDrawer({
             </div>
 
             <div className="section-h">调用轨迹与 OTLP 导出</div>
-            <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-              <Chip tone={config.tracing.otlpConfigured ? 'tone-ok' : 'tone-idle'}>
-                {config.tracing.otlpConfigured ? 'OTLP 已配置' : '进程内追踪（未接 OTLP）'}
-              </Chip>
-              <Chip tone="tone-idle" mono>
-                service {config.tracing.serviceName}
-              </Chip>
-              <Chip tone="tone-idle" mono title="采样只作用于导出面（OTLP + 落盘），进程内轨迹始终完整">
-                采样 {config.tracing.sampler}
-                {config.tracing.sampler.includes('traceidratio') ? ` @ ${config.tracing.sampleRatio}` : ''}
-              </Chip>
-              <Chip tone="tone-idle" mono title="W3C traceparent：入站 POST /api/tasks 解析，出站 webhook 携带">
-                传播 W3C traceparent
-              </Chip>
-              {config.tracing.otlpEndpoint ? (
-                <Chip tone="tone-info" mono>
-                  {config.tracing.otlpEndpoint}
-                </Chip>
-              ) : null}
+            <div className="form-grid">
+              <div className="field">
+                <label>
+                  OTLP 端点{' '}
+                  {config.tracing.otlpConfigured ? (
+                    <Chip tone="tone-ok">已配置</Chip>
+                  ) : (
+                    <Chip tone="tone-idle">未配置（仅进程内追踪）</Chip>
+                  )}
+                </label>
+                <input
+                  value={tracingOtlpEndpoint}
+                  placeholder="http://localhost:4318"
+                  onChange={(e) => setTracingOtlpEndpoint(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>服务名（Jaeger 中的标识）</label>
+                <input value={tracingServiceName} onChange={(e) => setTracingServiceName(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>采样器</label>
+                <select value={tracingSampler} onChange={(e) => setTracingSampler(e.target.value)}>
+                  <option value="parentbased_always_on">parentbased_always_on（全采样）</option>
+                  <option value="parentbased_traceidratio">parentbased_traceidratio（按比例）</option>
+                  <option value="always_on">always_on</option>
+                  <option value="always_off">always_off</option>
+                  <option value="traceidratio">traceidratio</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>采样比例（0–1）</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={tracingSampleRatio}
+                  onChange={(e) => setTracingSampleRatio(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>
+                  OTLP 鉴权头{' '}
+                  {config.tracing.otlpHeadersSet ? (
+                    <Chip tone="tone-ok" mono>
+                      已设置
+                    </Chip>
+                  ) : null}
+                </label>
+                <input
+                  value={tracingOtlpHeaders}
+                  placeholder="key1=value1,key2=value2（留空表示不修改）"
+                  onChange={(e) => setTracingOtlpHeaders(e.target.value)}
+                />
+              </div>
             </div>
             <div className="muted small" style={{ marginTop: 6 }}>
-              OTLP 端点通过环境变量 <code>OTLP_ENDPOINT</code> 配置（如
-              <code> http://localhost:4318</code>），采样器与比例对应{' '}
-              <code>OTEL_TRACES_SAMPLER</code> / <code>OTEL_TRACES_SAMPLER_ARG</code>，均不在此处热改。
-              <strong>不配置也完整可用</strong>：进程内 span 树与
-              <code> data/traces/*.json </code>不依赖任何外部服务；配置后会把同一份 span
+              采样只作用于导出面（OTLP + 落盘），进程内轨迹始终完整。<strong>不配置也完整可用</strong>：进程内
+              span 树与 <code>data/traces/*.json </code>不依赖任何外部服务；配置后会把同一份 span
               （相同的 trace_id / span_id）转发给 collector，可在 Jaeger 里直接查。
               本地一键起 Jaeger：<code>docker compose up -d</code>。
             </div>
 
             <div className="section-h">数字人渲染（开发样例）</div>
-            <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-              <Chip tone={config.digitalHuman.provider === 'http' ? 'tone-info' : 'tone-idle'}>
-                {config.digitalHuman.provider === 'http' ? 'http 适配网关' : 'sample 内置样例引擎'}
-              </Chip>
-              {config.digitalHuman.apiUrl ? (
-                <Chip tone="tone-info" mono>
-                  {config.digitalHuman.apiUrl}
-                </Chip>
-              ) : (
-                <Chip tone="tone-idle">未配置远端网关（用内置引擎）</Chip>
-              )}
-              {config.digitalHuman.avatar ? <Chip tone="tone-idle">形象 {config.digitalHuman.avatar}</Chip> : null}
-              {config.digitalHuman.apiKeySet ? <Chip tone="tone-ok">网关密钥已配置</Chip> : null}
+            <div className="form-grid">
+              <div className="field">
+                <label>渲染提供方</label>
+                <select value={dhProvider} onChange={(e) => setDhProvider(e.target.value as 'sample' | 'http')}>
+                  <option value="sample">sample（内置样例引擎，离线可用）</option>
+                  <option value="http">http（自建渲染网关）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>
+                  网关 URL{' '}
+                  {config.digitalHuman.apiKeySet ? (
+                    <Chip tone="tone-ok" mono>
+                      密钥已设置 {config.digitalHuman.apiKeyMasked}
+                    </Chip>
+                  ) : null}
+                </label>
+                <input
+                  value={dhApiUrl}
+                  placeholder="https://your-gateway/render"
+                  onChange={(e) => setDhApiUrl(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>形象（avatar）</label>
+                <input value={dhAvatar} placeholder="网关侧的形象标识" onChange={(e) => setDhAvatar(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>超时（ms）</label>
+                <input type="number" value={dhTimeoutMs} onChange={(e) => setDhTimeoutMs(Number(e.target.value))} />
+              </div>
+              <div className="field">
+                <label>网关 API Key</label>
+                <input
+                  type="password"
+                  value={dhApiKey}
+                  placeholder="留空表示不修改"
+                  onChange={(e) => setDhApiKey(e.target.value)}
+                />
+              </div>
             </div>
             <div className="muted small" style={{ marginTop: 6 }}>
               数字人渲染<strong>不在本系统内实现</strong>：HeyGen / D-ID / 腾讯智影等服务的协议差异由你在自己的网关层消化。
-              任务产出视频脚本后，「数字人渲染」面板会出现创建入口；环境变量 <code>DIGITAL_HUMAN_API_URL</code>（可选{' '}
-              <code>DIGITAL_HUMAN_API_KEY</code> / <code>DIGITAL_HUMAN_AVATAR</code>）切换到对接自建渲染网关。
+              任务产出视频脚本后，「数字人渲染」面板会出现创建入口；选 http 并填网关地址即对接自建渲染网关。
+            </div>
+
+            <div className="section-h">联网检索（可选，默认关闭）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>检索提供方</label>
+                <select value={searchProvider} onChange={(e) => setSearchProvider(e.target.value as 'none' | 'http')}>
+                  <option value="none">none（关闭联网，智能体如实声明未联网）</option>
+                  <option value="http">http（自建搜索网关，如 SearXNG）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>
+                  搜索网关 URL{' '}
+                  {config.search.configured ? (
+                    <Chip tone="tone-ok">已联网</Chip>
+                  ) : (
+                    <Chip tone="tone-idle">未联网</Chip>
+                  )}
+                </label>
+                <input
+                  value={searchApiUrl}
+                  placeholder="https://search.example.com/search"
+                  onChange={(e) => setSearchApiUrl(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>返回条数上限</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={searchMaxResults}
+                  onChange={(e) => setSearchMaxResults(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>超时（ms）</label>
+                <input
+                  type="number"
+                  min="1000"
+                  value={searchTimeoutMs}
+                  onChange={(e) => setSearchTimeoutMs(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>单任务最多抓取页数</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={searchMaxPages}
+                  onChange={(e) => setSearchMaxPages(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>网关 API Key</label>
+                <input
+                  type="password"
+                  value={searchApiKey}
+                  placeholder="留空表示不修改"
+                  onChange={(e) => setSearchApiKey(e.target.value)}
+                />
+              </div>
+            </div>
+            <label className="row small" style={{ marginTop: 12, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={searchFetchPages}
+                onChange={(e) => setSearchFetchPages(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              允许抓取搜索结果页面正文（page_fetch 路径，正文截断注入）
+            </label>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              系统不绑定任何搜索厂商：网关只需返回 JSON 结果列表，由你的网关层对接 SearXNG /
+              各搜索引擎 API。未联网时智能体禁止引用在线数据。
             </div>
 
             <div className="section-h">站点监控</div>
@@ -560,6 +792,21 @@ export function SettingsDrawer({
             <div className="muted small" style={{ marginTop: 6 }}>
               每次创作时 A1 / A2 / A3 / A6 / A10 会抓取这些页面的正文作为参考（仅限公开页面，
               每页最多注入 1200 字）。未配置时智能体如实声明「未配置站点监控」，不引用站点数据。
+            </div>
+
+            <div className="section-h">服务监听（重启后生效）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>监听地址</label>
+                <input value={host} placeholder="127.0.0.1 / 0.0.0.0" onChange={(e) => setHost(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>端口</label>
+                <input type="number" min="1" max="65535" value={port} onChange={(e) => setPort(Number(e.target.value))} />
+              </div>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              启动期参数：保存后写入持久化快照，<strong>下次启动服务时生效</strong>；本页其余修改均即时生效。
             </div>
 
             <div className="section-h">访问令牌{config.authRequired ? '（已启用鉴权）' : ''}</div>

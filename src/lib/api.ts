@@ -45,6 +45,8 @@ export interface AgentsResponse {
 
 export interface PublicConfigView {
   port: number;
+  /** 服务监听地址（启动期参数，改后随快照持久化、下次启动生效） */
+  host: string;
   turnBudget: number;
   maxRevisions: number;
   qualityThreshold: number;
@@ -55,6 +57,8 @@ export interface PublicConfigView {
   tokenBudget: number;
   /** 是否启用 LLM 响应缓存 */
   llmCache: boolean;
+  /** 素材研读（document_digest）单任务 LLM 调用配额 */
+  digestMaxCalls: number;
   /** 是否已通过 CREATOR_API_TOKENS 开启 API 鉴权 */
   authRequired: boolean;
   llm: {
@@ -64,6 +68,12 @@ export interface PublicConfigView {
     temperature: number;
     maxTokens: number;
     timeoutMs: number;
+    /** 多模态输入总开关（按智能体实际生效 provider 单点判定） */
+    vision: boolean;
+    /** 单次请求随附图片上限 */
+    visionMaxImages: number;
+    /** 深度思考模式（enabled / disabled，网关不支持时忽略） */
+    thinking: 'enabled' | 'disabled';
     apiKeySet: boolean;
     apiKeyMasked: string;
     /** 每智能体模型覆盖（键 A1–A11；空字段=继承全局，密钥只回掩码） */
@@ -108,15 +118,27 @@ export interface PublicConfigView {
     apiKeyMasked: string;
     timeoutMs: number;
   };
-  /** 联网检索网关设置（前端只回显站点监控 URL 列表，其余来自环境变量） */
+  /** 联网检索网关设置（web_search / page_fetch 工具的上游） */
   search: {
+    provider: 'none' | 'http';
+    apiUrl: string;
+    apiKeySet: boolean;
+    apiKeyMasked: string;
+    maxResults: number;
+    timeoutMs: number;
+    /** 是否抓取页面正文（page_fetch 路径） */
+    fetchPages: boolean;
+    maxPages: number;
     siteUrls: string[];
+    configured: boolean;
   };
-  /** 分布式追踪设置（OTLP 导出为只读配置，来自环境变量） */
+  /** 分布式追踪设置（进程内追踪始终完整；OTLP 只作用于导出面） */
   tracing: {
     otlpEndpoint: string;
     serviceName: string;
     otlpConfigured: boolean;
+    /** 是否已配置 OTLP 鉴权头（值不回传） */
+    otlpHeadersSet: boolean;
     /** 采样器：parentbased_always_on / parentbased_traceidratio / … */
     sampler: string;
     /** traceidratio 的采样比例（0-1） */

@@ -442,12 +442,89 @@ def _sampler() -> str:
 _config: RuntimeConfig = _build_config()
 
 
-def _load_persisted_settings() -> None:
-    """启动时从 ``data/settings.json`` 读回用户在设置界面保存的资产。
+# ------------------------------------------------------------------ #
+# 设置持久化：字段 → 环境变量映射（环境变量已设置的字段不读回快照）     #
+# ------------------------------------------------------------------ #
 
-    运行时设置本为纯内存（重启丢失、回退 env）；仅两类「用户精心维护的
-    资产」持久化：站点监控 URL 清单（``siteUrls``）与每智能体模型覆盖
-    （``agentModels``）。旧文件只含 siteUrls 也兼容。
+_RUNTIME_KEYS = (
+    "port",
+    "host",
+    "turnBudget",
+    "maxRevisions",
+    "qualityThreshold",
+    "autoApprove",
+    "costBudgetUsd",
+    "tokenBudget",
+    "digestMaxCalls",
+    "llmCache",
+)
+
+_FLAT_PERSIST_ENV: dict[str, str] = {
+    "port": "PORT",
+    "host": "HOST",
+    "turnBudget": "TURN_BUDGET",
+    "maxRevisions": "MAX_REVISIONS",
+    "qualityThreshold": "QUALITY_THRESHOLD",
+    "autoApprove": "AUTO_APPROVE",
+    "costBudgetUsd": "COST_BUDGET_USD",
+    "tokenBudget": "TOKEN_BUDGET",
+    "digestMaxCalls": "DIGEST_MAX_CALLS",
+    "llmCache": "LLM_CACHE",
+    "embeddingProvider": "EMBEDDING_PROVIDER",
+    "embeddingBaseUrl": "EMBEDDING_BASE_URL",
+    "embeddingApiKey": "EMBEDDING_API_KEY",
+    "embeddingModel": "EMBEDDING_MODEL",
+    "embeddingDim": "EMBEDDING_DIM",
+    "embeddingWeight": "EMBEDDING_WEIGHT",
+    "publishWebhookUrl": "PUBLISH_WEBHOOK_URL",
+    "publishRetry": "PUBLISH_RETRY",
+    "publishAutoDispatch": "PUBLISH_AUTO_DISPATCH",
+    "publishTickSeconds": "PUBLISH_TICK_SECONDS",
+    "judgeMode": "JUDGE_MODE",
+    "judgeProvider": "JUDGE_PROVIDER",
+    "judgeModel": "JUDGE_MODEL",
+    "judgePassThreshold": "JUDGE_PASS_THRESHOLD",
+    "judgeWeight": "JUDGE_WEIGHT",
+    "dhProvider": "DIGITAL_HUMAN_PROVIDER",
+    "dhApiUrl": "DIGITAL_HUMAN_API_URL",
+    "dhApiKey": "DIGITAL_HUMAN_API_KEY",
+    "dhAvatar": "DIGITAL_HUMAN_AVATAR",
+    "dhTimeoutMs": "DIGITAL_HUMAN_TIMEOUT_MS",
+    "searchProvider": "WEB_SEARCH_PROVIDER",
+    "searchApiUrl": "WEB_SEARCH_API_URL",
+    "searchApiKey": "WEB_SEARCH_API_KEY",
+    "searchMaxResults": "WEB_SEARCH_MAX_RESULTS",
+    "searchTimeoutMs": "WEB_SEARCH_TIMEOUT_MS",
+    "searchFetchPages": "WEB_SEARCH_FETCH_PAGES",
+    "searchMaxPages": "WEB_SEARCH_MAX_PAGES",
+    "tracingOtlpEndpoint": "OTLP_ENDPOINT",
+    "tracingServiceName": "OTEL_SERVICE_NAME",
+    "tracingOtlpHeaders": "OTLP_HEADERS",
+    "tracingSampler": "OTEL_TRACES_SAMPLER",
+    "tracingSampleRatio": "OTEL_TRACES_SAMPLER_ARG",
+}
+
+_LLM_PERSIST_ENV: dict[str, str] = {
+    "provider": "LLM_PROVIDER",
+    "baseUrl": "OPENAI_BASE_URL",
+    "apiKey": "OPENAI_API_KEY",
+    "model": "OPENAI_MODEL",
+    "temperature": "LLM_TEMPERATURE",
+    "maxTokens": "LLM_MAX_TOKENS",
+    "timeoutMs": "LLM_TIMEOUT_MS",
+    "vision": "LLM_VISION",
+    "visionMaxImages": "LLM_VISION_MAX_IMAGES",
+    "thinking": "LLM_THINKING",
+}
+
+
+def _load_persisted_settings() -> None:
+    """启动时从 ``data/settings.json`` 读回设置界面保存的全量快照。
+
+    优先级：**进程环境变量 > settings.json > .env > 内置默认** —— 环境变量是
+    部署方的显式意志（例如 CI 注入 ``LLM_PROVIDER=mock``），必须压过界面保存值，
+    门禁才能零 token 验证；因此对应环境变量已设置的字段跳过读回。
+    v1 旧文件（仅顶层 siteUrls / agentModels）同样兼容。
     """
     if not SETTINGS_FILE.exists():
         return
@@ -457,38 +534,138 @@ def _load_persisted_settings() -> None:
         return
     if not isinstance(payload, dict):
         return
-    urls = payload.get("siteUrls")
-    if isinstance(urls, list):
-        _config.search.site_urls = [
-            item.strip() for item in urls if isinstance(item, str) and item.strip()
-        ]
-    raw_models = payload.get("agentModels")
-    if isinstance(raw_models, dict):
-        models: dict[str, AgentModelOverride] = {}
-        for raw_id, raw_spec in raw_models.items():
-            aid = str(raw_id).strip().upper()
-            spec = raw_spec if isinstance(raw_spec, dict) else {}
-            entry = AgentModelOverride(
-                model=str(spec.get("model") or "").strip(),
-                base_url=str(spec.get("baseUrl") or "").strip(),
-                api_key=str(spec.get("apiKey") or ""),
-            )
-            if entry.model or entry.base_url or entry.api_key:
-                models[aid] = entry
-        _config.llm.agent_models = models
 
+    flat: dict[str, Any] = {}
+    runtime = payload.get("runtime")
+    if isinstance(runtime, dict):
+        for key in _RUNTIME_KEYS:
+            if key in runtime and not os.environ.get(_FLAT_PERSIST_ENV[key]):
+                flat[key] = runtime[key]
 
-_load_persisted_settings()
+    llm_raw = payload.get("llm")
+    if isinstance(llm_raw, dict):
+        llm_patch = {
+            key: value
+            for key, value in llm_raw.items()
+            if key in _LLM_PERSIST_ENV and not os.environ.get(_LLM_PERSIST_ENV[key])
+        }
+        if llm_patch:
+            flat["llm"] = llm_patch
+        if isinstance(llm_raw.get("agentModels"), dict):
+            flat["agentModels"] = llm_raw["agentModels"]
+    elif isinstance(payload.get("agentModels"), dict):  # v1 旧文件
+        flat["agentModels"] = payload["agentModels"]
+
+    for section, prefix in (
+        ("embedding", "embedding"),
+        ("publish", "publish"),
+        ("judge", "judge"),
+        ("digitalHuman", "dh"),
+        ("search", "search"),
+        ("tracing", "tracing"),
+    ):
+        data = payload.get(section)
+        if not isinstance(data, dict):
+            continue
+        for key, value in data.items():
+            flat_key = f"{prefix}{key[0].upper()}{key[1:]}"
+            env_var = _FLAT_PERSIST_ENV.get(flat_key)
+            if env_var is None or os.environ.get(env_var):
+                continue
+            flat[flat_key] = value
+
+    site_urls = payload.get("search", {}).get("siteUrls") if isinstance(payload.get("search"), dict) else None
+    if not isinstance(site_urls, list):
+        site_urls = payload.get("siteUrls")  # v1 旧文件
+    if isinstance(site_urls, list):
+        flat["siteUrls"] = site_urls
+
+    update_config(flat)
 
 
 def save_persisted_settings() -> None:
-    """把两类持久化资产原子写入 ``SETTINGS_FILE``（PUT /api/settings 调用）。"""
+    """把设置界面维护的全量快照原子写入 ``SETTINGS_FILE``（PUT /api/settings 调用）。
+
+    密钥随快照落盘：本文件就是「用户的设置界面」的存储，与本机数据同目录
+    （``data/``，不入版本库）；对外 API 仍只回掩码（``public_config``）。
+    """
+    c = _config
+    llm = c.llm
     payload = json.dumps(
         {
-            "siteUrls": list(_config.search.site_urls),
-            "agentModels": {
-                aid: {"model": ov.model, "baseUrl": ov.base_url, "apiKey": ov.api_key}
-                for aid, ov in sorted(_config.llm.agent_models.items())
+            "version": 2,
+            "runtime": {
+                "port": c.port,
+                "host": c.host,
+                "turnBudget": c.turn_budget,
+                "maxRevisions": c.max_revisions,
+                "qualityThreshold": c.quality_threshold,
+                "autoApprove": c.auto_approve,
+                "costBudgetUsd": c.cost_budget_usd,
+                "tokenBudget": c.token_budget,
+                "digestMaxCalls": c.digest_max_calls,
+                "llmCache": c.llm_cache,
+            },
+            "llm": {
+                "provider": llm.provider,
+                "baseUrl": llm.base_url,
+                "apiKey": llm.api_key,
+                "model": llm.model,
+                "temperature": llm.temperature,
+                "maxTokens": llm.max_tokens,
+                "timeoutMs": llm.timeout_ms,
+                "vision": llm.vision,
+                "visionMaxImages": llm.vision_max_images,
+                "thinking": llm.thinking,
+                "agentModels": {
+                    aid: {"model": ov.model, "baseUrl": ov.base_url, "apiKey": ov.api_key}
+                    for aid, ov in sorted(llm.agent_models.items())
+                },
+            },
+            "embedding": {
+                "provider": c.embedding.provider,
+                "baseUrl": c.embedding.base_url,
+                "apiKey": c.embedding.api_key,
+                "model": c.embedding.model,
+                "dim": c.embedding.dim,
+                "weight": c.embedding.weight,
+            },
+            "publish": {
+                "webhookUrl": c.publish.webhook_url,
+                "retry": c.publish.retry,
+                "autoDispatch": c.publish.auto_dispatch,
+                "tickSeconds": c.publish.tick_seconds,
+            },
+            "judge": {
+                "mode": c.judge.mode,
+                "provider": c.judge.provider,
+                "model": c.judge.model,
+                "passThreshold": c.judge.pass_threshold,
+                "weight": c.judge.weight,
+            },
+            "digitalHuman": {
+                "provider": c.digital_human.provider,
+                "apiUrl": c.digital_human.api_url,
+                "apiKey": c.digital_human.api_key,
+                "avatar": c.digital_human.avatar,
+                "timeoutMs": c.digital_human.timeout_ms,
+            },
+            "search": {
+                "provider": c.search.provider,
+                "apiUrl": c.search.api_url,
+                "apiKey": c.search.api_key,
+                "maxResults": c.search.max_results,
+                "timeoutMs": c.search.timeout_ms,
+                "fetchPages": c.search.fetch_pages,
+                "maxPages": c.search.max_pages,
+                "siteUrls": list(c.search.site_urls),
+            },
+            "tracing": {
+                "otlpEndpoint": c.tracing.otlp_endpoint,
+                "serviceName": c.tracing.service_name,
+                "otlpHeaders": c.tracing.otlp_headers,
+                "sampler": c.tracing.sampler,
+                "sampleRatio": c.tracing.sample_ratio,
             },
         },
         ensure_ascii=False,
@@ -538,6 +715,14 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
         _config.digest_max_calls = max(1, min(60, int(patch["digestMaxCalls"])))
     if patch.get("llmCache") is not None:
         _config.llm_cache = bool(patch["llmCache"])
+    # host / port 是启动期参数：写入后随快照持久化，**下次启动生效**
+    if isinstance(patch.get("host"), str) and patch["host"].strip():
+        _config.host = patch["host"].strip()
+    if patch.get("port") is not None:
+        try:
+            _config.port = max(1, min(65535, int(patch["port"])))
+        except (TypeError, ValueError):
+            pass
     llm_patch = patch.get("llm") or {}
     if llm_patch:
         for key, value in llm_patch.items():
@@ -545,6 +730,8 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
             if attr is None or value is None:
                 continue
             if attr == "provider" and value not in ("mock", "openai"):
+                continue
+            if attr == "thinking" and value not in ("enabled", "disabled"):
                 continue
             if attr == "vision":
                 value = bool(value)
@@ -634,6 +821,17 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
             "siteUrls": ("site_urls", None),
         },
     )
+    _apply_flat(
+        patch,
+        _config.tracing,
+        {
+            "tracingOtlpEndpoint": ("otlp_endpoint", None),
+            "tracingServiceName": ("service_name", None),
+            "tracingOtlpHeaders": ("otlp_headers", None),
+            "tracingSampler": ("sampler", _SAMPLERS),
+            "tracingSampleRatio": ("sample_ratio", None),
+        },
+    )
     return _config
 
 
@@ -660,6 +858,8 @@ def _apply_flat(patch: dict[str, Any], target: Any, mapping: dict[str, tuple[str
             value = max(1_000, int(value))
         elif attr == "max_pages":
             value = min(10, max(0, int(value)))
+        elif attr == "sample_ratio":
+            value = min(1.0, max(0.0, float(value)))
         setattr(target, attr, value)
 
 
@@ -673,7 +873,11 @@ _LLM_FIELD_BY_CAMEL = {
     "timeoutMs": "timeout_ms",
     "vision": "vision",
     "visionMaxImages": "vision_max_images",
+    "thinking": "thinking",
 }
+
+# 模块尾部统一执行：读回持久化快照（update_config 在上方已定义）
+_load_persisted_settings()
 
 
 def _mask(secret: str) -> str:
@@ -692,6 +896,7 @@ def public_config() -> dict[str, Any]:
     tracing = _config.tracing
     return {
         "port": _config.port,
+        "host": _config.host,
         "turnBudget": _config.turn_budget,
         "maxRevisions": _config.max_revisions,
         "qualityThreshold": _config.quality_threshold,
@@ -717,6 +922,7 @@ def public_config() -> dict[str, Any]:
             "timeoutMs": llm.timeout_ms,
             "vision": llm.vision,
             "visionMaxImages": llm.vision_max_images,
+            "thinking": llm.thinking,
             "apiKeySet": len(llm.api_key) > 0,
             "apiKeyMasked": _mask(llm.api_key),
             # 每智能体模型覆盖：只回显 model / baseUrl 与密钥掩码，绝不回明文
@@ -781,6 +987,7 @@ def public_config() -> dict[str, Any]:
             "otlpEndpoint": tracing.otlp_endpoint,
             "serviceName": tracing.service_name,
             "otlpConfigured": bool(tracing.otlp_endpoint),
+            "otlpHeadersSet": bool(tracing.otlp_headers),
             "sampler": tracing.sampler,
             "sampleRatio": tracing.sample_ratio,
         },

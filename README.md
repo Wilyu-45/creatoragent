@@ -82,6 +82,8 @@ OPENAI_API_KEY=sk-xxx OPENAI_MODEL=deepseek-chat python -m app.main
 | 多租户与可观测 | 令牌 → 租户，任务与记忆库双向隔离；span 树覆盖整个 session，可选 OTLP 导出 |
 | MCP 插件 | `app/mcp_server.py` 暴露 9 个 MCP 工具（stdio / streamable-http 双传输），DeepSeek harness、Claude Code、Trae 等 agent 可直接驱动流水线 |
 | 动效工场 | 纯前端视频动效组件库（`src/motion/`，22 预设 + JSON 时间轴脚本），浏览器试演与预演，Remotion-ready |
+| 视频工场 | 字幕文件（SRT/VTT/ASS/纯文本）→ 自动建轴 → 预览并导出 MP4/WebM 成片（`src/vg/`，720p–4K，去 AI 味 + 卡点吸附） |
+| 桌面应用 | `make app` 打包单文件 exe（内嵌前端，PyInstaller）；全部配置可在界面「运行时设置」修改并持久化，双击即用 |
 | 部署 | 裸机 systemd / Docker·compose / k8s / Windows 任务计划 + Nginx·Caddy 反代样例，含清单静态核验 |
 
 ---

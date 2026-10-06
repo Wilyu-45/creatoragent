@@ -165,7 +165,102 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS dh_jobs_tenant_idx
       ON digital_human_jobs (tenant, created_at, id)
     """,
-    # 9) 租约审计镜像（可选观测位，默认不写；租约权威源在 Redis）
+    # 9) 图片生成作业（与 digital_human_jobs 同构：作业 dict 全量含 manifest/history）
+    """
+    CREATE TABLE IF NOT EXISTS imagegen_jobs (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL,
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'queued',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS imagegen_jobs_task_idx ON imagegen_jobs (task_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS imagegen_jobs_tenant_idx
+      ON imagegen_jobs (tenant, created_at, id)
+    """,
+    # 10) 视频生成作业（同上构，供 videogen.py 使用）
+    """
+    CREATE TABLE IF NOT EXISTS videogen_jobs (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL,
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'queued',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS videogen_jobs_task_idx ON videogen_jobs (task_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS videogen_jobs_tenant_idx
+      ON videogen_jobs (tenant, created_at, id)
+    """,
+    # 10b) 视频理解作业（同上构，供 videounderstand.py 使用）
+    """
+    CREATE TABLE IF NOT EXISTS videounderstand_jobs (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL,
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'queued',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS videounderstand_jobs_task_idx ON videounderstand_jobs (task_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS videounderstand_jobs_tenant_idx
+      ON videounderstand_jobs (tenant, created_at, id)
+    """,
+    # 10c) 桌面宠物作业（同上构，供 petgen.py 使用；帧与宠物包是文件，只有作业进表）
+    """
+    CREATE TABLE IF NOT EXISTS pet_jobs (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL,
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'queued',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS pet_jobs_task_idx ON pet_jobs (task_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS pet_jobs_tenant_idx
+      ON pet_jobs (tenant, created_at, id)
+    """,
+    # 11) 创作技能提炼作业（同上构，供 skillgen.py 使用；技能文件在 data/skills/，只有作业进表）
+    """
+    CREATE TABLE IF NOT EXISTS skill_jobs (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL,
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'queued',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS skill_jobs_task_idx ON skill_jobs (task_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS skill_jobs_tenant_idx
+      ON skill_jobs (tenant, created_at, id)
+    """,
+    # 12) 租约审计镜像（可选观测位，默认不写；租约权威源在 Redis）
     """
     CREATE TABLE IF NOT EXISTS bb_intents_audit (
       id         bigserial PRIMARY KEY,

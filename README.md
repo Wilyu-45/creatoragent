@@ -72,7 +72,7 @@ OPENAI_API_KEY=sk-xxx OPENAI_MODEL=deepseek-chat python -m app.main
 | 能力 | 现状 |
 |---|---|
 | 多智能体流水线 | A0 编排 A1–A11，LangGraph `StateGraph` 承载控制流（条件边门禁环 + `interrupt()` 人工审批 + 断点续跑） |
-| 门禁与人工在环 | `pass / revise / reject / escalate`；A6 事实核查与 A7 品牌合规可否决；关键节点挂起等待人工拍板 |
+| 门禁与人工在环 | `pass / revise / reject / escalate`；A6 事实核查与 A7 品牌合规（广告法词库 + 二创版权 checklist）可否决；关键节点挂起等待人工拍板 |
 | 两级容错与成本可控 | 重试退避 → 降级内置离线引擎；一任务一账本，超预算熔断；LLM 响应缓存 |
 | 知识复利 | A11 记忆库（关键词 + 向量混合检索），按租户 + 语言分区，过期自动下线 |
 | 质量评估 | 与门禁解耦的 LLM-as-a-Judge 六维评分；模型版失败自动回退规则版 |
@@ -81,8 +81,10 @@ OPENAI_API_KEY=sk-xxx OPENAI_MODEL=deepseek-chat python -m app.main
 | 多语言与视频脚本 | 中/英/日/韩/西**原生创作**（非翻译）；短视频产出独立 `video_script` 产物 |
 | 多租户与可观测 | 令牌 → 租户，任务与记忆库双向隔离；span 树覆盖整个 session，可选 OTLP 导出 |
 | MCP 插件 | `app/mcp_server.py` 暴露 9 个 MCP 工具（stdio / streamable-http 双传输），DeepSeek harness、Claude Code、Trae 等 agent 可直接驱动流水线 |
-| 动效工场 | 纯前端视频动效组件库（`src/motion/`，22 预设 + JSON 时间轴脚本），浏览器试演与预演，Remotion-ready |
-| 视频工场 | 字幕文件（SRT/VTT/ASS/纯文本）→ 自动建轴 → 预览并导出 MP4/WebM 成片（`src/vg/`，720p–4K，去 AI 味 + 卡点吸附） |
+| 动效工场 / 视频工场 | 纯前端工具（`src/motion/` 22 预设 + JSON 时间轴脚本；`src/vg/` 字幕 → 自动建轴 → 导出 MP4/WebM 成片，720p–4K，去 AI 味 + 卡点吸附） |
+| 生成模型接入样例 | 图片（`app/core/imagegen.py`：sample/openai/local）、视频（`app/core/videogen.py`：sample/http，逐镜画面段+成本熔断）、桌面宠物（`app/core/petgen.py` sample/imagegen + 内置运行器 `app/desktop_pet.py`，交付**可运行宠物包**）、数字人——均遵同一「POST 建作业 / GET 查状态」最小契约范式，未配端点时显式失败不假装成功 |
+| 视频理解接入样例 | 摄取侧「看懂画面」（`app/core/videounderstand.py`：sample/real）：把**整集视频**交给**原生支持视频输入的理解网关**（一集=一次调用）→ 结构化视觉摘要 → 注入 Brief 驱动创作；与视频生成同一 POST/GET 异步契约，只传 `assets/` 引用不搬运大文件，未配网关/非本地文件时显式失败不假装看懂 |
+| 创作技能提炼接入样例 | 把 UP 主**自己的作品**（`app/core/skillgen.py`：rules/llm）提炼成扩展插件可装载的通用技能：文档/字幕素材 + 已产出文本 + 视频理解摘要 → `SKILL.md`（frontmatter）+ `skill.json` + 技能包 zip，并可一键沉淀成记忆库 `template` 卡片；`rules` 零 token 出**真统计骨架**（`simulated=true` 声明不含风格判断），`llm` 复用 `LLM_*` 网关、未配真实网关时显式失败不假装提炼 |
 | 桌面应用 | `make app` 打包单文件 exe（内嵌前端，PyInstaller）；全部配置可在界面「运行时设置」修改并持久化，双击即用 |
 | 部署 | 裸机 systemd / Docker·compose / k8s / Windows 任务计划 + Nginx·Caddy 反代样例，含清单静态核验 |
 
@@ -136,7 +138,8 @@ OPENAI_API_KEY=sk-xxx OPENAI_MODEL=deepseek-chat python -m app.main
 
 | # | 事项 | 为什么需要人 |
 |---|---|---|
-| 8 | **选定数字人服务商并决定是否正式接入** | 系统提供的是接入样例（内置引擎 + http 适配）；正式接入需明确产品形态并选型服务商 |
+| 8 | **选定图片/视频/数字人服务商并决定是否正式接入** | 系统提供的是接入样例（内置引擎 + openai/http/local 适配）；正式接入需明确产品形态并选型服务商（图：即梦/通义万相/Replicate/本地 SD·ComfyUI；视频：可灵/即梦/Runway/本地农场；桌宠帧复用图片通道，运行器形态——内置 tkinter 样例 vs 接入既有桌面宠物宿主——属产品决策） |
+| 8b | **选定原生视频理解网关以启用视频理解** | `real` 通道把整集视频交给**原生支持视频输入的理解网关**（一集一次调用，如 Gemini 视频输入 / 自建视频理解农场）；系统不搬运大文件、只传 `assets/` 引用，网关需与素材同机/可达；未配 `VIDEOUNDERSTAND_API_URL` 则如实失败、不假装看懂 |
 | 9 | **决定是否切换 pg 存储模式** | 默认 `file`（单机零依赖）与 `CREATOR_STORAGE=pg`（PostgreSQL + Redis，多副本前提）均已实现；是否为生产启用、库用托管还是自建属架构决策，切换步骤见 [`storage_contract.md`](storage_contract.md) |
 | 10 | **接入 OTel Collector / Jaeger 生产实例** | 本地用 compose 里的 all-in-one 即可；生产需要持久化存储与采样策略 |
 | 11 | **建立人工抽检机制** | 评估与门禁能拦住大部分问题，但品牌调性与创意质量最终仍需人判断 |
@@ -155,7 +158,7 @@ python scripts/golden_eval.py
 # 端到端验收（拉起真实服务，核对全部接口与租户隔离）
 python scripts/smoke_api.py
 
-# 快速契约核验（评估 / 租户 / 轨迹 / 传播采样 / 数字人样例闭环）
+# 快速契约核验（评估 / 租户 / 轨迹 / 传播采样 / 各旁路生成与提炼通道闭环）
 python scripts/verify_contracts.py
 
 # 部署清单核验（不需要 Docker daemon）
@@ -179,12 +182,12 @@ PR 阶段就能拦住质量回归。各脚本的覆盖范围与用法见 [`USER_
 
 | 文档 | 回答什么问题 |
 |---|---|
-| [`README.md`](README.md) | 本文件：项目是什么、怎么跑起来、上线前必须由人做什么 |
 | [`USER_GUIDE.md`](USER_GUIDE.md) | **使用与运营**：界面操作、运行时配置与环境变量、评估 / 回归 / 排障步骤 |
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | **部署方案**：裸机 / 容器 / Windows / 反向代理的选择、安装、升级与自检 |
 | [`creator.md`](creator.md) | **架构与角色**：智能体职责、协作流程、状态机、数据契约、门禁与权限设计 |
 | [`plan.md`](plan.md) | **技术选型与排期**：框架对比、分层架构、测试策略、验收指标、as-built 对照 |
 | [`storage_contract.md`](storage_contract.md) | **存储契约**：file / pg 双后端接口签名、不变量、实体映射与切换步骤 |
+| [`capability_samples.md`](capability_samples.md) | **能力接入样例**：数字人 / 图片 / 视频 / 视频理解 / 桌面宠物 / 创作技能提炼六条旁路通道与两个前端工场——配置、界面与失败边界 |
 | [`ENGINEERING_PRINCIPLES.md`](ENGINEERING_PRINCIPLES.md) | **工程约定**：从真实踩坑提炼的开发原则（验证、契约、可失败设计、断言口径、环境） |
 | [`MEMORY.md`](MEMORY.md) | **开发记忆**：未完成的开发待办、非显然的设计决策（别乱改重来） |
 

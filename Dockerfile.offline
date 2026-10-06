@@ -85,7 +85,7 @@ RUN /usr/local/bin/python -m pip install --no-cache-dir \
 COPY app ./app
 COPY scripts ./scripts
 COPY golden ./golden
-COPY creator.md plan.md MEMORY.md USER_GUIDE.md DEPLOYMENT.md README.md ./
+COPY creator.md plan.md MEMORY.md USER_GUIDE.md DEPLOYMENT.md capability_samples.md README.md ./
 COPY --from=web /web/dist ./dist
 
 # 非 root 运行

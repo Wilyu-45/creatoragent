@@ -96,6 +96,23 @@ npm run build && npm run dev:web                               # 前端构建 / 
     绑错时容器内健康检查照常通过、宿主机连不上，自检 / 冒烟全部绿，只有跑真容器才暴露。
     `check_deploy.py` 已把三处清单声明升级为断言；改绑定相关代码前先读 `app/main.py` 与部署清单。
 
+**图片/视频生成接入样例（core/imagegen.py + core/videogen.py）**
+
+37. **图片/视频作业走旁路 job store、不新增黑板产物**：新增 Artifact type 要过四处契约（见 #31），风险高且本次能力本质是「旁路异步作业」而非创作链产物；改用与 `digital_human.py` 同构的 `gen_jobs.py` 作业后端（POST 建作业/GET 查状态），绕开四处契约同步，前端用独立面板（ImageGenPanel/VideoGenPanel）展示。
+38. **生成通道必须按「作业实际生效的 provider」分派、不按全局配置**：请求体可覆盖 provider，而全局 `get_config().xxx.provider` 仍是默认值。两处同根 bug（真实踩坑）：`videogen._estimate_cost` 读全局会漏算成本绕过熔断；`imagegen._submit_real` 读全局会在「全局=sample + 覆盖=openai」时误走 local 分支。两者均改为用 `job["provider"]`/chosen 参数。
+39. **视频只有 sample/http 两条通道**：建任务/查状态本身就是统一异步 http 契约，本地 ComfyUI 农场经 http 指向本地端点即可覆盖（`_is_local_endpoint` 计 0 元，见 #29），无需像图片那样单列 `local` provider。
+40. **新能力先过 sample 通道 + 黄金新用例不破坏基线**：`golden_eval.compare()` 中 `previous is None → verdict="new"` 在内容级检查之前跳过，新增 B 站解说用例不会触发 regressed、不需 `--update-baseline`（避免重写整个版本化资产固化回归）；ok 只看 regressed/failed/missing。
+41. **二创版权只给 checklist + 强制 `needs_human_review`**：`knowledge/copyright.py` 不假装能自动检测侵权（镜像 #非中文词库的降级哲学），命中解说类才叠加，A7 把 items 转 hits 并置 `needs_human`，最终人工把关。
+42. **openai 图片返回只有 `b64_json` 时必须落盘 assets**：OpenAI 默认 `response_format` 与多数兼容网关会返回 base64 而非 url；`imagegen._openai_image` 无 url 且有 b64_json 时走 `_persist_data_image` 落盘再引用（与 local 通道对齐），否则生成的图会被丢弃、前端拿到空 url（doctor 已断言 b64→assets 与直连 url 透传两种路径）。
+43. **视频理解是生成侧的镜像、走旁路 job store 不新增产物**：`videounderstand.py` 与 imagegen/videogen/digital_human 同范式（复用 `gen_jobs.py`、惰性推进、span、租户隔离、删除回收），同样避开四处契约（见 #31/#37）。它是 `digest.py`（文档 map-reduce 理解）的画面版镜像：输出「视觉摘要」而非「画面」。**摘要不新增 Artifact type而是经「注入 Brief」显式接缝（把 `summary.text_brief` 幂等追加进 `brief.constraints`）喂给下游 A2/A3/A4**，避免落黑板。
+44. **视频理解 real = 原生视频理解网关（整集一次调用），不依赖本机 ffmpeg、不改共享 LLM 层**：`videounderstand.py` 把**整集视频**交给**原生支持视频输入的理解网关**（`VIDEOUNDERSTAND_API_URL`），一集=一次调用、成本可控、最贴「逐集理解再创作」节奏；与 videogen 同一「POST 提交整集 → GET 轮询 → 取回摘要」异步契约。**不抽帧、不调 chat/ImagePart**（故不再依赖本机 ffmpeg、也不再走多模态读图路径）；厂商私有协议（Gemini 视频输入/自建农场）由网关层消化、不绑厂商。
+45. **real 失败链把「未配网关（`api_url` 空）」置最前，保证 mock 门禁下确定性失败且不触网**：`_submit_http` 开头依次检查 api_url 空 / video_source!=local / `_resolve_video_path` 文件缺失——均在 `httpx.post` 之前，故未配网关/非本地/缺文件都确定 failed、绝不发网络请求、doctor 可稳定断言不假装。（这取代了旧「抽帧喂图时代把 vision_enabled 放最前」的设计：现已无 ffmpeg/vision_enabled。）
+46. **本地大视频不能套 `assets.load_local` 的 8MB 闸门**：`load_local` 的体积上限是为「进模型的字节」设的，整集番剧视频远超此值会被 `parse_asset` 提前返回（kind 保持默认 image）→ 若依赖 asset.kind/usable 检测视频会失败。videounderstand 自写 `_resolve_video_path`（复用 load_local 的相对路径/拒绝绝对路径与 `..`/限 `assets/` 的安全不变量，但**不读字节、不限体积**，只把路径/引用交给网关自取、不搬运大文件）+ 按**扩展名**兑底识别视频。
+47. **桌宠 `sample` 通道必须真落盘 PNG，不是只出清单**：`petgen` 用标准库（zlib + struct + crc32）编码 PNG、程序化绘制吉祥物帧，并复用图片通道的 `IMAGEGEN_*` 端点做 `imagegen` 通道（端点契约见 `capability_samples.md` §2）（一帧一次调用、**不新增端点/密钥配置**）。理由：「交付物是可运行的宠物包」这一形态本身要能被回归（doctor 断言帧数、PNG magic、zip 内含运行器），只在内存里编一个清单会把最该验证的部分留在门禁之外。顺带两条口径：分派只看 `job["provider"]`/`chosen`（承 #38），而 `_image_channel_usable()` **故意**读全局 `image_gen` 配置——它回答的是「共享图片端点配了没」而不是「该作业走哪条通道」；逐帧计费在受理前按帧数预估，超 `COST_BUDGET_USD` 则 `submitted=false`、`attempts=0`。
+48. **桌宠不做图像处理：纯色键 `#FF00FE` + 双端各自透明**：Tk 桌面侧用 `-transparentcolor`，浏览器预览侧逐像素把同色置 alpha 0——同一色键两边复用，故不引入抠图/切帧/对齐链路（也就零 Pillow 依赖）。附带约束：调色板解析要把与色键冲突的颜色挪开（`_avoid_key`），否则帧会被自己吃掉。
+49. **宠物包内嵌 `runner/pet.py`，读不到源码时写 `runner: ""` 而不是静默缺失**：包要脱离仓库也能跑（PyInstaller 冻结环境与部署副本都没有 `app/desktop_pet.py` 源码路径）。可用 `runner` 字段是否为空来判断运行器是否内嵌；打包 zip 不写死绝对路径，降级必须在 `pet.json` 里可见。
+50. **技能提炼：统计口径本身就是产品主张，改口径等于改卖点**：`skillgen.py` 的 `rules` 通道卖的是「数字来自正文的**真实统计**」，三个口径都必须守住，否则产物看着像技能其实是噪声——① 断句用 lookbehind `(?<=[。！？!?；;])|\n+` **保留句末标点**（若把标点吃掉，`question_ratio` 恒为 0，「优先疑问句开场」就永远统计不出来）；② 字数一律走 `_visible_len`（非空白字符，与文案编辑器同口径；用 `len()` 会把换行缩进算进字幕字数，语速虚高到 300+ 字/分钟）；③ 字幕**只认整行以时间戳开头**的 `-->` 行且需 ≥2 条（`digest` 研读摘要会把 `00:00:00,000 --> …` 写进句子，一旦被当成一条巨型字幕，该作品的段落数与语速统计会一起失真——doctor 有这条反向断言）。另外两条口径：作品门槛（正文 <40 字）与上限（`SKILLGEN_MAX_WORKS`）都**写进 issues、连 409 文案一起带出**，绝不静默丢弃；`simulated=true` 是诚实标注而非缺陷——数字是真的，但「为什么这样写有效」属风格判断，只有 `llm` 通道才声称带判断力。技能目录不变量由 `skill_dir_of()` 守（`dir` 须以 `skills/` 开头且父目录 == `SKILLS_DIR`），`build_package()` 装配时要排除 `package.zip` 自身，否则重复打包会层层嵌套。
+
 ---
 
 ## 3. 未完成的开发待办
@@ -123,6 +140,8 @@ npm run build && npm run dev:web                               # 前端构建 / 
 | 补充黄金数据集的行业用例 | 用例格式与判定器已就绪，加 JSON 即可（P1） |
 | 确认行业合规词库（医疗/金融/教育） | 词库结构就绪，填入法务确认的规则即可（P1） |
 | 选定数字人服务商并正式接入 | `sample` 内置引擎 + `http` 适配样例 + 前端面板 + API 已备（P2） |
+| 选定图片/视频生成服务商并正式接入 | `imagegen.py`（sample/openai/local）+ `videogen.py`（sample/http）+ `petgen.py`（sample/imagegen，帧复用图片通道；含内置运行器 `app/desktop_pet.py`）接入样例 + 前端面板 + API + 成本熔断已备；选型与真机跑通由部署方决定；桌宠运行器形态（内置样例 vs 接入既有桌面宠物宿主）属产品决策（P2） |
+| 选定原生视频理解网关以启用视频理解 | `videounderstand.py`（sample/real）+ 注入 Brief 接缝 + 前端面板 + API 已备；`real` 把整集交给**原生支持视频输入的理解网关**（`VIDEOUNDERSTAND_API_URL`，网关需与素材同机/可达），未配则如实失败（P2） |
 | 决定是否切换 pg 存储模式 | 双后端已实现（`CREATOR_STORAGE=pg`）；是否启用、PG/Redis 托管还是自建、k8s 副本数调整由部署方决策（P2） |
 | 接入 OTel Collector / Jaeger 生产实例 | `OTLP_ENDPOINT` 已支持，导出的 id 与本地一致（P2） |
 | 建立人工抽检机制 | 评估报告、审批工作流、抽检面板已就绪（P2） |

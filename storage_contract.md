@@ -43,6 +43,9 @@
 | 7 | `digital_human.json` | `app/core/digital_human.py`（`STORE_FILE`） | 数字人渲染作业 | `dh_jobs_pg.py` `PgJobBackend`（表 `digital_human_jobs`） |
 | 8 | `exports/<task_id>.txt` | `app/core/orchestrator.py`（`EXPORTS_DIR`） | 审批通过后的成品导出文本（final_delivery 渲染） | 不替换（导出面保留文件，与 traces 同口径；下载走 `GET /api/tasks/{id}/export`） |
 | 9 | （内存） | `app/llm/cache.py` `ResponseCache` | LLM 响应缓存（TTL + 容量，不落盘） | 不替换（纯内存；可选 Redis，miss 只影响成本不影响正确性） |
+| 10 | `imagegen_jobs.json` / `videogen_jobs.json` / `videounderstand_jobs.json` / `petgen_jobs.json` / `skillgen_jobs.json` | `app/core/gen_jobs.py` `FileJobBackend`（各工具 `STORE_FILE`） | 旁路生成作业（图片 / 视频 / 视频理解 / 桌面宠物 / 技能提炼），整行 job dict | `gen_jobs.py` `PgJobBackend`（表 `imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `pet_jobs` / `skill_jobs`，`payload jsonb` 存整行） |
+| 11 | `data/pets/<job_id>/` | `app/core/petgen.py`（`PETS_DIR`） | 桌宠帧 PNG + `pet.json` + README（含包内 `runner/pet.py`） | 不替换（二进制帧与 traces/exports 同口径保留文件；库中只存引用与清单，读取走带鉴权的 pets 路由） |
+| 12 | `data/skills/<job_id>/` | `app/core/skillgen.py`（`SKILLS_DIR`） | 提炼产物 `SKILL.md` + `skill.json` + README，装配 `package.zip` 供扩展插件装载 | 不替换（作业行在库里，正文与包保留文件；读取走带鉴权的 skills 路由，`skill_dir_of()` 守住「只能落在 `skills/` 下」的不变量） |
 
 ---
 
@@ -168,9 +171,13 @@ doctor 同样守护「必须是真的 postgres」。
 （配置 `OTLP_ENDPOINT` 后同时走 OTLP）。多副本下进程内轨迹天然分散，
 生产观测应直接接 collector + Jaeger/ClickHouse，落盘导出仅作本地排障。
 
-### 3.7 数字人渲染作业
+### 3.7 旁路生成作业（数字人 / 图片 / 视频 / 视频理解 / 桌面宠物 / 技能提炼）
 
 `_jobs() -> dict[str, dict]`（懒加载 + `_save_locked()` 原子落盘）。
+数字人后来长出了公共后端 `gen_jobs.py`：`snapshot()` 读全量、`write_back()` 只回写状态有变的行、
+`drop_task()` 按 task_id 回收；图片 / 视频 / 视频理解 / 桌面宠物 / 技能提炼五个通道共用它，换存储只换后端对象。
+桌宠的帧与宠物包落在 `data/pets/<job_id>/`、技能正文落在 `data/skills/<job_id>/`（见总表 #11、#12），
+删除任务时作业行与这些目录要一起回收。
 两个多副本注意点：
 - 作业存储需共享（PG 表或 Redis Hash）；
 - `sample` 内置引擎的「按流逝时间惰性推进」是**进程内**行为，多副本下要么
@@ -203,6 +210,11 @@ doctor 同样守护「必须是真的 postgres」。
 3. `python scripts/verify_contracts.py`：API 契约不变 —— 存储替换对接口层必须零感知；
 4. `python scripts/pg_migrate.py --dry-run` → 去掉 `--dry-run`：JSON → PostgreSQL
    一次性迁移，逐类实体输出「源数 / 插入 / 跳过」计数，可重复执行（幂等）；
+   **迁移范围含数字人作业表 `digital_human_jobs`，五个旁路生成作业表
+   （`imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `pet_jobs` / `skill_jobs`）不在迁移脚本内**：
+   它们是短生命周期状态，切换存储模式时未跑完的作业不迁移、重新提交即可；
+   桌宠帧与宠物包、技能正文与技能包都是文件（`data/pets/<job_id>/`、`data/skills/<job_id>/`），
+   换机时须与 `data/assets`、`data/pets`、`data/skills` 一起搬迁；
 5. 双副本手动演练（部署方）：副本 A 创建任务、副本 B 能看到并续跑
    （共享 PG + Redis 后此语义成立）。
 

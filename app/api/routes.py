@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from ..agents.registry import PLANNED_AGENTS, all_agent_meta
 from ..config import (
@@ -32,6 +32,31 @@ from ..core.clock import now_iso
 from ..core.digital_human import drop_task as drop_digital_human_jobs
 from ..core.digital_human import list_jobs as list_digital_human_jobs
 from ..core.digital_human import create_job as create_digital_human_job
+from ..core.imagegen import create_job as create_imagegen_job
+from ..core.imagegen import drop_task as drop_imagegen_jobs
+from ..core.imagegen import list_jobs as list_imagegen_jobs
+from ..core.videogen import create_job as create_videogen_job
+from ..core.videogen import drop_task as drop_videogen_jobs
+from ..core.videogen import list_jobs as list_videogen_jobs
+from ..core.videounderstand import create_job as create_videounderstand_job
+from ..core.videounderstand import drop_task as drop_videounderstand_jobs
+from ..core.videounderstand import get_job as get_videounderstand_job
+from ..core.videounderstand import has_video_asset
+from ..core.videounderstand import list_jobs as list_videounderstand_jobs
+from ..core.petgen import build_package as build_pet_package
+from ..core.petgen import create_job as create_petgen_job
+from ..core.petgen import drop_task as drop_petgen_jobs
+from ..core.petgen import frame_bytes as pet_frame_bytes
+from ..core.petgen import get_job as get_petgen_job
+from ..core.petgen import list_jobs as list_petgen_jobs
+from ..core.skillgen import build_package as build_skill_package
+from ..core.skillgen import create_job as create_skillgen_job
+from ..core.skillgen import drop_task as drop_skillgen_jobs
+from ..core.skillgen import get_job as get_skillgen_job
+from ..core.skillgen import has_materials
+from ..core.skillgen import list_jobs as list_skillgen_jobs
+from ..core.skillgen import memory_card as skill_memory_card
+from ..core.skillgen import skill_document
 from ..core.evaluations import build_record, evaluation_store
 from ..core.events import event_bus
 from ..core.golden import DEFAULT_TOLERANCE, compare, coverage, load_baseline, load_dataset
@@ -486,6 +511,14 @@ _SETTINGS_STR_KEYS = (
     "dhApiUrl",
     "dhApiKey",
     "dhAvatar",
+    "imagegenBaseUrl",
+    "imagegenApiKey",
+    "imagegenModel",
+    "imagegenSize",
+    "videogenApiUrl",
+    "videogenApiKey",
+    "videounderstandApiUrl",
+    "videounderstandApiKey",
     "searchApiUrl",
     "searchApiKey",
     "tracingOtlpEndpoint",
@@ -501,6 +534,14 @@ _SETTINGS_NUM_KEYS = (
     "judgePassThreshold",
     "judgeWeight",
     "dhTimeoutMs",
+    "imagegenMaxImages",
+    "imagegenTimeoutMs",
+    "videogenTimeoutMs",
+    "videounderstandTimeoutMs",
+    "petgenFrameSize",
+    "petgenMaxFrames",
+    "petgenTimeoutMs",
+    "skillgenMaxWorks",
     "searchMaxResults",
     "searchTimeoutMs",
     "searchMaxPages",
@@ -510,6 +551,11 @@ _SETTINGS_BOOL_KEYS = ("searchFetchPages",)
 _SETTINGS_ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "embeddingProvider": ("local", "openai"),
     "dhProvider": ("sample", "http"),
+    "imagegenProvider": ("sample", "openai", "local"),
+    "videogenProvider": ("sample", "http"),
+    "videounderstandProvider": ("sample", "real"),
+    "petgenProvider": ("sample", "imagegen"),
+    "skillgenProvider": ("rules", "llm"),
     "searchProvider": ("none", "http"),
     "tracingSampler": (
         "parentbased_always_on",
@@ -701,15 +747,25 @@ def delete_task(task_id: str, request: Request) -> dict[str, Any]:
     task_store.delete(task_id)
     event_bus.drop(task_id)
     tracer.drop(task_id)
-    # 顺带回收该任务的断点续跑检查点与数字人渲染作业，避免持久文件只增不减
+    # 顺带回收该任务的断点续跑检查点、数字人渲染 / 图片 / 视频生成作业，避免持久文件只增不减
     purged = orchestrator.purge_checkpoints(task_id)
     purged_jobs = drop_digital_human_jobs(task_id)
+    purged_images = drop_imagegen_jobs(task_id)
+    purged_videos = drop_videogen_jobs(task_id)
+    purged_vu = drop_videounderstand_jobs(task_id)
+    purged_pets = drop_petgen_jobs(task_id)
+    purged_skills = drop_skillgen_jobs(task_id)
     blackboard.flush()
     return {
         "ok": True,
         "id": task_id,
         "purged_checkpoints": purged,
         "purged_digital_human_jobs": purged_jobs,
+        "purged_imagegen_jobs": purged_images,
+        "purged_videogen_jobs": purged_videos,
+        "purged_videounderstand_jobs": purged_vu,
+        "purged_petgen_jobs": purged_pets,
+        "purged_skillgen_jobs": purged_skills,
     }
 
 
@@ -863,6 +919,340 @@ def list_digital_human(task_id: str, request: Request) -> dict[str, Any]:
         "has_video_script": any(a.type == "video_script" for a in task.artifacts),
         "jobs": jobs,
     }
+
+
+# ------------------------------------------------------------------ #
+# 图片生成（开发样例，plan「图片生成通道」）                            #
+# ------------------------------------------------------------------ #
+
+
+@router.post("/tasks/{task_id}/images", status_code=201)
+def create_image(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """为任务创建一个图片生成作业（**开发样例**）。
+
+    任务必须已产出 ``visual_brief``。样例引擎（默认）离线模拟
+    「排队 → 生成 → 完成」并生成**生成清单**（不产真图）；配置 ``IMAGEGEN_BASE_URL``
+    后走 openai / local 通道真实出图。请求体可带 ``{"provider": "sample|openai|local"}``。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    provider = body.get("provider")
+    try:
+        job = create_imagegen_job(task, provider=provider if isinstance(provider, str) else "")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"task_id": task.id, "job": job}
+
+
+@router.get("/tasks/{task_id}/images")
+def list_images(task_id: str, request: Request) -> dict[str, Any]:
+    """读取任务的图片生成作业列表（读取时惰性推进样例状态机）。"""
+    task = _require_task(task_id, request)
+    jobs = list_imagegen_jobs(task_id=task.id, tenant=task.tenant)
+    return {
+        "task_id": task.id,
+        "has_visual_brief": any(a.type == "visual_brief" for a in task.artifacts),
+        "jobs": jobs,
+    }
+
+
+# ------------------------------------------------------------------ #
+# 视频生成（开发样例，plan「视频生成通道」）                            #
+# ------------------------------------------------------------------ #
+
+
+@router.post("/tasks/{task_id}/videos", status_code=201)
+def create_video(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """为任务创建一个视频生成作业（**开发样例**）。
+
+    任务必须已产出 ``video_script``。样例引擎（默认）离线模拟生命周期并按分镜
+    生成**渲染清单**（不产真片）；配置 ``VIDEOGEN_API_URL`` 后走 http 网关。超预算时
+    **成本熔断直接 fail-loud**，绝不假装已生成。请求体可带 ``{"provider": "sample|http"}``。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    provider = body.get("provider")
+    try:
+        job = create_videogen_job(task, provider=provider if isinstance(provider, str) else "")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"task_id": task.id, "job": job}
+
+
+@router.get("/tasks/{task_id}/videos")
+def list_videos(task_id: str, request: Request) -> dict[str, Any]:
+    """读取任务的视频生成作业列表（读取时惰性推进状态机）。"""
+    task = _require_task(task_id, request)
+    jobs = list_videogen_jobs(task_id=task.id, tenant=task.tenant)
+    return {
+        "task_id": task.id,
+        "has_video_script": any(a.type == "video_script" for a in task.artifacts),
+        "jobs": jobs,
+    }
+
+
+# ------------------------------------------------------------------ #
+# 视频理解（开发样例，plan「视频理解通道」：看懂画面→创作）        #
+# ------------------------------------------------------------------ #
+
+
+@router.post("/tasks/{task_id}/video-understanding", status_code=201)
+def create_video_understanding(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """为任务创建一个视频理解作业（**开发样例**）。
+
+    任务必须在 Brief.assets 里带一条视频素材。样例引擎（默认）离线模拟生命周期
+    并产出**带 simulated 标记的占位视觉摘要骨架**（不跑 ffmpeg、不调模型）；配
+    多模态模型后选 real 通道会本机 ffmpeg 抽帧 + 多模态理解真跑。任一前置不满足
+    即**显式失败、绝不假装看懂**。请求体可带 ``{"provider": "sample|real"}``。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    provider = body.get("provider")
+    try:
+        job = create_videounderstand_job(
+            task, provider=provider if isinstance(provider, str) else ""
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"task_id": task.id, "job": job}
+
+
+@router.get("/tasks/{task_id}/video-understanding")
+def list_video_understanding(task_id: str, request: Request) -> dict[str, Any]:
+    """读取任务的视频理解作业列表（读取时惰性推进样例状态机）。"""
+    task = _require_task(task_id, request)
+    jobs = list_videounderstand_jobs(task_id=task.id, tenant=task.tenant)
+    return {
+        "task_id": task.id,
+        "has_video_asset": has_video_asset(task),
+        "jobs": jobs,
+    }
+
+
+@router.post("/tasks/{task_id}/video-understanding/apply")
+def apply_video_understanding(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """把某个已完成作业的视觉摘要（``summary.text_brief``）**注入 Brief**。
+
+    这是「理解→创作」的显式接缝：把摘要追加进 ``brief.constraints``，下游 A2/A3/A4
+    创作时可引用（产物不落黑板，只走旁路作业通道）。幂等：同一摘要已注入则不重复。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    job_id = str(body.get("job_id") or "")
+    job = get_videounderstand_job(job_id, tenant=task.tenant)
+    if job is None or str(job.get("task_id")) != task.id:
+        raise HTTPException(status_code=404, detail="未找到该视频理解作业")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="作业尚未完成，无可注入的视觉摘要")
+    summary = job.get("summary") or {}
+    text_brief = str(summary.get("text_brief") or "").strip()
+    if not text_brief:
+        raise HTTPException(status_code=409, detail="该作业没有可用的视觉摘要文本")
+    prefix = "【视频理解】"
+    marker = f"{prefix}《{job.get('video_title') or job.get('video_ref') or ''}》"
+    existing = next((c for c in task.brief.constraints if marker and str(c).startswith(marker)), "")
+    if existing:
+        task.brief.constraints[task.brief.constraints.index(existing)] = f"{marker}：{text_brief}"
+        applied = "updated"
+    else:
+        task.brief.constraints.append(f"{marker}：{text_brief}")
+        applied = "added"
+    task_store.set(task)
+    return {"ok": True, "task_id": task.id, "applied": applied, "constraints": list(task.brief.constraints)}
+
+
+# ------------------------------------------------------------------ #
+# 桌面宠物（旁路作业：动作帧 + pet.json + 可下载宠物包）                 #
+# ------------------------------------------------------------------ #
+
+
+def _require_pet_job(task: TaskRecord, job_id: str) -> dict[str, Any]:
+    """按租户取该任务名下的桌宠作业；跨租户与不存在同为 404（不泄露他人作业 id）。"""
+    job = get_petgen_job(job_id, tenant=task.tenant)
+    if job is None or str(job.get("task_id")) != task.id:
+        raise HTTPException(status_code=404, detail="未找到该桌面宠物作业")
+    return job
+
+
+@router.post("/tasks/{task_id}/pets", status_code=201)
+def create_pet(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """为任务创建一个桌面宠物作业（**开发样例**）。
+
+    任务必须已产出 ``visual_brief``（风格与色板的唯一来源）。``sample``（默认）离线
+    确定性推进并用纯标准库画出动作帧，产出**真实可运行的宠物包**；``imagegen`` 复用
+    ``IMAGEGEN_*`` 端点逐帧出真图（未配置时显式失败，超预算则成本熔断）。
+    请求体可带 ``{"provider": "sample|imagegen", "name": "宠物名", "actions": ["idle", …]}``。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    provider = body.get("provider")
+    name = body.get("name")
+    try:
+        job = create_petgen_job(
+            task,
+            provider=provider if isinstance(provider, str) else "",
+            name=name if isinstance(name, str) else "",
+            actions=body.get("actions"),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"task_id": task.id, "job": job}
+
+
+@router.get("/tasks/{task_id}/pets")
+def list_pets(task_id: str, request: Request) -> dict[str, Any]:
+    """读取任务的桌宠作业列表（读取时惰性推进样例状态机并落盘帧）。"""
+    task = _require_task(task_id, request)
+    jobs = list_petgen_jobs(task_id=task.id, tenant=task.tenant)
+    return {
+        "task_id": task.id,
+        "has_visual_brief": any(a.type == "visual_brief" for a in task.artifacts),
+        "jobs": jobs,
+    }
+
+
+@router.get("/tasks/{task_id}/pets/{job_id}/frames/{action}/{index}")
+def pet_frame(task_id: str, request: Request, job_id: str, action: str, index: int) -> Response:
+    """回传一帧 PNG 供前端预览。
+
+    帧落在 ``DATA_DIR/pets/<job_id>/frames/`` 下，不在静态目录里、也不放开任意路径：
+    只认已知动作名 + 正整数帧号，且必须先通过任务与租户校验。
+    """
+    task = _require_task(task_id, request)
+    job = _require_pet_job(task, job_id)
+    blob = pet_frame_bytes(job, action, index)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="该帧不存在（作业未完成或帧号超出范围）")
+    return Response(content=blob, media_type="image/png")
+
+
+@router.get("/tasks/{task_id}/pets/{job_id}/package")
+def pet_package(task_id: str, request: Request, job_id: str) -> FileResponse:
+    """下载宠物包 zip（pet.json + frames + README + 运行器）。"""
+    task = _require_task(task_id, request)
+    job = _require_pet_job(task, job_id)
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="作业尚未完成，宠物包不可下载")
+    try:
+        archive = build_pet_package(job)
+    except (ValueError, OSError) as error:
+        raise HTTPException(status_code=500, detail=f"宠物包装配失败：{error}") from error
+    return FileResponse(
+        archive,
+        media_type="application/zip",
+        filename=f"{job.get('name') or 'pet'}-{job_id}.zip",
+    )
+
+
+# ------------------------------------------------------------------ #
+# 创作技能提炼（旁路作业：作品 → 可复用 SKILL 包 → 可沉淀记忆库）        #
+# ------------------------------------------------------------------ #
+
+
+def _require_skill_job(task: TaskRecord, job_id: str) -> dict[str, Any]:
+    """按租户取该任务名下的技能作业；跨租户与不存在同为 404（不泄露他人作业 id）。"""
+    job = get_skillgen_job(job_id, tenant=task.tenant)
+    if job is None or str(job.get("task_id")) != task.id:
+        raise HTTPException(status_code=404, detail="未找到该技能提炼作业")
+    return job
+
+
+@router.post("/tasks/{task_id}/skills", status_code=201)
+def create_skill(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """为任务创建一个创作技能提炼作业（**开发样例**）。
+
+    任务里得先有「作品」：Brief.assets 的文档 / 字幕 / 成稿，或已产出的文案·视频脚本·
+    视频理解摘要，否则 409。``rules``（默认）离线把作品正文**真统计**成结构与节奏技能并
+    落盘 ``SKILL.md``；``llm`` 复用系统既有模型网关（``LLM_*``）做一次带判断力的提炼，
+    未配真实网关时**显式失败、绝不假装提炼**。
+    请求体可带 ``{"provider": "rules|llm"}``。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    provider = body.get("provider")
+    try:
+        job = create_skillgen_job(task, provider=provider if isinstance(provider, str) else "")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"task_id": task.id, "job": job}
+
+
+@router.get("/tasks/{task_id}/skills")
+def list_skills(task_id: str, request: Request) -> dict[str, Any]:
+    """读取任务的技能提炼作业列表（读取时惰性推进 rules 状态机并落盘技能文件）。"""
+    task = _require_task(task_id, request)
+    jobs = list_skillgen_jobs(task_id=task.id, tenant=task.tenant)
+    return {
+        "task_id": task.id,
+        "has_materials": has_materials(task),
+        "jobs": jobs,
+    }
+
+
+@router.get("/tasks/{task_id}/skills/{job_id}/document")
+def skill_doc(task_id: str, request: Request, job_id: str) -> Response:
+    """回传 SKILL.md 正文（供界面预览与复制；只认作业自己的目录，不放开任意路径）。"""
+    task = _require_task(task_id, request)
+    job = _require_skill_job(task, job_id)
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="作业尚未完成，没有技能正文")
+    return Response(content=skill_document(job), media_type="text/markdown; charset=utf-8")
+
+
+@router.get("/tasks/{task_id}/skills/{job_id}/package")
+def skill_package(task_id: str, request: Request, job_id: str) -> FileResponse:
+    """下载技能包 zip（SKILL.md + skill.json + README.md，可直接放进 skills 目录）。"""
+    task = _require_task(task_id, request)
+    job = _require_skill_job(task, job_id)
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="作业尚未完成，技能包不可下载")
+    try:
+        archive = build_skill_package(job)
+    except (ValueError, OSError) as error:
+        raise HTTPException(status_code=500, detail=f"技能包装配失败：{error}") from error
+    name = str((job.get("skill") or {}).get("name") or "skill")
+    return FileResponse(archive, media_type="application/zip", filename=f"{name}-{job_id}.zip")
+
+
+@router.post("/tasks/{task_id}/skills/apply")
+def apply_skill(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """把某个已完成的技能**沉淀进记忆库**（``template`` 卡片），供后续任务检索复用。
+
+    与「注入 Brief」同为显式动作：技能不落黑板、不自动改写流水线。幂等由记忆库的
+    内容指纹保证——同一技能重复沉淀返回 ``added=0``。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    job = _require_skill_job(task, str(body.get("job_id") or ""))
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="作业尚未完成，无可沉淀的技能")
+    card = skill_memory_card(job)
+    if not card["content"]:
+        raise HTTPException(status_code=409, detail="该作业没有可用的技能正文")
+    added = memory_store.remember(
+        task_id=task.id,
+        brand=task.brief.brand,
+        channel=task.brief.channel,
+        industry=task.brief.industry,
+        tenant=task.tenant,
+        language=task.brief.language,
+        cards=[card],
+    )
+    return {"ok": True, "task_id": task.id, "added": added, "title": card["title"]}
 
 
 @router.get("/tasks/{task_id}/blackboard")

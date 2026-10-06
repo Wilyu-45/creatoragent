@@ -148,6 +148,7 @@
 | 使用操作、配置项、评估/回归/排障步骤 | `USER_GUIDE.md` | 链接 |
 | 工程约定与历史教训 | `ENGINEERING_PRINCIPLES.md` | 链接 |
 | 存储契约（实体 / 签名 / 不变量 / 替换映射） | `storage_contract.md` | 链接 |
+| 旁路能力接入样例与前端工场（通道、界面用法、失败边界） | `capability_samples.md` | 链接 |
 | 部署方案、清单与升级流程 | `DEPLOYMENT.md` | 链接 |
 | 未完成开发待办、非显然的设计决策 | `MEMORY.md` | 链接 |
 | 门面、快速开始、验证命令、上线前人工事项、文档导航 | `README.md` | — |
@@ -179,6 +180,7 @@
 | `plan.md` | 400 行 |
 | `ENGINEERING_PRINCIPLES.md` | 220 行 |
 | `storage_contract.md` | 250 行 |
+| `capability_samples.md` | 200 行 |
 | `DEPLOYMENT.md` | 250 行 |
 | `MEMORY.md` | 250 行 |
 

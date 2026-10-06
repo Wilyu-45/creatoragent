@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.types import AgentResult, GateResult
+from ..knowledge.copyright import copyright_checklist
 from ..knowledge.language import compliance_coverage
 from ..tools import run_agent_tools
 from .base import (
@@ -163,9 +164,35 @@ def run(ctx: AgentRunContext) -> AgentResult:
     else:
         verdict = "revise"
 
+    # 二创版权补位：解说/影视/游戏类作品的核心红线是著作权，不在广告法词库射程内。
+    # 结构化清单叠加进合规报告，并把每条风险转成 hits，让报告与产物都体现版权维度。
+    review_text = f"{as_str(target.get('title'))}\n{as_str(target.get('body'))}"
+    copyright_review = copyright_checklist(brief.model_dump(mode="json"), review_text)
+    content["copyright"] = copyright_review
+    if copyright_review["applies"]:
+        for item in copyright_review["items"]:
+            content["hits"].append(
+                {
+                    "severity": as_str(item.get("severity"), "major"),
+                    "category": "二创版权",
+                    "term": as_str(item.get("topic")),
+                    "detail": as_str(item.get("risk")),
+                    "suggestion": as_str(item.get("suggestion")),
+                    "law": "著作权/信息网络传播权（合理使用需个案判断）",
+                }
+            )
+        summary["major"] = summary["major"] + sum(
+            1 for item in copyright_review["items"] if item.get("severity") == "major"
+        )
+        summary["minor"] = summary["minor"] + sum(
+            1 for item in copyright_review["items"] if item.get("severity") == "minor"
+        )
+        content["summary"] = summary
+
     ctx.emit(
-        f"合规扫描完成：阻断 {summary['blocker']} 项、重要 {summary['major']} 项，风险等级 {risk_level}",
-        {"risk_level": risk_level, "verdict": verdict},
+        f"合规扫描完成：阻断 {summary['blocker']} 项、重要 {summary['major']} 项，风险等级 {risk_level}"
+        + ("；触发二创版权清单" if copyright_review["applies"] else ""),
+        {"risk_level": risk_level, "verdict": verdict, "copyright": copyright_review["applies"]},
     )
 
     artifact = build_artifact(
@@ -199,6 +226,20 @@ def run(ctx: AgentRunContext) -> AgentResult:
             extra_risks.append(
                 f"商业推广须显式标注 {coverage['ad_disclosure_text']}（当地强制要求）"
             )
+
+    # 解说/二创版权：是否构成合理使用属法律个案判断，机器不裁定，一律强制人工复核，
+    # 并把清单里的每条风险写进 risks（诚实告知待核，而非静默放行）。
+    if copyright_review["needs_human_review"]:
+        needs_human = True
+        extra_risks.append(
+            f"[二创版权] {copyright_review['message']}：" + "；".join(
+                as_str(item.get("topic")) for item in copyright_review["items"][:6]
+            )
+        )
+        for item in copyright_review["items"]:
+            suggestion = as_str(item.get("suggestion"))
+            if suggestion:
+                extra_risks.append(f"[版权整改·{as_str(item.get('topic'))}] {suggestion}")
 
     return build_result(
         ctx,

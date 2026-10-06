@@ -4,12 +4,17 @@ import { ApprovalPanel } from './components/ApprovalPanel.tsx';
 import { ArtifactViewer } from './components/ArtifactViewer.tsx';
 import { BriefForm } from './components/BriefForm.tsx';
 import { DigitalHumanPanel } from './components/DigitalHumanPanel.tsx';
+import { DesktopPetPanel } from './components/DesktopPetPanel.tsx';
+import { ImageGenPanel } from './components/ImageGenPanel.tsx';
+import { VideoGenPanel } from './components/VideoGenPanel.tsx';
+import { VideoUnderstandPanel } from './components/VideoUnderstandPanel.tsx';
 import { JudgePanel } from './components/JudgePanel.tsx';
 import { MetricsPanel } from './components/MetricsPanel.tsx';
 import { MotionStudio } from './components/MotionStudio.tsx';
 import { Pipeline } from './components/Pipeline.tsx';
 import { PublishPanel } from './components/PublishPanel.tsx';
 import { Scorecard } from './components/Scorecard.tsx';
+import { SkillStudioPanel } from './components/SkillStudioPanel.tsx';
 import { SettingsDrawer } from './components/SettingsDrawer.tsx';
 import { TaskList } from './components/TaskList.tsx';
 import { Timeline } from './components/Timeline.tsx';
@@ -354,6 +359,16 @@ export function App() {
               <PublishPanel task={detail.task} onChanged={handlePublishChanged} onToast={showToast} />
 
               <DigitalHumanPanel task={detail.task} onToast={showToast} />
+
+              <ImageGenPanel task={detail.task} onToast={showToast} />
+
+              <VideoGenPanel task={detail.task} onToast={showToast} />
+
+              <VideoUnderstandPanel task={detail.task} onToast={showToast} onChanged={handlePublishChanged} />
+
+              <DesktopPetPanel task={detail.task} onToast={showToast} />
+
+              <SkillStudioPanel task={detail.task} onToast={showToast} onChanged={handlePublishChanged} />
 
               <div className="tabs" style={{ marginTop: 16 }}>
                 {TABS.map((item) => (

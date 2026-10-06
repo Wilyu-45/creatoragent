@@ -45,6 +45,27 @@ CHECKPOINT_FILE = DATA_DIR / "checkpoints.sqlite"
 LLMProviderName = Literal["mock", "openai"]
 #: 数字人渲染提供方：sample = 内置样例引擎（离线可跑）；http = 通用 HTTP 适配样例
 DigitalHumanProviderName = Literal["sample", "http"]
+#: 图片生成提供方（开发样例，见 core/imagegen.py）：
+#: sample = 内置离线样例引擎（不产真图、只出清单）；openai = OpenAI 协议 /images/generations
+#: （覆盖经网关的即梦/通义万相/Replicate 等云端模型）；local = 本地图生网关
+#: （A1111/SD-WebUI 的 /sdapi/v1/txt2img 同步接口，私网端点计 0 元）
+ImageGenProviderName = Literal["sample", "openai", "local"]
+#: 视频生成提供方（开发样例，见 core/videogen.py）：sample = 内置离线样例；
+#: http = 「POST 建任务 → GET 查状态」最小契约的任意网关（云端可灵/即梦/Runway 或自建
+#: 本地渲染农场均可，厂商私有协议由你的网关层消化，与数字人同一取舍）
+VideoGenProviderName = Literal["sample", "http"]
+#: 视频理解提供方（开发样例，见 core/videounderstand.py）：
+#: sample = 内置离线样例（不调网关、只出带 simulated 标记的占位视觉摘要骨架）；
+#: real = 整集视频交给**原生支持视频输入的理解网关**（一集一次调用）真理解，未配网关即显式失败
+VideoUnderstandProviderName = Literal["sample", "real"]
+#: 桌面宠物提供方（见 core/petgen.py）：sample = 内置离线样例引擎，用纯标准库
+#: PNG 编码器画出真实可用的动作帧（简笔形象、非美术稿）；imagegen = 复用
+#: IMAGEGEN_* 端点逐帧出真图（跨帧形象一致性由 prompt 承担，未做切帧/对齐后处理）
+PetGenProviderName = Literal["sample", "imagegen"]
+#: 创作技能提炼提供方（见 core/skillgen.py）：rules = 零依赖量化提炼（真统计作品正文的句长 /
+#: 段落 / 语速，不含模型推理出的风格判断，产物 simulated=true）；llm = 走**系统既有模型网关**
+#: （LLM_*，不另持端点与密钥）做一次结构化提炼，未配真实网关即显式失败
+SkillGenProviderName = Literal["rules", "llm"]
 EmbeddingProviderName = Literal["local", "openai"]
 JudgeModeName = Literal["off", "advisory", "blocking"]
 JudgeProviderName = Literal["offline", "llm"]
@@ -214,6 +235,121 @@ class DigitalHumanSettings:
 
 
 @dataclass
+class ImageGenSettings:
+    """图片生成接入设置（开发样例，见 ``app/core/imagegen.py``）。
+
+    图片生成**不在本系统内实现**：各家文生图服务的授权、计费与返回结构差异极大，
+    这里只提供接入样例，让联调在采购任何服务之前就能发生：
+
+    * ``sample``（默认）：离线确定性模拟「排队 → 生成 → 完成」，按 ``visual_brief``
+      的 image_prompts 生成**生成清单**（不产真图）；
+    * ``openai``：对接 OpenAI 协议 ``POST {base_url}/images/generations``（兼容经网关的
+      即梦/通义万相/Replicate 等云端模型）；
+    * ``local``：对接本地图生网关的 ``POST {base_url}/sdapi/v1/t2i txt2img`` 同步接口
+      （A1111 / SD-WebUI；ComfyUI 需前置一个同构的同步网关）。
+
+    未配置真实端点时 **显式失败，绝不假装成功**。
+    """
+
+    provider: ImageGenProviderName = "sample"
+    #: openai/local 的端点根地址（openai 自动补 /images/generations，local 补 /sdapi/v1/txt2img）
+    base_url: str = ""
+    #: 鉴权密钥（openai 以 Bearer 拼接；local 可选）
+    api_key: str = ""
+    #: 模型标识（openai 生效；留空用网关默认）
+    model: str = ""
+    #: 出图尺寸（openai size 字段，如 1024x1024；local 用作宽高）
+    size: str = "1024x1024"
+    #: 单次作业最多生成的提示词数（图生按张计费，防止一次把整批分镜都烧出去）
+    max_images: int = 4
+    #: 单次生成请求超时（毫秒）
+    timeout_ms: int = 60_000
+
+
+@dataclass
+class VideoGenSettings:
+    """视频生成接入设置（开发样例，见 ``app/core/videogen.py``）。
+
+    与数字人渲染同一哲学：系统不绑任何厂商，只提供「POST 建任务 → GET 查状态」
+    最小契约的接入样例。
+
+    * ``sample``（默认）：离线确定性模拟生命周期，按 ``video_script`` 分镜生成**渲染清单**；
+    * ``http``：按 ``VIDEOGEN_API_URL`` 启用，云端视频网关或自建本地渲染农场均可。
+    """
+
+    provider: VideoGenProviderName = "sample"
+    #: http 样例适配器的建任务端点（POST）；为空时 http provider 直接报「未配置」
+    api_url: str = ""
+    #: 调用上述端点的鉴权头（以 ``Bearer `` 前缀拼接）
+    api_key: str = ""
+    #: http 样例适配器的单次轮询超时（毫秒）
+    timeout_ms: int = 30_000
+
+
+@dataclass
+class VideoUnderstandSettings:
+    """视频理解接入设置（开发样例，见 ``app/core/videounderstand.py``）。
+
+    「看懂画面」的推理不在本系统内实现：本通道把**整集视频**交给**原生支持视频输入的
+    理解网关**（一集=一次调用，成本可控、贴「逐集理解再创作」节奏），由网关返回
+    结构化视觉摘要。与视频生成同一「POST 建任务 → GET 查状态」最小契约范式。
+
+    * ``sample``（默认）：离线确定性推进生命周期并产出**带 simulated 标记的占位摘要
+      骨架**（不调网关，保证联调与回归）；
+    * ``real``：按 ``VIDEOUNDERSTAND_API_URL`` 提交整集视频、惰性轮询取回摘要；任一前置
+      （无视频素材 / 未配网关 / 视频非 assets/ 本地文件 / 成本超预算）不满足即**显式失败，
+      绝不假装看懂**。
+
+    系统不搬运大文件：只把 ``assets/`` 内的视频引用交给网关自取（网关需与素材同机/可达）。
+    """
+
+    provider: VideoUnderstandProviderName = "sample"
+    #: real 样例的视频理解端点（POST 提交整集）；为空时 real provider 直接报「未配置」
+    api_url: str = ""
+    #: 调用上述端点的鉴权头（以 ``Bearer `` 前缀拼接）
+    api_key: str = ""
+    #: 提交/轮询的单次请求超时（毫秒）
+    timeout_ms: int = 120_000
+
+
+@dataclass
+class PetGenSettings:
+    """桌面宠物生成设置（开发样例，见 ``app/core/petgen.py``）。
+
+    * ``sample``（默认，零依赖）：离线确定性推进，并用纯标准库 PNG 编码器**画出真帧**
+      （简笔吉祥物，清单里 ``simulated=true``，不是真实美术稿）；
+    * ``imagegen``：复用 ``IMAGEGEN_*`` 端点（openai/local 协议）**逐帧**出图，
+      每帧一次调用，跨帧形象一致性由 prompt 承担。
+
+    出帧尺寸由通道决定：sample 帧按 ``size`` 绘制；真实帧的尺寸归网关，运行器降采样显示。
+    """
+
+    provider: PetGenProviderName = "sample"
+    #: sample 帧的边长（像素，正方形）。属性名不叫 ``size``：``_apply_flat`` 按属性名
+    #: 夹紧，而 image_gen.size 是字符串（"1024x1024"），同名会把两处一起搞坏
+    frame_size: int = 96
+    #: 单次作业的帧数上限（真实通道按帧计费，防止一次把整套动作都烧出去）
+    max_frames: int = 16
+    #: imagegen 通道单帧请求超时（毫秒）
+    timeout_ms: int = 60_000
+
+
+@dataclass
+class SkillGenSettings:
+    """创作技能提炼设置（开发样例，见 ``app/core/skillgen.py``）。
+
+    * ``rules``（默认，零依赖、零 token）：将作品正文**真统计**成结构与节奏技能，
+      不含模型推理出的风格判断（产物 ``simulated=true`` 并写明这一点）；
+    * ``llm``：复用系统既有模型网关（``LLM_*``）做一次结构化提炼——不另持端点与密钥，
+      避免两处配置漂移；``LLM_PROVIDER=mock`` 时**显式失败，绝不假装提炼**。
+    """
+
+    provider: SkillGenProviderName = "rules"
+    #: 单个作业最多纳入的作品份数（统计与提示词都按此截断，超出如实记入 issues）
+    max_works: int = 12
+
+
+@dataclass
 class SearchSettings:
     """联网检索接入设置（A1/A2/A6/A10 的 ``web_search`` / ``page_fetch`` 工具）。
 
@@ -295,6 +431,11 @@ class RuntimeConfig:
     publish: PublishSettings = field(default_factory=PublishSettings)
     judge: JudgeSettings = field(default_factory=JudgeSettings)
     digital_human: DigitalHumanSettings = field(default_factory=DigitalHumanSettings)
+    image_gen: ImageGenSettings = field(default_factory=ImageGenSettings)
+    video_gen: VideoGenSettings = field(default_factory=VideoGenSettings)
+    video_understand: VideoUnderstandSettings = field(default_factory=VideoUnderstandSettings)
+    pet_gen: PetGenSettings = field(default_factory=PetGenSettings)
+    skill_gen: SkillGenSettings = field(default_factory=SkillGenSettings)
     search: SearchSettings = field(default_factory=SearchSettings)
     tracing: TracingSettings = field(default_factory=TracingSettings)
 
@@ -380,6 +521,37 @@ def _build_config() -> RuntimeConfig:
             avatar=(os.environ.get("DIGITAL_HUMAN_AVATAR") or "").strip(),
             timeout_ms=max(1_000, _int(os.environ.get("DIGITAL_HUMAN_TIMEOUT_MS"), 10_000)),
         ),
+        image_gen=ImageGenSettings(
+            provider=_image_gen_provider(),
+            base_url=(os.environ.get("IMAGEGEN_BASE_URL") or "").strip(),
+            api_key=(os.environ.get("IMAGEGEN_API_KEY") or "").strip(),
+            model=(os.environ.get("IMAGEGEN_MODEL") or "").strip(),
+            size=(os.environ.get("IMAGEGEN_SIZE") or "1024x1024").strip() or "1024x1024",
+            max_images=min(8, max(1, _int(os.environ.get("IMAGEGEN_MAX_IMAGES"), 4))),
+            timeout_ms=max(1_000, _int(os.environ.get("IMAGEGEN_TIMEOUT_MS"), 60_000)),
+        ),
+        video_gen=VideoGenSettings(
+            provider=_video_gen_provider(),
+            api_url=(os.environ.get("VIDEOGEN_API_URL") or "").strip(),
+            api_key=(os.environ.get("VIDEOGEN_API_KEY") or "").strip(),
+            timeout_ms=max(1_000, _int(os.environ.get("VIDEOGEN_TIMEOUT_MS"), 30_000)),
+        ),
+        video_understand=VideoUnderstandSettings(
+            provider=_video_understand_provider(),
+            api_url=(os.environ.get("VIDEOUNDERSTAND_API_URL") or "").strip(),
+            api_key=(os.environ.get("VIDEOUNDERSTAND_API_KEY") or "").strip(),
+            timeout_ms=max(1_000, _int(os.environ.get("VIDEOUNDERSTAND_TIMEOUT_MS"), 120_000)),
+        ),
+        pet_gen=PetGenSettings(
+            provider=_pet_gen_provider(),
+            frame_size=min(192, max(32, _int(os.environ.get("PETGEN_FRAME_SIZE"), 96))),
+            max_frames=min(24, max(1, _int(os.environ.get("PETGEN_MAX_FRAMES"), 16))),
+            timeout_ms=max(1_000, _int(os.environ.get("PETGEN_TIMEOUT_MS"), 60_000)),
+        ),
+        skill_gen=SkillGenSettings(
+            provider=_skill_gen_provider(),
+            max_works=min(20, max(1, _int(os.environ.get("SKILLGEN_MAX_WORKS"), 12))),
+        ),
         search=SearchSettings(
             provider=_search_provider(),
             api_url=(os.environ.get("WEB_SEARCH_API_URL") or "").strip(),
@@ -418,6 +590,31 @@ def _embedding_provider() -> str:
 def _digital_human_provider() -> str:
     raw = (os.environ.get("DIGITAL_HUMAN_PROVIDER") or "sample").strip().lower()
     return raw if raw in ("sample", "http") else "sample"
+
+
+def _image_gen_provider() -> str:
+    raw = (os.environ.get("IMAGEGEN_PROVIDER") or "sample").strip().lower()
+    return raw if raw in ("sample", "openai", "local") else "sample"
+
+
+def _video_gen_provider() -> str:
+    raw = (os.environ.get("VIDEOGEN_PROVIDER") or "sample").strip().lower()
+    return raw if raw in ("sample", "http") else "sample"
+
+
+def _video_understand_provider() -> str:
+    raw = (os.environ.get("VIDEOUNDERSTAND_PROVIDER") or "sample").strip().lower()
+    return raw if raw in ("sample", "real") else "sample"
+
+
+def _pet_gen_provider() -> str:
+    raw = (os.environ.get("PETGEN_PROVIDER") or "sample").strip().lower()
+    return raw if raw in ("sample", "imagegen") else "sample"
+
+
+def _skill_gen_provider() -> str:
+    raw = (os.environ.get("SKILLGEN_PROVIDER") or "rules").strip().lower()
+    return raw if raw in ("rules", "llm") else "rules"
 
 
 def _search_provider() -> str:
@@ -490,6 +687,27 @@ _FLAT_PERSIST_ENV: dict[str, str] = {
     "dhApiKey": "DIGITAL_HUMAN_API_KEY",
     "dhAvatar": "DIGITAL_HUMAN_AVATAR",
     "dhTimeoutMs": "DIGITAL_HUMAN_TIMEOUT_MS",
+    "imagegenProvider": "IMAGEGEN_PROVIDER",
+    "imagegenBaseUrl": "IMAGEGEN_BASE_URL",
+    "imagegenApiKey": "IMAGEGEN_API_KEY",
+    "imagegenModel": "IMAGEGEN_MODEL",
+    "imagegenSize": "IMAGEGEN_SIZE",
+    "imagegenMaxImages": "IMAGEGEN_MAX_IMAGES",
+    "imagegenTimeoutMs": "IMAGEGEN_TIMEOUT_MS",
+    "videogenProvider": "VIDEOGEN_PROVIDER",
+    "videogenApiUrl": "VIDEOGEN_API_URL",
+    "videogenApiKey": "VIDEOGEN_API_KEY",
+    "videogenTimeoutMs": "VIDEOGEN_TIMEOUT_MS",
+    "videounderstandProvider": "VIDEOUNDERSTAND_PROVIDER",
+    "videounderstandApiUrl": "VIDEOUNDERSTAND_API_URL",
+    "videounderstandApiKey": "VIDEOUNDERSTAND_API_KEY",
+    "videounderstandTimeoutMs": "VIDEOUNDERSTAND_TIMEOUT_MS",
+    "petgenProvider": "PETGEN_PROVIDER",
+    "petgenFrameSize": "PETGEN_FRAME_SIZE",
+    "petgenMaxFrames": "PETGEN_MAX_FRAMES",
+    "petgenTimeoutMs": "PETGEN_TIMEOUT_MS",
+    "skillgenProvider": "SKILLGEN_PROVIDER",
+    "skillgenMaxWorks": "SKILLGEN_MAX_WORKS",
     "searchProvider": "WEB_SEARCH_PROVIDER",
     "searchApiUrl": "WEB_SEARCH_API_URL",
     "searchApiKey": "WEB_SEARCH_API_KEY",
@@ -561,6 +779,11 @@ def _load_persisted_settings() -> None:
         ("publish", "publish"),
         ("judge", "judge"),
         ("digitalHuman", "dh"),
+        ("imageGen", "imagegen"),
+        ("videoGen", "videogen"),
+        ("videoUnderstand", "videounderstand"),
+        ("petGen", "petgen"),
+        ("skillGen", "skillgen"),
         ("search", "search"),
         ("tracing", "tracing"),
     ):
@@ -649,6 +872,37 @@ def save_persisted_settings() -> None:
                 "apiKey": c.digital_human.api_key,
                 "avatar": c.digital_human.avatar,
                 "timeoutMs": c.digital_human.timeout_ms,
+            },
+            "imageGen": {
+                "provider": c.image_gen.provider,
+                "baseUrl": c.image_gen.base_url,
+                "apiKey": c.image_gen.api_key,
+                "model": c.image_gen.model,
+                "size": c.image_gen.size,
+                "maxImages": c.image_gen.max_images,
+                "timeoutMs": c.image_gen.timeout_ms,
+            },
+            "videoGen": {
+                "provider": c.video_gen.provider,
+                "apiUrl": c.video_gen.api_url,
+                "apiKey": c.video_gen.api_key,
+                "timeoutMs": c.video_gen.timeout_ms,
+            },
+            "videoUnderstand": {
+                "provider": c.video_understand.provider,
+                "apiUrl": c.video_understand.api_url,
+                "apiKey": c.video_understand.api_key,
+                "timeoutMs": c.video_understand.timeout_ms,
+            },
+            "petGen": {
+                "provider": c.pet_gen.provider,
+                "frameSize": c.pet_gen.frame_size,
+                "maxFrames": c.pet_gen.max_frames,
+                "timeoutMs": c.pet_gen.timeout_ms,
+            },
+            "skillGen": {
+                "provider": c.skill_gen.provider,
+                "maxWorks": c.skill_gen.max_works,
             },
             "search": {
                 "provider": c.search.provider,
@@ -808,6 +1062,57 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
     )
     _apply_flat(
         patch,
+        _config.image_gen,
+        {
+            "imagegenProvider": ("provider", ("sample", "openai", "local")),
+            "imagegenBaseUrl": ("base_url", None),
+            "imagegenApiKey": ("api_key", None),
+            "imagegenModel": ("model", None),
+            "imagegenSize": ("size", None),
+            "imagegenMaxImages": ("max_images", None),
+            "imagegenTimeoutMs": ("timeout_ms", None),
+        },
+    )
+    _apply_flat(
+        patch,
+        _config.video_gen,
+        {
+            "videogenProvider": ("provider", ("sample", "http")),
+            "videogenApiUrl": ("api_url", None),
+            "videogenApiKey": ("api_key", None),
+            "videogenTimeoutMs": ("timeout_ms", None),
+        },
+    )
+    _apply_flat(
+        patch,
+        _config.video_understand,
+        {
+            "videounderstandProvider": ("provider", ("sample", "real")),
+            "videounderstandApiUrl": ("api_url", None),
+            "videounderstandApiKey": ("api_key", None),
+            "videounderstandTimeoutMs": ("timeout_ms", None),
+        },
+    )
+    _apply_flat(
+        patch,
+        _config.pet_gen,
+        {
+            "petgenProvider": ("provider", ("sample", "imagegen")),
+            "petgenFrameSize": ("frame_size", None),
+            "petgenMaxFrames": ("max_frames", None),
+            "petgenTimeoutMs": ("timeout_ms", None),
+        },
+    )
+    _apply_flat(
+        patch,
+        _config.skill_gen,
+        {
+            "skillgenProvider": ("provider", ("rules", "llm")),
+            "skillgenMaxWorks": ("max_works", None),
+        },
+    )
+    _apply_flat(
+        patch,
         _config.search,
         {
             "searchProvider": ("provider", ("none", "http")),
@@ -858,6 +1163,16 @@ def _apply_flat(patch: dict[str, Any], target: Any, mapping: dict[str, tuple[str
             value = max(1_000, int(value))
         elif attr == "max_pages":
             value = min(10, max(0, int(value)))
+        elif attr == "frame_size":
+            value = min(192, max(32, int(value)))
+        elif attr == "max_frames":
+            value = min(24, max(1, int(value)))
+        elif attr == "max_images":
+            value = min(8, max(1, int(value)))
+        elif attr == "max_works":
+            value = min(20, max(1, int(value)))
+        elif attr == "max_frames":
+            value = min(64, max(1, int(value)))
         elif attr == "sample_ratio":
             value = min(1.0, max(0.0, float(value)))
         setattr(target, attr, value)
@@ -969,6 +1284,61 @@ def public_config() -> dict[str, Any]:
             "apiKeySet": len(digital_human.api_key) > 0,
             "apiKeyMasked": _mask(digital_human.api_key),
             "timeoutMs": digital_human.timeout_ms,
+        },
+        "imageGen": {
+            "provider": _config.image_gen.provider,
+            "baseUrl": _config.image_gen.base_url,
+            "model": _config.image_gen.model,
+            "size": _config.image_gen.size,
+            "maxImages": _config.image_gen.max_images,
+            "apiKey": "",
+            "apiKeySet": len(_config.image_gen.api_key) > 0,
+            "apiKeyMasked": _mask(_config.image_gen.api_key),
+            "timeoutMs": _config.image_gen.timeout_ms,
+            "configured": (
+                _config.image_gen.provider == "sample"
+                or bool(_config.image_gen.base_url)
+            ),
+        },
+        "videoGen": {
+            "provider": _config.video_gen.provider,
+            "apiUrl": _config.video_gen.api_url,
+            "apiKey": "",
+            "apiKeySet": len(_config.video_gen.api_key) > 0,
+            "apiKeyMasked": _mask(_config.video_gen.api_key),
+            "timeoutMs": _config.video_gen.timeout_ms,
+        },
+        "videoUnderstand": {
+            "provider": _config.video_understand.provider,
+            "apiUrl": _config.video_understand.api_url,
+            "apiKey": "",
+            "apiKeySet": len(_config.video_understand.api_key) > 0,
+            "apiKeyMasked": _mask(_config.video_understand.api_key),
+            "timeoutMs": _config.video_understand.timeout_ms,
+            "configured": (
+                _config.video_understand.provider == "sample"
+                or bool(_config.video_understand.api_url)
+            ),
+        },
+        "petGen": {
+            "provider": _config.pet_gen.provider,
+            "frameSize": _config.pet_gen.frame_size,
+            "maxFrames": _config.pet_gen.max_frames,
+            "timeoutMs": _config.pet_gen.timeout_ms,
+            # 真实通道的可用性由图片通道决定（桌宠不另持端点，避免两处配置漂移）
+            "configured": (
+                _config.pet_gen.provider == "sample"
+                or (_config.image_gen.provider != "sample" and bool(_config.image_gen.base_url))
+            ),
+        },
+        "skillGen": {
+            "provider": _config.skill_gen.provider,
+            "maxWorks": _config.skill_gen.max_works,
+            # llm 通道复用 LLM_*：网关没配好就是「不可用」，界面据此提示改走 rules
+            "configured": (
+                _config.skill_gen.provider == "rules"
+                or (_config.llm.provider == "openai" and bool(_config.llm.base_url))
+            ),
         },
         "search": {
             "provider": _config.search.provider,

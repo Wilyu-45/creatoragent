@@ -66,6 +66,27 @@ export function SettingsDrawer({
   const [dhAvatar, setDhAvatar] = useState(config.digitalHuman.avatar);
   const [dhApiKey, setDhApiKey] = useState('');
   const [dhTimeoutMs, setDhTimeoutMs] = useState(config.digitalHuman.timeoutMs);
+  const [imagegenProvider, setImagegenProvider] = useState(config.imageGen.provider);
+  const [imagegenBaseUrl, setImagegenBaseUrl] = useState(config.imageGen.baseUrl);
+  const [imagegenModel, setImagegenModel] = useState(config.imageGen.model);
+  const [imagegenSize, setImagegenSize] = useState(config.imageGen.size);
+  const [imagegenMaxImages, setImagegenMaxImages] = useState(config.imageGen.maxImages);
+  const [imagegenApiKey, setImagegenApiKey] = useState('');
+  const [imagegenTimeoutMs, setImagegenTimeoutMs] = useState(config.imageGen.timeoutMs);
+  const [videogenProvider, setVideogenProvider] = useState(config.videoGen.provider);
+  const [videogenApiUrl, setVideogenApiUrl] = useState(config.videoGen.apiUrl);
+  const [videogenApiKey, setVideogenApiKey] = useState('');
+  const [videogenTimeoutMs, setVideogenTimeoutMs] = useState(config.videoGen.timeoutMs);
+  const [videounderstandProvider, setVideounderstandProvider] = useState(config.videoUnderstand.provider);
+  const [videounderstandApiUrl, setVideounderstandApiUrl] = useState(config.videoUnderstand.apiUrl);
+  const [videounderstandApiKey, setVideounderstandApiKey] = useState('');
+  const [videounderstandTimeoutMs, setVideounderstandTimeoutMs] = useState(config.videoUnderstand.timeoutMs);
+  const [petgenProvider, setPetgenProvider] = useState(config.petGen.provider);
+  const [petgenFrameSize, setPetgenFrameSize] = useState(config.petGen.frameSize);
+  const [petgenMaxFrames, setPetgenMaxFrames] = useState(config.petGen.maxFrames);
+  const [petgenTimeoutMs, setPetgenTimeoutMs] = useState(config.petGen.timeoutMs);
+  const [skillgenProvider, setSkillgenProvider] = useState(config.skillGen.provider);
+  const [skillgenMaxWorks, setSkillgenMaxWorks] = useState(config.skillGen.maxWorks);
   const [searchProvider, setSearchProvider] = useState(config.search.provider);
   const [searchApiUrl, setSearchApiUrl] = useState(config.search.apiUrl);
   const [searchApiKey, setSearchApiKey] = useState('');
@@ -142,6 +163,24 @@ export function SettingsDrawer({
       dhApiUrl: dhApiUrl.trim(),
       dhAvatar: dhAvatar.trim(),
       dhTimeoutMs,
+      imagegenProvider,
+      imagegenBaseUrl: imagegenBaseUrl.trim(),
+      imagegenModel: imagegenModel.trim(),
+      imagegenSize: imagegenSize.trim(),
+      imagegenMaxImages,
+      imagegenTimeoutMs,
+      videogenProvider,
+      videogenApiUrl: videogenApiUrl.trim(),
+      videogenTimeoutMs,
+      videounderstandProvider,
+      videounderstandApiUrl: videounderstandApiUrl.trim(),
+      videounderstandTimeoutMs,
+      petgenProvider,
+      petgenFrameSize,
+      petgenMaxFrames,
+      petgenTimeoutMs,
+      skillgenProvider,
+      skillgenMaxWorks,
       searchProvider,
       searchApiUrl: searchApiUrl.trim(),
       searchMaxResults,
@@ -173,6 +212,9 @@ export function SettingsDrawer({
     if (apiKey.trim()) patch.apiKey = apiKey.trim();
     if (embeddingApiKey.trim()) patch.embeddingApiKey = embeddingApiKey.trim();
     if (dhApiKey.trim()) patch.dhApiKey = dhApiKey.trim();
+    if (imagegenApiKey.trim()) patch.imagegenApiKey = imagegenApiKey.trim();
+    if (videogenApiKey.trim()) patch.videogenApiKey = videogenApiKey.trim();
+    if (videounderstandApiKey.trim()) patch.videounderstandApiKey = videounderstandApiKey.trim();
     if (searchApiKey.trim()) patch.searchApiKey = searchApiKey.trim();
     // OTLP 鉴权头仅输入非空时携带（缺失 = 保留已存值，防止误清）
     if (tracingOtlpHeaders.trim()) patch.tracingOtlpHeaders = tracingOtlpHeaders.trim();
@@ -702,6 +744,249 @@ export function SettingsDrawer({
             <div className="muted small" style={{ marginTop: 6 }}>
               数字人渲染<strong>不在本系统内实现</strong>：HeyGen / D-ID / 腾讯智影等服务的协议差异由你在自己的网关层消化。
               任务产出视频脚本后，「数字人渲染」面板会出现创建入口；选 http 并填网关地址即对接自建渲染网关。
+            </div>
+
+            <div className="section-h">图片生成（开发样例）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>生成提供方</label>
+                <select
+                  value={imagegenProvider}
+                  onChange={(e) => setImagegenProvider(e.target.value as 'sample' | 'openai' | 'local')}
+                >
+                  <option value="sample">sample（内置样例引擎，只出清单不产真图）</option>
+                  <option value="openai">openai（OpenAI 协议 /images/generations）</option>
+                  <option value="local">local（A1111 / SD-WebUI 本机 txt2img）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>
+                  端点 URL{' '}
+                  {config.imageGen.apiKeySet ? (
+                    <Chip tone="tone-ok" mono>
+                      密钥已设置 {config.imageGen.apiKeyMasked}
+                    </Chip>
+                  ) : null}
+                </label>
+                <input
+                  value={imagegenBaseUrl}
+                  placeholder="https://... 或 http://127.0.0.1:7860"
+                  onChange={(e) => setImagegenBaseUrl(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>模型（openai 生效）</label>
+                <input value={imagegenModel} placeholder="留空用网关默认" onChange={(e) => setImagegenModel(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>出图尺寸</label>
+                <input value={imagegenSize} placeholder="1024x1024" onChange={(e) => setImagegenSize(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>单次最多生成张数</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={imagegenMaxImages}
+                  onChange={(e) => setImagegenMaxImages(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>超时（ms）</label>
+                <input type="number" value={imagegenTimeoutMs} onChange={(e) => setImagegenTimeoutMs(Number(e.target.value))} />
+              </div>
+              <div className="field">
+                <label>API Key</label>
+                <input
+                  type="password"
+                  value={imagegenApiKey}
+                  placeholder="留空表示不修改"
+                  onChange={(e) => setImagegenApiKey(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              图片生成<strong>不在本系统内实现</strong>，只提供可回归的接入样例：任务产出视觉指导（visual_brief）后，
+              「图片生成」面板会出现创建入口；local 私网端点按 0 元计。未配端点时 openai/local 通道<strong>显式失败、不假装成功</strong>。
+            </div>
+
+            <div className="section-h">视频生成（开发样例）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>生成提供方</label>
+                <select
+                  value={videogenProvider}
+                  onChange={(e) => setVideogenProvider(e.target.value as 'sample' | 'http')}
+                >
+                  <option value="sample">sample（内置样例引擎，只出清单不产真片）</option>
+                  <option value="http">http（POST 建任务 → GET 查状态网关）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>
+                  网关 URL{' '}
+                  {config.videoGen.apiKeySet ? (
+                    <Chip tone="tone-ok" mono>
+                      密钥已设置 {config.videoGen.apiKeyMasked}
+                    </Chip>
+                  ) : null}
+                </label>
+                <input
+                  value={videogenApiUrl}
+                  placeholder="https://your-videogen-gateway/render"
+                  onChange={(e) => setVideogenApiUrl(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>超时（ms）</label>
+                <input type="number" value={videogenTimeoutMs} onChange={(e) => setVideogenTimeoutMs(Number(e.target.value))} />
+              </div>
+              <div className="field">
+                <label>网关 API Key</label>
+                <input
+                  type="password"
+                  value={videogenApiKey}
+                  placeholder="留空表示不修改"
+                  onChange={(e) => setVideogenApiKey(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              视频生成只按 <code>video_script</code> 分镜产出画面段（B-roll），<strong>不做拼接合成</strong>；
+              因生成昂贵，会按镜数估算并纳入<strong>成本预算熔断</strong>：超预算 fail-loud，本地私网端点计 0 元。
+            </div>
+
+            <div className="section-h">视频理解（开发样例）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>理解提供方</label>
+                <select
+                  value={videounderstandProvider}
+                  onChange={(e) => setVideounderstandProvider(e.target.value as 'sample' | 'real')}
+                >
+                  <option value="sample">sample（内置样例引擎，只出占位骨架不真理解）</option>
+                  <option value="real">real（整集视频 → 原生视频理解网关）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>
+                  网关 URL{' '}
+                  {config.videoUnderstand.apiKeySet ? (
+                    <Chip tone="tone-ok" mono>
+                      密钥已设置 {config.videoUnderstand.apiKeyMasked}
+                    </Chip>
+                  ) : null}
+                </label>
+                <input
+                  value={videounderstandApiUrl}
+                  placeholder="https://your-video-understanding-gateway/analyze"
+                  onChange={(e) => setVideounderstandApiUrl(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>超时（ms）</label>
+                <input type="number" value={videounderstandTimeoutMs} onChange={(e) => setVideounderstandTimeoutMs(Number(e.target.value))} />
+              </div>
+              <div className="field">
+                <label>网关 API Key</label>
+                <input
+                  type="password"
+                  value={videounderstandApiKey}
+                  placeholder="留空表示不修改"
+                  onChange={(e) => setVideounderstandApiKey(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              视频理解把<strong>整集视频</strong>交给<strong>原生支持视频输入的理解网关</strong>（一集=一次调用）产出该集视觉摘要；
+              系统只传 <code>assets/</code> 本地引用、<strong>不搬运大文件</strong>；未配网关或非本地视频时 real 通道<strong>如实失败、不假装看懂</strong>，
+              按集预估成本纳入<strong>预算熔断</strong>。
+            </div>
+
+            <div className="section-h">桌面宠物（开发样例）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>
+                  出帧提供方{' '}
+                  {config.petGen.configured ? (
+                    <Chip tone="tone-ok" mono>
+                      真实通道可用
+                    </Chip>
+                  ) : (
+                    <Chip tone="tone-bad" mono>
+                      图片端点未配置
+                    </Chip>
+                  )}
+                </label>
+                <select
+                  value={petgenProvider}
+                  onChange={(e) => setPetgenProvider(e.target.value as 'sample' | 'imagegen')}
+                >
+                  <option value="sample">sample（标准库离线画帧，零依赖）</option>
+                  <option value="imagegen">imagegen（复用图片生成端点逐帧出真图）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>帧边长（px）</label>
+                <input type="number" min={32} max={192} value={petgenFrameSize} onChange={(e) => setPetgenFrameSize(Number(e.target.value))} />
+              </div>
+              <div className="field">
+                <label>单次最多帧数</label>
+                <input type="number" min={1} max={24} value={petgenMaxFrames} onChange={(e) => setPetgenMaxFrames(Number(e.target.value))} />
+              </div>
+              <div className="field">
+                <label>出帧超时（ms）</label>
+                <input type="number" value={petgenTimeoutMs} onChange={(e) => setPetgenTimeoutMs(Number(e.target.value))} />
+              </div>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              桌宠<strong>不做抠图与 sprite sheet 切片</strong>：帧背景统一为透明键纯色，运行器按窗口
+              <code>-transparentcolor</code> 抠掉。<code>imagegen</code> 通道复用上面的{' '}
+              <code>IMAGEGEN_*</code> 端点与密钥<strong>逐帧</strong>出图（一帧=一次调用），
+              按帧数预估纳入<strong>成本预算熔断</strong>；未配置端点时<strong>显式失败、不假装出图</strong>。
+            </div>
+
+            <div className="section-h">创作技能提炼（开发样例）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>
+                  提炼通道{' '}
+                  {config.skillGen.configured ? (
+                    <Chip tone="tone-ok" mono>
+                      当前通道可用
+                    </Chip>
+                  ) : (
+                    <Chip tone="tone-bad" mono>
+                      LLM 网关未配置
+                    </Chip>
+                  )}
+                </label>
+                <select
+                  value={skillgenProvider}
+                  onChange={(e) => setSkillgenProvider(e.target.value as 'rules' | 'llm')}
+                >
+                  <option value="rules">rules（量化统计作品正文，零 token、不含风格判断）</option>
+                  <option value="llm">llm（复用上面的 LLM_* 网关做带判断力的提炼）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>单次最多作品数</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={skillgenMaxWorks}
+                  onChange={(e) => setSkillgenMaxWorks(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              技能从<strong>你自己的作品</strong>里提炼（Brief 的文档 / 字幕素材、已产出的文案与视频脚本、
+              视频理解摘要）。<code>rules</code> 通道句长 / 段落 / 语速等数字<strong>真统计</strong>自正文，
+              但不含模型判断，故产物标注 <code>simulated=true</code>；<code>llm</code> 通道一次=一次调用，
+              <strong>复用 </strong><code>LLM_*</code><strong> 端点与密钥、不新增配置</strong>，
+              预估成本纳入<strong>预算熔断</strong>，未配真实网关时<strong>显式失败、不假装提炼</strong>。
             </div>
 
             <div className="section-h">联网检索（可选，默认关闭）</div>

@@ -1196,6 +1196,759 @@ def check_digital_human() -> bool:
     return ok
 
 
+def check_imagegen() -> bool:
+    """校验图片生成样例：清单、惰性推进、租户隔离、未配置网关显式失败与回收。
+
+    与数字人同一原则：sample 零依赖可回归；openai/local 未配端点时**显式失败**，
+    绝不假装成功；无 visual_brief 时拒绝创建（路由层据此转 409）。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.core.imagegen import (
+        build_manifest,
+        create_job,
+        drop_task,
+        get_job,
+        list_jobs,
+    )
+    from app.core.types import Artifact, TaskRecord
+
+    print("\n[图片生成样例]")
+
+    visual = {
+        "image_prompts": [
+            {"id": "IMG1", "usage": "封面", "scene": "夜色霓虹", "prompt": "赛博朋克城市封面", "negative": "模糊", "aspect_ratio": "16:9"},
+            {"id": "IMG2", "usage": "B-roll", "scene": "战斗", "prompt": "主角挥剑特写", "aspect_ratio": "16:9"},
+            {"id": "IMG3", "usage": "分镜", "scene": "空镜", "prompt": "", "aspect_ratio": "16:9"},
+        ]
+    }
+    manifest = build_manifest(visual)
+    manifest_ok = (
+        len(manifest["segments"]) == 2
+        and any("没有 prompt" in w for w in manifest["warnings"])
+        and manifest["segments"][0]["prompt"] == "赛博朋克城市封面"
+    )
+    print(f"    生成清单：{len(manifest['segments'])} 张可生成｜告警 {len(manifest['warnings'])} 条｜{'正确' if manifest_ok else '异常'}")
+
+    task = TaskRecord(
+        id="doctor-img-1",
+        tenant="default",
+        artifacts=[Artifact(id="doctor-img-1-vb", task_id="doctor-img-1", type="visual_brief", content=visual)],
+    )
+    job = create_job(task, provider="sample")
+    base = datetime.now(timezone.utc)
+    queued = job["status"] == "queued"
+    mid = list_jobs(task_id=task.id, now=base + timedelta(seconds=1))
+    generating = len(mid) == 1 and mid[0]["status"] in ("queued", "generating")
+    final = list_jobs(task_id=task.id, now=base + timedelta(seconds=60))
+    done = (
+        len(final) == 1
+        and final[0]["status"] == "done"
+        and final[0]["progress"] == 100
+        and bool(final[0]["images"])
+        and str(final[0]["images"][0]["url"]).startswith("sample://")
+    )
+    lifecycle_ok = queued and generating and done
+    print(f"    样例引擎：排队={queued}｜推进={generating}｜完成出清单={done}")
+
+    visible = get_job(job["id"], tenant="default") is not None
+    leaked = get_job(job["id"], tenant="acme") is not None or bool(list_jobs(tenant="acme"))
+    tenant_ok = visible and not leaked
+    print(f"    租户隔离：本租户可见={visible}｜跨租户泄漏={leaked}")
+
+    task2 = TaskRecord(
+        id="doctor-img-2",
+        tenant="acme",
+        artifacts=[Artifact(id="doctor-img-2-vb", task_id="doctor-img-2", type="visual_brief", content=visual)],
+    )
+    job2 = create_job(task2, provider="openai")
+    http_ok = (
+        job2["status"] == "failed"
+        and "未配置" in str(job2["error"])
+        and "openai" in str(job2["error"])
+    )
+    print(f"    openai（未配端点）：status={job2['status']}｜error={str(job2['error'])[:40]}…")
+
+    # openai 只返回 b64_json（无 url）时应落盘 assets、不丢图；直连 url 那么透传（真实缺陷回归）
+    import base64 as _b64
+
+    from app.config import ASSETS_DIR
+    from app.core.imagegen import _openai_image
+
+    fake_b64 = _b64.b64encode(b"\x89PNG\r\n fake-bytes-for-selfcheck").decode()
+    persisted = _openai_image("doctor-img-b64", {"index": 1, "id": "IMGB"}, {"b64_json": fake_b64})
+    written = ASSETS_DIR / persisted["url"].split("/", 1)[1] if persisted["url"].startswith("assets/") else None
+    direct = _openai_image("doctor-img-b64", {"index": 2, "id": "IMGC"}, {"url": "https://cdn.example/x.png"})
+    b64_ok = (
+        persisted["url"].startswith("assets/")
+        and persisted["b64"] is True
+        and written is not None
+        and written.exists()
+        and direct["url"] == "https://cdn.example/x.png"
+    )
+    if written is not None and written.exists():
+        written.unlink()
+    print(f"    openai b64_json 落盘：b64→assets={persisted['url']}｜直连 url 透传={direct['url']}")
+
+    guard_ok = False
+    try:
+        create_job(TaskRecord(id="doctor-img-3", tenant="default"), provider="sample")
+    except ValueError:
+        guard_ok = True
+    print(f"    无 visual_brief 防护：拒绝创建={guard_ok}")
+
+    cleanup_ok = drop_task(task.id) >= 1 and drop_task(task2.id) >= 1
+    gone = not list_jobs(task_id=task.id) and not list_jobs(task_id=task2.id)
+    cleanup_ok = cleanup_ok and gone
+    print(f"    作业回收：recovered&清空={cleanup_ok}")
+
+    ok = manifest_ok and lifecycle_ok and tenant_ok and http_ok and b64_ok and guard_ok and cleanup_ok
+    if not ok:
+        print("    ! 图片生成样例异常：请检查 app/core/imagegen.py 的状态机与存储。")
+    return ok
+
+
+def check_videogen() -> bool:
+    """校验视频生成样例：复用分镜清单、惰性推进、未配置显式失败、成本熔断与回收。"""
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import get_config
+    from app.core.types import Artifact, TaskRecord
+    from app.core.videogen import create_job, drop_task, get_job, list_jobs
+
+    print("\n[视频生成样例]")
+
+    script = {
+        "channel": "B站",
+        "aspect_ratio": "16:9",
+        "duration_seconds": 120,
+        "shots": [
+            {"shot": 1, "role": "钩子", "start_second": 0, "duration_seconds": 60, "voiceover": "开场观点", "visual": "片头"},
+            {"shot": 2, "role": "论证", "start_second": 60, "duration_seconds": 60, "voiceover": "分析", "visual": "游戏画面"},
+        ],
+    }
+    task = TaskRecord(
+        id="doctor-vid-1",
+        tenant="default",
+        artifacts=[Artifact(id="doctor-vid-1-script", task_id="doctor-vid-1", type="video_script", content=script)],
+    )
+    job = create_job(task, provider="sample")
+    sample_ok = job["status"] == "queued" and job["shot_count"] == 2
+    base = datetime.now(timezone.utc)
+    final = list_jobs(task_id=task.id, now=base + timedelta(seconds=90))
+    done = (
+        len(final) == 1
+        and final[0]["status"] == "done"
+        and len(final[0]["segments_out"]) == 2
+        and str(final[0]["segments_out"][0]["url"]).startswith("sample://")
+    )
+    lifecycle_ok = sample_ok and done
+    print(f"    样例引擎：受理={sample_ok}｜按镜出画面段={done}")
+
+    visible = get_job(job["id"], tenant="default") is not None
+    leaked = get_job(job["id"], tenant="acme") is not None or bool(list_jobs(tenant="acme"))
+    tenant_ok = visible and not leaked
+    print(f"    租户隔离：本租户可见={visible}｜跨租户泄漏={leaked}")
+
+    task2 = TaskRecord(
+        id="doctor-vid-2",
+        tenant="acme",
+        artifacts=[Artifact(id="doctor-vid-2-script", task_id="doctor-vid-2", type="video_script", content=script)],
+    )
+    job2 = create_job(task2, provider="http")
+    http_ok = job2["status"] == "failed" and "未配置" in str(job2["error"])
+    print(f"    http（未配网关）：status={job2['status']}｜error={str(job2['error'])[:40]}…")
+
+    # 成本熔断：配一个远端网关 + 极低预算 → 受理时直接 fail-loud，不提交、不假装
+    cfg = get_config()
+    saved_url, saved_budget = cfg.video_gen.api_url, cfg.cost_budget_usd
+    try:
+        cfg.video_gen.api_url = "https://remote-videogen.example/api"
+        cfg.cost_budget_usd = 0.0001
+        task3 = TaskRecord(
+            id="doctor-vid-3",
+            tenant="default",
+            artifacts=[Artifact(id="doctor-vid-3-script", task_id="doctor-vid-3", type="video_script", content=script)],
+        )
+        job3 = create_job(task3, provider="http")
+        fuse_ok = job3["status"] == "failed" and "成本熔断" in str(job3["error"])
+    finally:
+        cfg.video_gen.api_url = saved_url
+        cfg.cost_budget_usd = saved_budget
+    print(f"    成本熔断（超预算）：fail-loud={fuse_ok}")
+
+    guard_ok = False
+    try:
+        create_job(TaskRecord(id="doctor-vid-4", tenant="default"), provider="sample")
+    except ValueError:
+        guard_ok = True
+    print(f"    无 video_script 防护：拒绝创建={guard_ok}")
+
+    cleanup_ok = drop_task(task.id) >= 1 and drop_task(task2.id) >= 1 and drop_task(task3.id) >= 1
+    gone = not list_jobs(task_id=task.id) and not list_jobs(task_id=task2.id) and not list_jobs(task_id=task3.id)
+    cleanup_ok = cleanup_ok and gone
+    print(f"    作业回收：recovered&清空={cleanup_ok}")
+
+    ok = lifecycle_ok and tenant_ok and http_ok and fuse_ok and guard_ok and cleanup_ok
+    if not ok:
+        print("    ! 视频生成样例异常：请检查 app/core/videogen.py 的状态机、成本口径与存储。")
+    return ok
+
+
+def check_video_understand() -> bool:
+    """校验视频理解样例：sample 生命周期与占位骨架、租户隔离、real 三条诚实失败
+    （未配网关 / 成本熔断 / 非本地或缺失视频）、无视频素材防护、本地路径边界与作业回收。
+
+    real 通道现走**整集异步网关**（提交→轮询），不再依赖本机 ffmpeg / 多模态 LLM；
+    故断言集中在「不触网、不假装看懂」的显式失败上（网关未配 / 预算 / 本地文件边界）。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import get_config
+    from app.core.types import Brief, BriefAsset, TaskRecord
+    from app.core.videounderstand import (
+        _estimate_cost,
+        _resolve_video_path,
+        create_job,
+        drop_task,
+        get_job,
+        has_video_asset,
+        list_jobs,
+    )
+
+    print("\n[视频理解样例]")
+
+    def _vu_task(tid: str, tenant: str = "default") -> TaskRecord:
+        brief = Brief(brand="测试", assets=[BriefAsset(kind="video", ref="doctor_vu.mp4", title="第一集")])
+        return TaskRecord(id=tid, tenant=tenant, brief=brief)
+
+    cfg = get_config()
+    saved_api_url = cfg.video_understand.api_url
+    saved_budget = cfg.cost_budget_usd
+    try:
+        cfg.video_understand.api_url = ""  # 默认样例态：无网关
+        task = _vu_task("doctor-vu-1")
+        job = create_job(task, provider="sample")
+        sample_accepted = job["status"] == "queued" and job["provider"] == "sample"
+        final = list_jobs(task_id=task.id, now=datetime.now(timezone.utc) + timedelta(seconds=90))
+        summary = (final[0].get("summary") or {}) if final else {}
+        sample_done = (
+            len(final) == 1
+            and final[0]["status"] == "done"
+            and summary.get("simulated") is True
+            and bool(summary.get("text_brief"))
+            and "_issues" not in final[0]
+        )
+        lifecycle_ok = sample_accepted and sample_done
+        print(f"    样例引擎：受理={sample_accepted}｜推进完成+占位骨架={sample_done}")
+
+        visible = get_job(job["id"], tenant="default") is not None
+        leaked = get_job(job["id"], tenant="acme") is not None
+        tenant_ok = visible and not leaked
+        print(f"    租户隔离：本租户可见={visible}｜跨租户泄漏={leaked}")
+
+        # real + 无网关（默认态）→ 必须显式失败于「未配置」，绝不触网、绝不假装看懂
+        real_mock = create_job(_vu_task("doctor-vu-2"), provider="real")
+        gateway_fail = real_mock["status"] == "failed" and "未配置" in str(real_mock["error"])
+        print(f"    real（未配网关）：status={real_mock['status']}｜error={str(real_mock['error'])[:34]}…")
+
+        guard_ok = False
+        try:
+            create_job(TaskRecord(id="doctor-vu-3", tenant="default", brief=Brief(brand="测试")), provider="sample")
+        except ValueError:
+            guard_ok = True
+        print(f"    无视频素材防护：拒绝创建={guard_ok}｜has_video_asset(有={has_video_asset(task)}/无={has_video_asset(TaskRecord(id='x', brief=Brief()))})")
+
+        # 成本熔断：配一个非本地网关 URL + 极低预算 → 提交前熔断（按整集一次调用预估）
+        cfg.video_understand.api_url = "https://vu-gateway.example.invalid/analyze"
+        cfg.cost_budget_usd = 0.000001
+        jf = create_job(_vu_task("doctor-vu-4"), provider="real")
+        fuse_ok = jf["status"] == "failed" and "成本熔断" in str(jf["error"])
+        print(f"    real 成本熔断：fail-loud={fuse_ok}｜error={str(jf['error'])[:34]}…")
+
+        # 本地文件边界：正常预算但 assets/ 下无该文件 → 提交前失败、绝不触网
+        cfg.cost_budget_usd = saved_budget
+        jfg = create_job(_vu_task("doctor-vu-5"), provider="real")
+        err5 = str(jfg["error"])
+        file_guard = jfg["status"] == "failed" and ("视频文件" in err5 or "本地视频" in err5)
+        print(f"    real 非本地/缺失视频防护：显式失败不触网={file_guard}")
+    finally:
+        cfg.video_understand.api_url = saved_api_url
+        cfg.cost_budget_usd = saved_budget
+
+    path_ok = _resolve_video_path("../secret.mp4")[0] is None and _resolve_video_path("nope.mp4")[0] is None
+    est_ok = _estimate_cost("sample") == 0.0 and _estimate_cost("real") == 0.0
+    print(f"    本地路径安全边界：越界/缺失拒绝={path_ok}｜sample 与无网关成本归零={est_ok}")
+
+    touched = ["doctor-vu-1", "doctor-vu-2", "doctor-vu-4", "doctor-vu-5"]
+    cleanup_ok = all(drop_task(t) >= 1 for t in touched)
+    gone = all(not list_jobs(task_id=t) for t in touched)
+    cleanup_ok = cleanup_ok and gone
+    print(f"    作业回收：recovered&清空={cleanup_ok}")
+
+    ok = (
+        lifecycle_ok
+        and tenant_ok
+        and gateway_fail
+        and guard_ok
+        and fuse_ok
+        and file_guard
+        and path_ok
+        and est_ok
+        and cleanup_ok
+    )
+    if not ok:
+        print("    ! 视频理解样例异常：请检查 app/core/videounderstand.py 的状态机、诚实失败与存储。")
+    return ok
+
+
+def check_petgen() -> bool:
+    """校验桌面宠物样例：清单与色板、sample **真落盘**的可运行宠物包、租户隔离、
+    imagegen 未配置显式失败与逐帧成本熔断、帧读取路径边界与作业回收。
+
+    与图片/视频生成同一原则，但多一条：sample 不只出清单，而是用纯标准库画出真 PNG 帧、
+    装成真 zip（交付形态本身要可回归）；同时 ``simulated=true`` 如实说明帧不是美术稿。
+    """
+    import json
+    import zipfile
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import get_config
+    from app.core.petgen import (
+        ACTIONS,
+        KEY_HEX,
+        PETS_DIR,
+        build_manifest,
+        build_package,
+        create_job,
+        drop_task,
+        frame_bytes,
+        get_job,
+        list_jobs,
+    )
+    from app.core.types import Artifact, TaskRecord
+
+    print("\n[桌面宠物样例]")
+
+    visual = {
+        "visual_direction": {
+            "style": "圆润扁平",
+            "mood": "治愈",
+            "palette": [{"hex": "#FF8A3D"}, {"hex": "#2E3A59"}, {"hex": "#F2E8DC"}],
+        },
+        "image_prompts": [
+            {"id": "IMG1", "usage": "封面", "prompt": "橙色仓鼠吉祥物全身像"},
+            {"id": "IMG2", "usage": "B-roll", "prompt": ""},
+        ],
+    }
+    picked = ["idle", "walk"]
+    cfg = get_config()
+    saved = (
+        cfg.pet_gen.max_frames,
+        cfg.image_gen.provider,
+        cfg.image_gen.base_url,
+        cfg.cost_budget_usd,
+    )
+    try:
+        cfg.pet_gen.max_frames = 16  # 帧数口径固定，避免环境夹帧让落盘断言随配置漂移
+        manifest = build_manifest(visual, provider="sample", brand="测试品牌", actions=picked)
+        want_frames = sum(ACTIONS[action]["frames"] for action in picked)
+        manifest_ok = (
+            manifest["actions"] == picked  # 未知动作被剔除、顺序按服务端动作目录
+            and manifest["frame_count"] == want_frames
+            and manifest["key_color"] == KEY_HEX
+            and manifest["size"] == cfg.pet_gen.frame_size
+            and manifest["palette"]["body"].upper() == "#FF8A3D"  # 色板优先跟随 visual_brief
+            and manifest["palette_source"] == "visual_brief"
+            and manifest["simulated"] is True
+            and all(segment["prompt"] for segment in manifest["segments"])
+        )
+        print(
+            f"    生成清单：{manifest['actions']}｜{manifest['frame_count']} 帧｜"
+            f"色板来源={manifest['palette_source']}｜{'正确' if manifest_ok else '异常'}"
+        )
+
+        def _pet_task(tid: str, tenant: str) -> TaskRecord:
+            return TaskRecord(
+                id=tid,
+                tenant=tenant,
+                artifacts=[
+                    Artifact(id=f"{tid}-vb", task_id=tid, type="visual_brief", content=visual)
+                ],
+            )
+
+        task = _pet_task("doctor-pet-1", "default")
+        job = create_job(task, provider="sample", name="小仓", actions=picked)
+        base = datetime.now(timezone.utc)
+        queued = job["status"] == "queued" and job["provider"] == "sample"
+        mid = list_jobs(task_id=task.id, now=base + timedelta(seconds=1))
+        generating = len(mid) == 1 and mid[0]["status"] in ("queued", "generating")
+        final = list_jobs(task_id=task.id, now=base + timedelta(seconds=120))
+        row = final[0] if final else {}
+        done = row.get("status") == "done" and row.get("progress") == 100
+        lifecycle_ok = queued and generating and done
+        print(f"    样例引擎：排队={queued}｜推进={generating}｜完成={done}")
+
+        # sample 必须真的把帧与包落盘：交付形态本身要能被回归，而不是只在内存里编一个清单
+        pet_dir = PETS_DIR / str(job["id"])
+        frames_dir = pet_dir / "frames"
+        on_disk = sorted(path.name for path in frames_dir.glob("*.png")) if frames_dir.is_dir() else []
+        png_ok = len(on_disk) == want_frames and all(
+            (frames_dir / name).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n" for name in on_disk
+        )
+        try:
+            pet_json = json.loads((pet_dir / "pet.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pet_json = {}
+        package_ok = (
+            pet_json.get("name") == "小仓"
+            and pet_json.get("key_color") == KEY_HEX
+            and pet_json.get("simulated") is True
+            and [action["name"] for action in pet_json.get("actions") or []] == picked
+            and sum(len(action["frames"]) for action in pet_json.get("actions") or []) == want_frames
+            and pet_json.get("runner") == "runner/pet.py"
+        )
+        readme = (pet_dir / "README.md")
+        readme_ok = readme.is_file() and "python" in readme.read_text(encoding="utf-8")
+        artifacts_ok = png_ok and package_ok and readme_ok and str(row.get("pet_ref", "")).startswith("pets/")
+        print(
+            f"    帧与包落盘：PNG {len(on_disk)}/{want_frames}｜pet.json 动作帧={package_ok}｜"
+            f"README={readme_ok}"
+        )
+
+        visible = get_job(job["id"], tenant="default") is not None
+        leaked = get_job(job["id"], tenant="acme") is not None or bool(list_jobs(tenant="acme"))
+        tenant_ok = visible and not leaked
+        print(f"    租户隔离：本租户可见={visible}｜跨租户泄漏={leaked}")
+
+        # 帧读取不放开任意路径：只认已知动作、正整数帧号，且必须仍在 pets/ 目录下
+        blob = frame_bytes(row, "idle", 1)
+        frame_ok = blob is not None and blob[:4] == b"\x89PNG"
+        refused = (
+            frame_bytes(row, "fly", 1) is None
+            and frame_bytes(row, "idle", 0) is None
+            and frame_bytes(row, "idle", want_frames + 9) is None
+            and frame_bytes({**row, "dir": "../assets"}, "idle", 1) is None
+        )
+        print(f"    帧读取边界：可读帧={frame_ok}｜未知动作/越界帧号/越界目录一律拒={refused}")
+
+        archive = build_package(row)
+        with zipfile.ZipFile(archive) as bundle:
+            names = bundle.namelist()
+        zip_ok = (
+            "pet.json" in names
+            and "README.md" in names
+            and "runner/pet.py" in names  # 包内自带运行器，脱离仓库也能跑
+            and sum(1 for name in names if name.startswith("frames/")) == want_frames
+        )
+        print(f"    宠物包 zip：{len(names)} 项｜含运行器={'runner/pet.py' in names}")
+
+        task2 = _pet_task("doctor-pet-2", "acme")
+        cfg.image_gen.provider = "sample"
+        cfg.image_gen.base_url = ""
+        unconfigured = create_job(task2, provider="imagegen", actions=picked)
+        honest_fail = (
+            unconfigured["status"] == "failed"
+            and "未配置" in str(unconfigured["error"])
+            and "imagegen" in str(unconfigured["error"])
+        )
+        print(f"    imagegen（未配端点）：status={unconfigured['status']}｜error={str(unconfigured['error'])[:32]}…")
+
+        # 成本熔断：逐帧计费 → 受理前按帧数预估，超预算不提交（attempts/submitted 保持为 0/False）
+        cfg.image_gen.provider = "openai"
+        cfg.image_gen.base_url = "https://imagegen.example.invalid/v1"
+        cfg.cost_budget_usd = 0.0001
+        fused = create_job(task2, provider="imagegen", actions=picked)
+        fuse_ok = (
+            fused["status"] == "failed"
+            and "成本熔断" in str(fused["error"])
+            and fused["estimated_cost_usd"] > 0
+            and not fused["attempts"]
+            and fused["submitted"] is False
+        )
+        print(
+            f"    imagegen 成本熔断：fail-loud 且未提交={fuse_ok}｜"
+            f"预估=${fused['estimated_cost_usd']:.2f}（{want_frames} 帧）"
+        )
+    finally:
+        (
+            cfg.pet_gen.max_frames,
+            cfg.image_gen.provider,
+            cfg.image_gen.base_url,
+            cfg.cost_budget_usd,
+        ) = saved
+
+    guard_ok = False
+    try:
+        create_job(TaskRecord(id="doctor-pet-3", tenant="default"), provider="sample")
+    except ValueError:
+        guard_ok = True
+    print(f"    无 visual_brief 防护：拒绝创建={guard_ok}")
+
+    touched = [task.id, task2.id]
+    cleanup_ok = all(drop_task(t) >= 1 for t in touched)
+    gone = all(not list_jobs(task_id=t) for t in touched)
+    dir_gone = not pet_dir.exists()  # 作业回收要连帧目录一起清掉，不留孤儿素材
+    cleanup_ok = cleanup_ok and gone and dir_gone
+    print(f"    作业回收：recovered={cleanup_ok}｜帧目录已清={dir_gone}")
+
+    ok = (
+        manifest_ok
+        and lifecycle_ok
+        and artifacts_ok
+        and tenant_ok
+        and frame_ok
+        and refused
+        and zip_ok
+        and honest_fail
+        and fuse_ok
+        and guard_ok
+        and cleanup_ok
+    )
+    if not ok:
+        print("    ! 桌面宠物样例异常：请检查 app/core/petgen.py 的状态机、帧落盘与诚实失败。")
+    return ok
+
+
+def check_skillgen() -> bool:
+    """校验创作技能提炼样例：作品采集口径（文档 / 字幕 / 文本产物，含伪字幕防误判）、
+    rules **真落盘**的 SKILL.md 结构、作品上限与租户隔离、llm 未配网关显式失败与成本熔断、
+    作业与技能目录回收。
+
+    这条通道的产品主张是「数字来自正文的真实统计」，所以断言只盯两件事：统计口径不能被
+    行内转述的时间戳带偏，产物必须真的落在 ``skills/`` 下（空转不写文件的约定同样要能回归）。
+    """
+    import json
+    import zipfile
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import get_config
+    from app.core.assets import ASSETS_DIR
+    from app.core.skillgen import (
+        SKILLS_DIR,
+        build_package,
+        collect_materials,
+        create_job,
+        drop_task,
+        get_job,
+        list_jobs,
+        profile_text,
+        skill_document,
+    )
+    from app.core.types import Artifact, Brief, BriefAsset, TaskRecord
+
+    print("\n[创作技能提炼样例]")
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    prose = (
+        "# 往期成稿：便携耳机\n\n"
+        "别急着买，先听完这三句。第一天就把话说完。\n"
+        "研读摘要里转述过上期字幕的时间戳：00:00:00,000 --> 00:00:03,500；"
+        "这种行内引用不是字幕文件，若被当成一条巨型字幕，全篇的段落与语速就一起失真了。\n"
+        "所以先把需求写下来再下单。\n"
+    )
+    srt = (
+        "1\n00:00:00,000 --> 00:00:03,500\n别急着买，先听完这三句\n\n"
+        "2\n00:00:03,500 --> 00:00:07,000\n我用三个月踩了三次坑才敢说这句话\n\n"
+        "3\n00:00:07,000 --> 00:00:12,000\n你不是需要它，你是需要它解决的问题\n"
+    )
+    copy_text = (
+        "第一天就把话说完：别急着买。\n"
+        "我把三次踩坑的顺序讲清楚，先给结论。\n"
+        "通勤路上连戴两小时不胀，这才是每天戴的前提。\n"
+        "所以先把需求写下来再下单。\n"
+    )
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    (ASSETS_DIR / "doctor_skill_prose.md").write_text(prose, encoding="utf-8")
+    (ASSETS_DIR / "doctor_skill_copy.srt").write_text(srt, encoding="utf-8")
+
+    def _skill_task(tid: str, tenant: str) -> TaskRecord:
+        return TaskRecord(
+            id=tid,
+            tenant=tenant,
+            brief=Brief(
+                brand="测试品牌",
+                channel="小红书",
+                keywords=["每天戴"],
+                constraints=["不得承诺疗效"],
+                assets=[
+                    BriefAsset(kind="document", ref="doctor_skill_prose.md", title="往期成稿"),
+                    BriefAsset(kind="document", ref="doctor_skill_copy.srt", title="上期口播字幕"),
+                ],
+            ),
+            artifacts=[
+                Artifact(id=f"{tid}-cd", task_id=tid, type="copy_draft", title="文案初稿", text=copy_text)
+            ],
+        )
+
+    cfg = get_config()
+    saved = (cfg.skill_gen.max_works, cfg.llm.provider, cfg.llm.base_url, cfg.cost_budget_usd)
+    try:
+        task = _skill_task("doctor-skill-1", "default")
+        works = collect_materials(task)["works"]
+        by_title = {work["title"]: work for work in works}
+        prose_profile = by_title.get("往期成稿", {}).get("profile", {})
+        srt_profile = by_title.get("上期口播字幕", {}).get("profile", {})
+        cues = srt_profile.get("subtitle") or {}
+        intake_ok = (
+            len(works) == 3
+            and any(str(work["origin"]) == "artifact:copy_draft" for work in works)
+            and "subtitle" not in prose_profile  # 行内时间戳不算字幕
+            and cues.get("cues") == 3
+            and float(cues.get("cue_len_median") or 99) <= 20
+            and float(cues.get("chars_per_minute") or 0) > 0
+        )
+        print(f"    作品采集：{len(works)} 份｜伪字幕未被当成字幕={intake_ok}")
+
+        probe = profile_text("你真的需要它吗？还是只是想要一个理由。\n")
+        stat_ok = probe["sentences"] == 2 and abs(probe["question_ratio"] - 0.5) < 1e-9
+        print(f"    断句口径：句数={probe['sentences']}｜疑问句占比={probe['question_ratio']}｜{'正确' if stat_ok else '异常'}")
+
+        job = create_job(task, provider="rules", now=base)
+        mid = list_jobs(task_id=task.id, now=base + timedelta(seconds=2))[0]
+        row = list_jobs(task_id=task.id, now=base + timedelta(seconds=120))[0]
+        lifecycle_ok = (
+            job["status"] == "queued"
+            and not job["estimated_cost_usd"]
+            and mid["status"] == "distilling"
+            and 0 < mid["progress"] < 99
+            and row["status"] == "done"
+            and str(row["skill_ref"]).startswith("skills/")
+        )
+        print(f"    rules 状态机：排队→提炼中（{mid['progress']}%）→完成={lifecycle_ok}")
+
+        skill_dir = SKILLS_DIR / str(job["id"])
+        names = sorted(path.name for path in skill_dir.iterdir()) if skill_dir.is_dir() else []
+        document = skill_document(row)
+        try:
+            payload = json.loads((skill_dir / "skill.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+        files_ok = (
+            names == ["README.md", "SKILL.md", "skill.json"]
+            and document.startswith("---\nname: ")
+            and all(section in document for section in ("## 步骤", "## 交付前自检", "## 反例"))
+            and "simulated=true" in document
+            and payload.get("provider") == "rules"
+            and payload.get("skill", {}).get("simulated") is True
+        )
+        print(f"    真落盘：{names}｜frontmatter 与章节={files_ok}")
+
+        steps = row["skill"]["steps"]
+        steps_ok = bool(steps) and all(step.get("evidence") for step in steps)
+        wording_ok = "每 1 句" not in document and "0.0 字" not in document
+        print(f"    可追溯：每条步骤带依据={steps_ok}｜文案数字口径={wording_ok}")
+
+        with zipfile.ZipFile(build_package(row)) as bundle:
+            members = sorted(bundle.namelist())
+        zip_ok = members == ["README.md", "SKILL.md", "skill.json"]
+        print(f"    技能包 zip：{members}｜可直接交给扩展插件={zip_ok}")
+
+        visible = get_job(job["id"], tenant="default") is not None
+        leaked = get_job(job["id"], tenant="acme") is not None or bool(list_jobs(tenant="acme"))
+        tenant_ok = visible and not leaked
+        print(f"    租户隔离：本租户可见={visible}｜跨租户泄漏={leaked}")
+
+        cfg.skill_gen.max_works = 1
+        create_job(task, provider="rules", now=base + timedelta(hours=1))
+        capped = list_jobs(task_id=task.id, now=base + timedelta(hours=1, seconds=120))[0]
+        cap_ok = len(capped["sources"]) == 1 and any(
+            "超出单作业上限" in issue for issue in capped["issues"]
+        )
+        single_ok = "不构成通用方法" in str(capped["skill"]["anti_patterns"][0])
+        print(f"    作品上限：只纳入 {len(capped['sources'])} 份并如实记 issues={cap_ok}｜单样本反例={single_ok}")
+
+        cfg.llm.provider = "mock"
+        cfg.llm.base_url = ""
+        unfixed = create_job(task, provider="llm", now=base)
+        honest_ok = unfixed["status"] == "failed" and "未配置" in str(unfixed["error"])
+        print(f"    llm（未配网关）：status={unfixed['status']}｜error={str(unfixed['error'])[:34]}…")
+
+        cfg.llm.provider = "openai"
+        cfg.llm.base_url = "https://llm-gateway.example.invalid/v1"
+        cfg.cost_budget_usd = 0.0001
+        fused = create_job(task, provider="llm", now=base)
+        fuse_ok = (
+            fused["status"] == "failed"
+            and "成本熔断" in str(fused["error"])
+            and fused["estimated_cost_usd"] > 0
+            and not fused["attempts"]
+        )
+        print(f"    llm 成本熔断：fail-loud 且未提交={fuse_ok}｜预估=${fused['estimated_cost_usd']:.3f}")
+    finally:
+        (
+            cfg.skill_gen.max_works,
+            cfg.llm.provider,
+            cfg.llm.base_url,
+            cfg.cost_budget_usd,
+        ) = saved
+
+    guard_ok = False
+    try:
+        create_job(TaskRecord(id="doctor-skill-2", tenant="default"), provider="rules")
+    except ValueError:
+        guard_ok = True
+    print(f"    无作品防护：拒绝创建={guard_ok}")
+
+    recovered = drop_task(task.id)
+    gone = not list_jobs(task_id=task.id)
+    dir_gone = not skill_dir.exists()  # 作业回收要连技能目录一起清掉，不留孤儿产物
+    cleanup_ok = recovered >= 3 and gone and dir_gone
+    print(f"    作业回收：recovered={recovered}｜技能目录已清={dir_gone}")
+
+    ok = (
+        intake_ok
+        and stat_ok
+        and lifecycle_ok
+        and files_ok
+        and steps_ok
+        and wording_ok
+        and zip_ok
+        and tenant_ok
+        and cap_ok
+        and single_ok
+        and honest_ok
+        and fuse_ok
+        and guard_ok
+        and cleanup_ok
+    )
+    if not ok:
+        print("    ! 创作技能提炼样例异常：请检查 app/core/skillgen.py 的采集口径、落盘与诚实失败。")
+    return ok
+
+
+def check_copyright() -> bool:
+    """校验解说/二创版权清单：解说语境触发风险项且强制人工复核，普通品牌不误伤。"""
+    from app.knowledge.copyright import copyright_checklist, detect_commentary
+
+    print("\n[二创版权清单]")
+
+    commentary_brief = {
+        "channel": "B站",
+        "industry": "文化娱乐",
+        "product": "动漫解说",
+        "deliverables": ["视频脚本 1 支"],
+        "constraints": ["不得整段搬运", "标注剧透"],
+    }
+    review = copyright_checklist(commentary_brief, "这是一期动漫剧情解说")
+    applies_ok = review["applies"] is True and len(review["items"]) >= 5 and review["needs_human_review"] is True
+    topics = {str(item.get("topic")) for item in review["items"]}
+    coverage_ok = {"片源引用比例", "BGM/配乐版权", "平台搬运判定", "剧透标注"} <= topics
+    print(f"    解说语境：applies={review['applies']}｜风险项 {len(review['items'])} 条｜强制人工复核={review['needs_human_review']}")
+
+    plain_brief = {"channel": "小红书", "industry": "美妆个护", "product": "面霜", "deliverables": ["种草笔记"], "constraints": []}
+    plain_review = copyright_checklist(plain_brief, "一支面霜的质地与使用说明")
+    no_false_positive = plain_review["applies"] is False and plain_review["needs_human_review"] is False
+    detected, _signals = detect_commentary(plain_brief, "")
+    no_false_positive = no_false_positive and detected is False
+    print(f"    普通品牌不误伤：applies={plain_review['applies']}｜需人工={plain_review['needs_human_review']}")
+
+    ok = applies_ok and coverage_ok and no_false_positive
+    if not ok:
+        print("    ! 二创版权清单异常：请检查 app/knowledge/copyright.py 的判定与清单。")
+    return ok
+
+
 def check_multilingual() -> bool:
     """校验多语言本地化：语言识别、字数口径、原生创作、合规如实告知。
 
@@ -1848,6 +2601,12 @@ def main() -> int:
         otlp = check_otel(brief)
         propagated = check_trace_propagation()
         dhuman = check_digital_human()
+        imagegen = check_imagegen()
+        videogen = check_videogen()
+        videounderstand = check_video_understand()
+        petgen = check_petgen()
+        skillgen = check_skillgen()
+        copyright_check = check_copyright()
         multimodal = check_multimodal()
         computed = check_compute()
         digest = check_digest_export()
@@ -1875,6 +2634,12 @@ def main() -> int:
         "OTLP 导出链路": otlp,
         "W3C 传播与采样": propagated,
         "数字人渲染样例": dhuman,
+        "图片生成样例": imagegen,
+        "视频生成样例": videogen,
+        "视频理解样例": videounderstand,
+        "桌面宠物样例": petgen,
+        "创作技能提炼样例": skillgen,
+        "二创版权清单": copyright_check,
         "Brief 素材（多模态）": multimodal,
         "确定性计算沙箱": computed,
         "素材研读与长文分篇": digest,
@@ -1895,6 +2660,10 @@ def main() -> int:
             "OTLP 导出链路 id 一致、层级与智能体归属保留；"
             "W3C traceparent 可跨进程延续、采样只作用于导出面；"
             "数字人渲染样例的清单、惰性推进、租户隔离与失败路径均符合预期；"
+            "桌面宠物样例的真帧落盘、色键透明、宠物包内运行器与诚实失败"
+            "（未配图片端点 / 成本熔断 / 无视觉指导）均符合预期；"
+            "创作技能提炼样例的作品采集口径、SKILL.md 真落盘与诚实失败"
+            "（行内时间戳不误判为字幕 / 未配模型网关 / 成本熔断 / 无作品）均符合预期；"
             "Brief 素材的画幅为文件头实测值、本地素材路径受限于 assets/ 目录、"
             "离线链路如实声明「不读图」且带素材的任务仍能跑完；"
             "确定性计算沙箱在受限语法内可复现求值、越权语法一律拦截，"
@@ -1936,6 +2705,18 @@ def main() -> int:
         print("  · 传播/采样异常，请检查 app/core/tracing.py 的 parse_traceparent / decide_sampling。")
     if not dhuman:
         print("  · 数字人样例异常，请检查 app/core/digital_human.py 的清单构建与状态机。")
+    if not imagegen:
+        print("  · 图片生成样例异常，请检查 app/core/imagegen.py 的清单构建与状态机。")
+    if not videogen:
+        print("  · 视频生成样例异常，请检查 app/core/videogen.py 的清单、成本熔断与状态机。")
+    if not videounderstand:
+        print("  · 视频理解样例异常，请检查 app/core/videounderstand.py 的状态机、诚实失败与存储。")
+    if not petgen:
+        print("  · 桌面宠物样例异常，请检查 app/core/petgen.py 的状态机、帧落盘与诚实失败。")
+    if not skillgen:
+        print("  · 创作技能提炼样例异常，请检查 app/core/skillgen.py 的采集口径、落盘与诚实失败。")
+    if not copyright_check:
+        print("  · 二创版权清单异常，请检查 app/knowledge/copyright.py 与 A7 的接线。")
     return 1
 
 

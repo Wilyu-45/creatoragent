@@ -170,6 +170,8 @@ def channel_rule(channel: str) -> ChannelRule:
 CHANNEL_TITLE_LIMIT: dict[str, int] = {
     "小红书": 20,
     "抖音": 18,
+    "B站": 40,
+    "bilibili": 40,
     "公众号": 30,
     "知乎": 30,
     "电商详情页": 25,

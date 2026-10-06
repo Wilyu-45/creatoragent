@@ -343,16 +343,17 @@ MCP 做工具接入 + OpenTelemetry/LangSmith 做可观测性**；4 周 MVP 节�
 |---|---|---|
 | LangGraph 做流程编排 | ✅ 一致 | `StateGraph` + 条件边门禁环 + `interrupt()` 人工审批 + `SqliteSaver` 断点续跑 |
 | CrewAI 做 Agent 定义层 | ⏸️ 未引入 | 当前 11 个智能体均为「单次结构化生成」，LangGraph 节点 + Pydantic 契约已足够；引入 CrewAI 会增加一层抽象与失败面，留待需要 Agent 内部多步推理/工具循环时再评估 |
-| PostgreSQL + Redis 共享黑板 | ✅ 双后端实现 | file 模式（默认）：JSON 文件 + 进程内锁 + `intent` 租约满足单机并发正确性；`CREATOR_STORAGE=pg`：黑板/任务/记忆库/评估/数字人作业入 PostgreSQL（`payload jsonb`），意图租约改 Redis `SET NX PX` + Lua 原子脚本，检查点用 PostgresSaver（fail-loud）。契约（方法签名 / 不变量 / 表与 key 映射 / 触发条件）见 [`storage_contract.md`](storage_contract.md)，迁移与回归脚本齐备（`pg_migrate.py` / `pg_check.py`） |
+| PostgreSQL + Redis 共享黑板 | ✅ 双后端实现 | file 模式（默认）：JSON 文件 + 进程内锁 + `intent` 租约满足单机并发正确性；`CREATOR_STORAGE=pg`：黑板/任务/记忆库/评估/数字人 + 四个旁路生成作业（图片/视频/视频理解/桌宠）入 PostgreSQL（`payload jsonb`），意图租约改 Redis `SET NX PX` + Lua 原子脚本，检查点用 PostgresSaver（fail-loud）。契约（方法签名 / 不变量 / 表与 key 映射 / 触发条件）见 [`storage_contract.md`](storage_contract.md)，迁移与回归脚本齐备（`pg_migrate.py` / `pg_check.py`） |
 | MCP Server 统一接入 | ✅ 内置工具层 | `app/tools/*` 为 11 个智能体提供生成前工具（行业洞察/案例库/渠道规范/敏感词扫描/SEO 规则/视觉风格/经验基准/知识库统计/创作质量自检/历史查重/联网检索/多模态素材核验/确定性计算沙箱），执行报告注入提示词与 LLM context，span 记为 `tools.*`。三条纪律：**离线优先**（联网与读图均默认关闭，未启用时如实声明而非编造）、**失败隔离**（单工具异常只记报告）、**如实标注来源**（经验基准不冒充平台数据）；确定性计算走 `app/core/sandbox.py` 的 AST 白名单求值，**不开放任意代码执行**；对外另提供 MCP 插件适配层（`app/mcp_server.py`，9 工具代理 REST API 供 DeepSeek harness / Claude Code / Trae 等 agent 接入，用法见 USER_GUIDE §18），外部 MCP（图像生成等）仍按需后接 |
 | OpenTelemetry + LangSmith | 🔁 自建替代 | `/api/metrics` 覆盖延迟 p99、成本、缓存、租约、门禁通过率、**评估分**等关键指标；追踪为 OTel 数据模型 + 可选 OTLP 导出（见 `creator.md` §7.5）；LangSmith 未接入 |
 | LangSmith Eval / RAGAS（2.5 系统级） | 🔁 自建替代 | `app/core/judge.py` 双轨评估器（规则版可复现 + 模型版失败自动回退）+ `golden/` 黄金数据集与基线回归，见 2.5.1 / 2.5.2 |
 | 向量数据库 | 🔁 本地向量 + 关键词混合 | 记忆库用本地确定性 hashing embedding（可切 OpenAI `/embeddings`）+ 2-gram 关键词混合打分，零外部依赖；数据量增大后可替换为专用向量库 |
 | PostgreSQL + Redis 的多租户数据隔离 | ✅ 语义已落地 | 存储仍是 JSON 文件，但**任务与记忆库都按租户分区**（鉴权令牌 → 租户，越权 404，见 creator.md 7.1） |
 | 长文档素材靠人工精读 / 长文单次调用必截断 | ✅ 内置研读与分篇 | Brief 附 `kind=document` 素材时 A0 先 map-reduce 研读（`core/digest.py`，块数按「每文档保底 1 块 + 按字数比例」分配、`digestMaxCalls` 封顶），要点注入 A2/A3/A4/A6，A6 把与素材一致的主张判已核实；A4 检出「每篇 N–M 字」（上界≥1500）按三风格分篇（`A4.copy.version`×3），A5 按同口径审计正文是否达字数区间；成品落 `data/exports/`（cta 与正文结尾同句不重复拼接）供 `GET /api/tasks/{id}/export` 下载 | 把「用户自己精读素材、人工补长文」内化为系统能力；代价是分篇放大 3 倍 prompt 成本、研读吃 token（需调高预算） |
-| 视频动效靠专业工具 / 引入 Remotion 才能预览 | ✅ 纯 React 动效工场 | `src/motion/` 时间驱动动效库（缓动求解 + 播放时钟 + Sequence/Stagger 时序 + 22 个预设：入场/强调/出场/转场）+ JSON 时间轴脚本渲染器（`script.tsx`，未来 video_script → 动效的桥接格式）+ `MotionStudio` 试演面板（顶栏进入，播完出「重播/回到起点」） | Remotion-ready（秒→帧即可迁移），零运行时依赖；浏览器预览先行 |
-| 字幕成片靠人工剪辑 / 外部渲染服务 | ✅ 视频工场（`src/vg/`） | 字幕解析（SRT/VTT/ASS/纯文本）→ 自动建轴（分幕/卡点吸附偏差 0/去 AI 味随机轮换/词 lint）→ 双模渲染（DOM 预览与 Canvas 导出同参数，所见即所得）→ MediaRecorder 实时编码导出 MP4/WebM（720p–4K，进度/暂停/继续/取消）+ WebAudio BGM/旁白 ducking 混音 | 导出为实时编码（耗时≈片长），跨会话续传因容器格式限制不可靠，如实标注；页面前台依赖（隐藏自动暂停） |
+| 视频动效与字幕成片要靠专业工具 / 外部渲染服务 | ✅ 纯前端动效工场 + 视频工场（`src/motion/`、`src/vg/`） | 时间驱动渲染（缓动求解 + 播放时钟 + Sequence/Stagger 时序 + 22 预设 + JSON 时间轴脚本）与双模渲染（DOM 预览与 Canvas 导出同参数，所见即所得）→ MediaRecorder 实时编码 MP4/WebM（720p–4K）+ WebAudio BGM/旁白 ducking；用法与参数见 [`capability_samples.md`](capability_samples.md) §6–§7 | 零运行时依赖、Remotion-ready（秒→帧即可迁移）；导出为实时编码（耗时≈片长），跨会话续传受容器格式限制、页面前台依赖（切后台自动暂停），均如实标注而非静默失败 |
 | 改配置要改代码或 .env | ✅ 界面全量配置 + 桌面 exe | 「运行时设置」覆盖模型/门禁/向量/发布/评估/联网检索/追踪/数字人/host·port（重启生效），持久化 `data/settings.json`，优先级：进程环境变量 > 界面保存值 > .env > 默认；`make app` 用 PyInstaller 打单文件 exe（`app/desktop.py`：frozen 自举数据目录到 exe 旁、内嵌前端 dist、自动开浏览器） | 桌面版双击即用；env 仍归部署方显式意志（CI 注入 mock 压过界面值） |
+| 图片 / 视频 / 桌宠 / 视频理解 / 技能提炼必须接入厂商 | ✅ 五条旁路接入样例（不绑厂商） | `app/core/{imagegen,videogen,petgen,videounderstand,skillgen}.py` 全部复用 `app/core/gen_jobs.py` 作业后端、与数字人同范式（惰性推进 + `POST 建作业 / GET 查状态` + span + 租户隔离 + 删除回收；未配端点显式失败、受理前按帧/镜/集/次估算纳入 `COST_BUDGET_USD` 熔断）；桌宠交付**能跑的宠物包**（帧 + `pet.json` + README + 包内 `runner/pet.py`，tkinter 运行器，不做抠图/切帧、色键 `#FF00FE` 透边）；视频理解是 `digest.py`（文档研读）的画面版镜像（整集=一次调用 → 结构化视觉摘要 →「注入 Brief」显式接缝）；技能提炼把用户已有作品（文档/字幕 + 文本产物 + 视觉摘要）压成 `SKILL.md`（frontmatter）+ zip，`rules` 通道零 token 出**真统计骨架**、`llm` 复用 `LLM_*` 网关。通道表与接口接缝见 [`capability_samples.md`](capability_samples.md) §2–§5、§8 | 采用旁路作业模型（job store）而非新增黑板产物，避开「四处契约」高风险（MEMORY #31）；理解与美术生产都不在系统内实现、私有协议经网关消化；正式选型与桌宠运行器形态属部署方决策；大视频不套 `load_local` 的 8MB 闸门、按扩展名兜底识别（MEMORY #46）；提炼的统计口径即卖点（断句留标点、字数不算空白、字幕认整行时间戳），见 MEMORY #50 |
+| 二创解说只有广告法词库 | ✅ 版权 checklist（诚实边界） | `app/knowledge/copyright.py` 命中影视/游戏解说/杂谈类时，A7 叠加片源引用/转化性/免责来源/BGM/搬运判定/剧透标注的结构化 checklist 并**强制 `needs_human_review`**（镜像“非中文词库”降级哲学） | 不假装能自动检测侵权，只给风险与整改建议，最终人工把关 |
 
 ### 5.2 排期任务完成情况（对应 4.3）
 
@@ -374,14 +375,13 @@ MCP 做工具接入 + OpenTelemetry/LangSmith 做可观测性**；4 周 MVP 节�
 | v2.0 | 多语言本地化、视频脚本、A/B 测试闭环、自动发布、数字人 | 完成：多语言（中/英/日/韩/西原生创作 + 字数口径 + 合规如实告知）、视频脚本（独立交付物 + 渠道时间轴）、A/B 闭环、自动发布（webhook 投递 + 到期队列）、数字人（开发样例，正式接入由部署方决定） |
 
 **横切能力（不属任何单一版本，随需补齐）**：API 鉴权与任务/记忆库租户隔离、Judge 评估流水线、黄金数据集与回归门禁、CI 流水线、
-调用轨迹（OTel 数据模型 + OTLP 导出）、多语言本地化、断点续跑健康度可见性、容器化与生产部署、真实网关接入、
-视频脚本、数字人样例、跨进程 trace 传播与导出面采样——落地位置与实施取舍见 5.1，能力边界见 `creator.md` §7。
+调用轨迹（OTel + OTLP 导出）、多语言本地化、断点续跑健康度、容器化与生产部署、真实网关接入、视频脚本、旁路能力接入样例（见 [`capability_samples.md`](capability_samples.md)）、二创版权 checklist——取舍见 5.1，能力边界见 `creator.md` §7。
+
 
 ### 5.4 验收指标实测（对应 4.6）
 
-> 实测数值跑一次脚本即得、必然过时，故此处只记录**验收项 + 判定方式 + 对应脚本**，
-> 具体数值请自行运行脚本获取。延迟与成本类指标在 **Mock 引擎** 下测得；真实模型链路需按
-> `scripts/stress_llm.py --provider openai` 复测后再校准基线。
+> 实测数值跑一次脚本即得、必然过时，故此处只记录**验收项 + 判定方式 + 对应脚本**，具体数值自行运行获取。
+> 延迟与成本类指标在 **Mock 引擎** 下测得；真实模型链路需按 `scripts/stress_llm.py --provider openai` 复测后校准。
 
 | 验收项 | 判定方式 | 对应脚本 |
 |---|---|---|

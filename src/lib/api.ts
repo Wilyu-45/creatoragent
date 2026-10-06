@@ -118,6 +118,36 @@ export interface PublicConfigView {
     apiKeyMasked: string;
     timeoutMs: number;
   };
+  /** 图片生成接入样例设置（sample 清单 / openai 协议 / local 本地图生网关） */
+  imageGen: {
+    provider: string;
+    baseUrl: string;
+    model: string;
+    size: string;
+    maxImages: number;
+    apiKeySet: boolean;
+    apiKeyMasked: string;
+    timeoutMs: number;
+    configured: boolean;
+  };
+  /** 视频生成接入样例设置（sample 清单 / http 适配网关，含成本熔断预算口径） */
+  videoGen: {
+    provider: string;
+    apiUrl: string;
+    apiKeySet: boolean;
+    apiKeyMasked: string;
+    timeoutMs: number;
+  };
+  /** 视频理解接入样例设置（sample 占位骨架 / real 整集交给原生视频理解网关，一集一次调用） */
+  videoUnderstand: {
+    provider: string;
+    apiUrl: string;
+    apiKey: string;
+    apiKeySet: boolean;
+    apiKeyMasked: string;
+    timeoutMs: number;
+    configured: boolean;
+  };
   /** 联网检索网关设置（web_search / page_fetch 工具的上游） */
   search: {
     provider: 'none' | 'http';
@@ -130,6 +160,22 @@ export interface PublicConfigView {
     fetchPages: boolean;
     maxPages: number;
     siteUrls: string[];
+    configured: boolean;
+  };
+  /** 桌面宠物样例设置（sample 标准库画帧 / imagegen 复用图片通道逐帧出真图） */
+  petGen: {
+    provider: string;
+    frameSize: number;
+    maxFrames: number;
+    timeoutMs: number;
+    configured: boolean;
+  };
+  /** 创作技能提炼设置（rules 零依赖量化 / llm 复用 LLM_* 网关做风格判断） */
+  skillGen: {
+    provider: 'rules' | 'llm';
+    /** 单次作业最多纳入几份作品 */
+    maxWorks: number;
+    /** 当前默认通道是否可用：llm 需 LLM_* 已配真实网关，否则界面提示改走 rules */
     configured: boolean;
   };
   /** 分布式追踪设置（进程内追踪始终完整；OTLP 只作用于导出面） */
@@ -659,6 +705,337 @@ export interface DigitalHumanView {
   jobs: DigitalHumanJobView[];
 }
 
+/* ------------------------------------------------------------------ */
+/* 图片 / 视频生成（开发样例）                                          */
+/* ------------------------------------------------------------------ */
+
+/** 图片生成清单中的一条（由 visual_brief 的 image_prompts 透传而来）。 */
+export interface ImageGenSegment {
+  index: number;
+  id: string;
+  usage: string;
+  scene: string;
+  prompt: string;
+  negative: string;
+  aspect_ratio: string;
+}
+
+/** 图片生成作业产出的一张图（sample 为模拟地址；local 为 assets/ 引用；openai 为网关 URL）。 */
+export interface ImageGenOutput {
+  index: number;
+  id: string;
+  url: string;
+  b64?: boolean;
+}
+
+export interface ImageGenJobView {
+  id: string;
+  task_id: string;
+  tenant: string;
+  /** sample | openai | local */
+  provider: string;
+  /** queued | generating | done | failed */
+  status: string;
+  progress: number;
+  visual_artifact_id: string;
+  size: string;
+  requested: number;
+  render_seconds: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+  images: ImageGenOutput[];
+  error: string;
+  attempts: number;
+  manifest: {
+    provider: string;
+    size: string;
+    requested: number;
+    segments: ImageGenSegment[];
+    warnings: string[];
+  };
+  history: { ts: string; from: string; to: string; note: string }[];
+}
+
+export interface ImageGenView {
+  task_id: string;
+  has_visual_brief: boolean;
+  jobs: ImageGenJobView[];
+}
+
+/** 视频生成按镜产出的画面段。 */
+export interface VideoGenSegmentOut {
+  shot: number;
+  role: string;
+  duration_seconds: number;
+  url: string;
+}
+
+export interface VideoGenJobView {
+  id: string;
+  task_id: string;
+  tenant: string;
+  /** sample | http */
+  provider: string;
+  /** queued | generating | done | failed */
+  status: string;
+  progress: number;
+  script_artifact_id: string;
+  channel: string;
+  aspect_ratio: string;
+  duration_seconds: number;
+  shot_count: number;
+  render_seconds: number;
+  estimated_cost_usd: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+  segments_out: VideoGenSegmentOut[];
+  error: string;
+  attempts: number;
+  remote_id: string;
+  submitted: boolean;
+  manifest: {
+    channel: string;
+    aspect_ratio: string;
+    duration_seconds: number;
+    shot_count: number;
+    hook: string;
+    cta: string;
+    segments: DigitalHumanSegment[];
+    warnings: string[];
+  };
+  history: { ts: string; from: string; to: string; note: string }[];
+}
+
+export interface VideoGenView {
+  task_id: string;
+  has_video_script: boolean;
+  jobs: VideoGenJobView[];
+}
+
+/** 视频理解产出的结构化视觉摘要（单集「看懂画面」的结果）。 */
+export interface VideoUnderstandSummary {
+  theme: string;
+  logline: string;
+  scenes: string[];
+  characters: string[];
+  actions: string[];
+  mood: string;
+  camera_language: string;
+  pacing: string;
+  notable_moments: string[];
+  text_brief: string;
+  /** true = sample 占位骨架（未真实理解）；false = real 基于画面理解 */
+  simulated: boolean;
+  sources: string[];
+  issues: string[];
+  stats: { episode_calls: number; cost_usd: number };
+}
+
+export interface VideoUnderstandJobView {
+  id: string;
+  task_id: string;
+  tenant: string;
+  /** sample | real */
+  provider: string;
+  /** queued | understanding | done | failed */
+  status: string;
+  progress: number;
+  video_ref: string;
+  video_title: string;
+  video_source: string;
+  channel: string;
+  estimated_cost_usd: number;
+  issues: string[];
+  remote_id: string;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+  summary: VideoUnderstandSummary | null;
+  error: string;
+  history: { ts: string; from: string; to: string; note: string }[];
+}
+
+export interface VideoUnderstandView {
+  task_id: string;
+  has_video_asset: boolean;
+  jobs: VideoUnderstandJobView[];
+}
+
+/* ------------------------------------------------------------------ */
+/* 桌面宠物（开发样例：动作帧 → 可运行宠物包）                            */
+/* ------------------------------------------------------------------ */
+
+/** 宠物清单中的一帧（一个动作的第 index 帧）。 */
+export interface PetGenSegment {
+  action: string;
+  index: number;
+  fps: number;
+  loop: boolean;
+  prompt: string;
+}
+
+/** 已落盘的一帧。ref 是 data/pets 下的相对路径，预览要经带鉴权的帧路由。 */
+export interface PetGenFrame {
+  action: string;
+  index: number;
+  ref: string;
+  bytes: number;
+  /** true = 样例引擎画的简笔帧（非真图），必须让使用者看得见 */
+  simulated: boolean;
+}
+
+export interface PetGenJobView {
+  id: string;
+  task_id: string;
+  tenant: string;
+  /** sample | imagegen */
+  provider: string;
+  /** queued | generating | done | failed */
+  status: string;
+  progress: number;
+  name: string;
+  size: number;
+  visual_artifact_id: string;
+  actions: string[];
+  frame_count: number;
+  render_seconds: number;
+  estimated_cost_usd: number;
+  /** 宠物包目录引用（pets/<job_id>） */
+  dir: string;
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+  frames: PetGenFrame[];
+  /** pet.json 的相对引用；空 = 未产出 */
+  pet_ref: string;
+  error: string;
+  attempts: number;
+  manifest: {
+    provider: string;
+    name: string;
+    size: number;
+    fps: number;
+    key_color: string;
+    actions: string[];
+    frame_count: number;
+    segments: PetGenSegment[];
+    palette: Record<string, string>;
+    palette_source: string;
+    brand: string;
+    simulated: boolean;
+    warnings: string[];
+    generated_at: string;
+  };
+  history: { ts: string; from: string; to: string; note: string }[];
+}
+
+export interface PetGenView {
+  task_id: string;
+  has_visual_brief: boolean;
+  jobs: PetGenJobView[];
+}
+
+/* ------------------------------------------------------------------ */
+/* 创作技能提炼（开发样例：用户作品 → 可复用 SKILL.md）                   */
+/* ------------------------------------------------------------------ */
+
+/** 技能里的一步：detail 是做法，evidence 指向本组作品的观察值（无证据的结论不采信）。 */
+export interface SkillStep {
+  step: string;
+  detail: string;
+  evidence: string;
+}
+
+/** 逐字样例：只能是从作品里摘的原句，带来源标注。 */
+export interface SkillExample {
+  source: string;
+  quote: string;
+}
+
+export interface SkillBody {
+  name: string;
+  title: string;
+  description: string;
+  /** rules | llm */
+  method: string;
+  /** true = 未经真实模型推理（rules 恒为 true），界面必须显出来 */
+  simulated: boolean;
+  when_to_use: string[];
+  inputs: string[];
+  steps: SkillStep[];
+  templates: { hook: string; outline: string[]; closing: string };
+  checklist: string[];
+  anti_patterns: string[];
+  examples: SkillExample[];
+}
+
+/** 一份纳入提炼的作品（只留标题与字数，正文不回传）。 */
+export interface SkillSource {
+  title: string;
+  /** document | artifact:<type> | video_understanding */
+  origin: string;
+  chars: number;
+}
+
+/** 跨作品的量化画像：全部是真统计出来的数字。 */
+export interface SkillStats {
+  works: number;
+  chars_median: number;
+  sentences_median: number;
+  paragraphs_median: number;
+  sentence_len_median: number;
+  sentence_len_p90: number;
+  hook_len_median: number;
+  question_ratio: number;
+  second_person_ratio: number;
+  digit_ratio: number;
+  subtitled_works: number;
+  cue_len_median: number;
+  chars_per_minute: number;
+}
+
+export interface SkillGenJobView {
+  id: string;
+  task_id: string;
+  tenant: string;
+  /** rules | llm */
+  provider: string;
+  /** queued | distilling | done | failed */
+  status: string;
+  progress: number;
+  channel: string;
+  sample_seconds: number;
+  estimated_cost_usd: number;
+  stats: SkillStats;
+  sources: SkillSource[];
+  /** rules 通道受理时即算好；llm 完成后回填 */
+  skill: SkillBody | null;
+  /** SKILL.md 的相对引用（data/skills/<job_id>/SKILL.md）；空 = 未落盘 */
+  skill_ref: string;
+  dir: string;
+  issues: string[];
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+  error: string;
+  attempts: number;
+  history: { ts: string; from: string; to: string; note: string }[];
+}
+
+export interface SkillGenView {
+  task_id: string;
+  has_materials: boolean;
+  jobs: SkillGenJobView[];
+}
+
 const TOKEN_KEY = 'creator-api-token';
 
 /** 读取本地保存的 API Token（后端启用 ``CREATOR_API_TOKENS`` 时需要）。 */
@@ -710,28 +1087,37 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-/** 下载任务成品导出 txt：带鉴权头走 blob 触发下载（裸链接无法携带 token）。 */
-export async function downloadExport(id: string): Promise<void> {
-  const response = await fetch(`/api/tasks/${encodeURIComponent(id)}/export`, {
-    headers: { ...authHeaders() },
-  });
+/** 带鉴权头取一段二进制（宠物帧、导出文本、zip 都不是 JSON，裸链接无法携带 token）。 */
+async function fetchBinary(url: string, label: string): Promise<Blob> {
+  const response = await fetch(url, { headers: { ...authHeaders() } });
   if (!response.ok) {
-    let message = `导出失败 (${response.status})`;
+    let message = `${label}失败 (${response.status})`;
     try {
       const parsed = (await response.json()) as { detail?: string };
       if (parsed.detail) message = parsed.detail;
     } catch {
       /* 非 JSON 错误体，保留默认文案 */
     }
+    if (response.status === 401) message = 'API Token 无效或缺失，请在「运行时设置」中填写';
     throw new Error(message);
   }
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
+  return response.blob();
+}
+
+/** 取二进制并触发浏览器下载，用完立即释放 object URL。 */
+async function downloadBinary(url: string, filename: string, label: string): Promise<void> {
+  const blob = await fetchBinary(url, label);
+  const href = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `${id}.txt`;
+  anchor.href = href;
+  anchor.download = filename;
   anchor.click();
-  URL.revokeObjectURL(url);
+  URL.revokeObjectURL(href);
+}
+
+/** 下载任务成品导出 txt：带鉴权头走 blob 触发下载（裸链接无法携带 token）。 */
+export async function downloadExport(id: string): Promise<void> {
+  await downloadBinary(`/api/tasks/${encodeURIComponent(id)}/export`, `${id}.txt`, '导出');
 }
 
 export const api = {
@@ -808,6 +1194,79 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  images: (id: string) => request<ImageGenView>(`/api/tasks/${id}/images`),
+  createImage: (id: string, payload: { provider?: string } = {}) =>
+    request<{ task_id: string; job: ImageGenJobView }>(`/api/tasks/${id}/images`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  videos: (id: string) => request<VideoGenView>(`/api/tasks/${id}/videos`),
+  createVideo: (id: string, payload: { provider?: string } = {}) =>
+    request<{ task_id: string; job: VideoGenJobView }>(`/api/tasks/${id}/videos`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  videoUnderstanding: (id: string) =>
+    request<VideoUnderstandView>(`/api/tasks/${id}/video-understanding`),
+  createVideoUnderstanding: (id: string, payload: { provider?: string } = {}) =>
+    request<{ task_id: string; job: VideoUnderstandJobView }>(`/api/tasks/${id}/video-understanding`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  applyVideoUnderstanding: (id: string, payload: { job_id: string }) =>
+    request<{ ok: boolean; task_id: string; applied: string; constraints: string[] }>(
+      `/api/tasks/${id}/video-understanding/apply`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+  pets: (id: string) => request<PetGenView>(`/api/tasks/${id}/pets`),
+  createPet: (
+    id: string,
+    payload: { provider?: string; name?: string; actions?: string[] } = {},
+  ) =>
+    request<{ task_id: string; job: PetGenJobView }>(`/api/tasks/${id}/pets`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  /** 取一帧 PNG 字节：宠物帧在 data/pets 下、不对外静态托管，只能走带鉴权头的路由 */
+  petFrame: (id: string, jobId: string, action: string, index: number) =>
+    fetchBinary(
+      `/api/tasks/${encodeURIComponent(id)}/pets/${encodeURIComponent(jobId)}/frames/${encodeURIComponent(action)}/${index}`,
+      `第 ${index} 帧读取`,
+    ),
+  /** 下载宠物包 zip（pet.json + frames + README + 运行器） */
+  petPackage: (id: string, jobId: string, name: string) =>
+    downloadBinary(
+      `/api/tasks/${encodeURIComponent(id)}/pets/${encodeURIComponent(jobId)}/package`,
+      `${name || 'pet'}-${jobId}.zip`,
+      '宠物包下载',
+    ),
+  skills: (id: string) => request<SkillGenView>(`/api/tasks/${id}/skills`),
+  createSkill: (id: string, payload: { provider?: string } = {}) =>
+    request<{ task_id: string; job: SkillGenJobView }>(`/api/tasks/${id}/skills`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  /** 取 SKILL.md 正文（预览 / 复制用）：文件在 data/skills 下，只能走带鉴权头的路由 */
+  skillDocument: async (id: string, jobId: string): Promise<string> => {
+    const blob = await fetchBinary(
+      `/api/tasks/${encodeURIComponent(id)}/skills/${encodeURIComponent(jobId)}/document`,
+      '技能正文读取',
+    );
+    return blob.text();
+  },
+  /** 下载技能包 zip（SKILL.md + skill.json + README.md），可直接放进插件的 skills 目录 */
+  skillPackage: (id: string, jobId: string, name: string) =>
+    downloadBinary(
+      `/api/tasks/${encodeURIComponent(id)}/skills/${encodeURIComponent(jobId)}/package`,
+      `${name || 'skill'}-${jobId}.zip`,
+      '技能包下载',
+    ),
+  /** 把技能沉淀成记忆库 template 卡片（显式动作，幂等由内容指纹保证） */
+  applySkill: (id: string, payload: { job_id: string }) =>
+    request<{ ok: boolean; task_id: string; added: number; title: string }>(
+      `/api/tasks/${id}/skills/apply`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
 };
 
 /** 订阅任务实时事件流（SSE），返回取消订阅函数。 */

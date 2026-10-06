@@ -57,7 +57,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY scripts ./scripts
 COPY golden ./golden
-COPY creator.md plan.md MEMORY.md USER_GUIDE.md DEPLOYMENT.md ./
+COPY creator.md plan.md MEMORY.md USER_GUIDE.md DEPLOYMENT.md capability_samples.md ./
 COPY --from=web /web/dist ./dist
 
 # 非 root 运行：容器内不需要任何特权

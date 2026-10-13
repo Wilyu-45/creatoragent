@@ -788,6 +788,12 @@ def check_tracing(brief: dict, chain: dict) -> bool:
     print(f"    事件 {len(events)} 条｜带 trace_id {len(linked)}｜带 span_id {len(with_span)}"
           f"｜trace 一致={same_trace}")
 
+    # 与 check_otel 同一个坑：`duration_ms` 一算好就能被这里读到，而 `_export` 的
+    # 序列化+落盘还在后面（十几万字的 JSON 还要改名），不等一下就偶发看到「文件不存在」的假失败。
+    export_deadline = _time.time() + 10
+    while _time.time() < export_deadline and not (EXPORT_DIR / f"{task.id}.json").exists():
+        _time.sleep(0.05)
+
     exported = EXPORT_DIR / f"{task.id}.json"
     otel_ok = False
     if exported.exists():
@@ -1499,6 +1505,2009 @@ def check_video_understand() -> bool:
     )
     if not ok:
         print("    ! 视频理解样例异常：请检查 app/core/videounderstand.py 的状态机、诚实失败与存储。")
+    return ok
+
+
+def check_surf() -> bool:
+    """校验灵感冲浪（旁路作业铁律的义不容辞回归）：
+
+    ① sample 端到端离线：受理→时间推进→产**占位灵感卡**（simulated=True）→入跨任务灵感
+       池→注入简报文本命中；② 灵感池读/租户隔离/删除；③ browser 未装 Playwright / 未配白名单
+       →**受理即诚实失败**并点名安装命令与 SURF_ALLOWED_DOMAINS；④ http 未配检索网关→诚实失败点名搜索配置；
+    ⑤ **在线看视频**（真人式：点播放→播放中逐段截图→**一组一组**交 VLM→逐组小结→整段汇总）的纯逻辑：
+       分组切帧与按调用次数估成本、评论去空去重截断、没开读图网关时**只截帧不交模型**（vision_skipped）、
+       空帧诚实失败、sample 通道要求看视频时如实降级、指定 videoUrls 的会话入口；
+    ⑥ 配了读图网关（以 stub 网关代真调用，离线可跑）：**每组一次多模态调用**、多组再**一次文本汇总**，
+       逐组小结带播放时刻；真网关返回不可解析内容即 `SurfDigestError`，**绝不拿空摘要冒充看懂**；
+    ⑦ **截图 OCR 兜底**（DOM 抓不到标题/简介/评论时截整页图逐字转写）：没读图网关时连图都不截、
+       离线/降级给的「转写」一律不采信、真转写只填 DOM 空缺的字段（真实 DOM 文字优先）；
+    ⑧ **真人式浏览**（用假浏览器离线跑通 browser 通道控制流）：随机节奏（滚动幅度与停留浮动、关掉后
+       退回等距机器节奏、开新页前先犹豫一下而会话第一页不硬停）、先关遮罩再读、用**站点自己的搜索框**逐字打字搜主题（没搜索框就如实不搜）、
+       点站点自己的「下一页/加载更多」**接着刷列表**（没这个控件、点了页面没变、页数用尽都如实停下并写进说明）、
+       内容页先点开「展开全文」再读并**逐条抓评论区**（关掉开关就不抓，抓不到留空而不编造）、
+       挑条目先**扫标题认主题词**（贴主题的排到前面并记下凭哪几个词点进去；整版都认不出就如实说明按列表顺序读的；
+       要在线看的视频同样从贴主题的标题里挑）、搜不对题就**换个更短的说法再搜**（清空搜索框重打、只读贴主题那版结果，
+       再没更短的说法就照旧读最后一版，搜过哪几版词全记在信号上）、
+       打字时站点弹出的**搜索联想下拉**也照真人那样扫一眼：只点认得出本次主题词的那条（这一版关键词是
+       **站点自己的叫法**，记在信号的 suggested 上；同分时保持站点给的顺序）、一条都认不出就照原词回车且
+       如实说明「不为一条联想改主题」、联想项点不动就退回把词打回搜索框再回车、关掉开关连下拉都不读、
+       这站根本没弹下拉就一个字都不提（绝不凭空造一条建议）、
+       读到门口就**退出来**（认出登录墙/订阅墙/人机验证/维护出错页：墙上那几句话照记进摘录但标成 wall、
+       不冒充正文也不绕过去，汇总说明有几页被挡，被挡的页不算「读过的页」；正文长到不像一扇门就不误判，
+       关掉开关照旧把墙话当正文读）、
+       **读过的不重读**（跨会话浏览历史：上几轮真读进去的条目这轮跳过、改读没见过的并说明跳了几条；
+       整版都读过时照样按原顺序重读，且不许谎称「跳过了几条」；看过的视频不再重复点进去，
+       但用户显式指定的链接照样看；历史只记真读到的条目页/视频页，按租户隔离、同一页再读只加遍数、
+       超 SURF_HISTORY_MAX 先忘最旧的、关掉开关既不记也不跳、清掉即归零）、
+       信息流多跳只点白名单内的同域条目（外站/内网/视频/图片直链一律不收）、
+       起点站+搜索页+列表后续页+条目页+视频页**合计不越 SURF_MAX_PAGES**、浏览器在 finally 里一定关掉；
+    ⑨ 作业回收与 doctor 残留清理（不污染真实灵感池）。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import get_config
+    from app.core.surf import (
+        SurfUnavailable,
+        create_session,
+        drop_pool_card,
+        drop_task,
+        get_pool_card,
+        list_pool,
+        list_sessions,
+        render_inspiration,
+    )
+    from app.core.types import Brief, TaskRecord
+
+    print("\n[灵感冲浪]")
+
+    cfg = get_config()
+    saved_provider = cfg.surf.provider
+    saved_pool_max = cfg.surf.pool_max
+    future = datetime.now(timezone.utc) + timedelta(seconds=60)
+    topic = "冲浪回归主题"
+    sample_task_id = "doctor-surf-sample"
+    browser_task_id = "doctor-surf-browser"
+    http_task_id = "doctor-surf-http"
+    watch_task_id = "doctor-surf-watch"
+    urls_task_id = "doctor-surf-urls"
+    created_card_ids: list[str] = []
+    accepted = sample_done = render_ok = in_pool = pool_ok = False
+    browser_fail = http_fail = False
+    vu_ok = vu_empty = watch_degrade = bwatch = False
+    chunk_ok = calls_ok = comments_ok = urls_ok = False
+    ocr_ok = False
+    ocr_no_shot_ok = ocr_placeholder_ok = ocr_real_ok = False
+    group_calls_ok = no_fabricate_ok = False
+    pace_ok = machine_ok = consent_ok = search_ok = close_ok = False
+    hop_ok = budget_ok = boundary_ok = no_box_ok = hop_off_ok = watch_ok = False
+    gap_ok = browse_gap_ok = paged_ok = tight_ok = stuck_ok = no_next_ok = False
+    page_comments_ok = comments_off_ok = False
+    try:
+        cfg.surf.provider = "sample"
+        # ① sample 端到端：受理为 queued → 时间推进到 done，产占位灵感并沉淀入池
+        task = TaskRecord(id=sample_task_id, tenant="default", brief=Brief(brand="测试"))
+        session = create_session(task, topic=topic, provider="sample")
+        accepted = session["status"] == "queued" and session["provider"] == "sample"
+        final = list_sessions(task_id=sample_task_id, tenant="default", now=future)
+        done = final[0] if final else {}
+        cards = done.get("cards") or []
+        created_card_ids = [str(card["id"]) for card in cards]
+        sample_done = (
+            done.get("status") == "done"
+            and bool(cards)
+            and done.get("simulated") is True
+            and all(card.get("simulated") for card in cards)
+        )
+        brief_text = render_inspiration(cards)
+        render_ok = bool(cards) and brief_text.startswith("【灵感冲浪】") and bool(cards[0].get("idea"))
+        in_pool = bool(cards) and all(
+            get_pool_card(cid, tenant="default") is not None for cid in created_card_ids
+        )
+        print(
+            f"    样例引擎：受理={accepted}｜推进完成+占位灵感={sample_done}｜"
+            f"入池={in_pool}｜注入简报={render_ok}"
+        )
+
+        # ② 灵感池：主题命中、租户隔离、删除生效
+        pool_hit = any(
+            str(card.get("id")) in created_card_ids for card in list_pool(tenant="default", topic=topic)
+        )
+        cross_leak = any(
+            str(card.get("id")) in created_card_ids for card in list_pool(tenant="acme")
+        )
+        removed = drop_pool_card(created_card_ids[0]) if created_card_ids else False
+        gone = bool(created_card_ids) and get_pool_card(created_card_ids[0], tenant="default") is None
+        pool_ok = pool_hit and not cross_leak and removed and gone
+        print(
+            f"    灵感池：主题命中={pool_hit}｜跨租户不泄漏={not cross_leak}｜删除生效={removed and gone}"
+        )
+
+        # ③ browser：未装 Playwright / 未配白名单→受理即诚实失败并点名（绝不假装浏览过）
+        bsession = create_session(
+            TaskRecord(id=browser_task_id, tenant="default", brief=Brief(brand="测试")),
+            topic=topic,
+            provider="browser",
+            watch_videos=True,
+        )
+        berr = str(bsession.get("error") or "")
+        browser_fail = bsession.get("status") == "failed" and (
+            "playwright" in berr.lower()
+            or "SURF_ALLOWED_DOMAINS" in berr
+            or "SURF_SEED_SITES" in berr
+        )
+        print(f"    browser 诚实失败：status={bsession.get('status')}｜点名安装/配置={browser_fail}")
+
+        # ④ http：未配检索网关→受理即诚实失败并点名配置（绝不假装上网冲过）
+        hsession = create_session(
+            TaskRecord(id=http_task_id, tenant="default", brief=Brief(brand="测试")),
+            topic=topic,
+            provider="http",
+        )
+        herr = str(hsession.get("error") or "")
+        http_fail = hsession.get("status") == "failed" and (
+            "WEB_SEARCH" in herr or "检索" in herr or "搜索" in herr
+        )
+        print(f"    http 诚实失败：status={hsession.get('status')}｜点名搜索配置={http_fail}")
+
+        # ⑤ 在线看视频（不下载文件）：分组抽帧→逐组交 VLM→整段汇总的**纯逻辑**与诚实边界
+        import base64 as _b64
+
+        from app.core.surf import (
+            _chunk_frames,
+            _fill_missing_text,
+            _group_frames,
+            _normalize_comments,
+            _understand_video,
+            _video_calls_per_video,
+        )
+
+        frame = "data:image/png;base64," + _b64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii")
+        # 帧带播放时刻与推进证据（真人「在看」的凭据），一组一组切给 VLM
+        shots = [
+            {"data_url": frame, "at": float(index * 2), "advancing": index > 0, "playing": True}
+            for index in range(6)
+        ]
+        groups = _chunk_frames(shots, 2)
+        chunk_ok = [len(item) for item in groups] == [2, 2, 2] and [
+            group[0]["at"] for group in groups
+        ] == [0.0, 4.0, 8.0]
+        expect_groups = -(-cfg.surf.video_frames // _group_frames(cfg.surf))
+        calls_ok = _video_calls_per_video(cfg.surf) == expect_groups + (
+            1 if expect_groups > 1 else 0
+        ) + (1 if cfg.surf.scrape_comments else 0)
+        # 截图 OCR 兜底：只填 DOM 没抓到的字段，真实 DOM 文字一律优先、绝不被转写覆盖
+        dom_meta = {
+            "title": "DOM 抓到的标题",
+            "description": "",
+            "uploader": "",
+            "views": "",
+            "publish_date": "",
+            "comments": [],
+        }
+        ocr_ok = _fill_missing_text(
+            dom_meta,
+            {
+                "title": "OCR 转写的标题",
+                "description": "OCR 转写的简介",
+                "comments": [{"author": "甲", "text": "OCR 评论", "likes": "3"}, {"text": "  "}],
+            },
+            5,
+        ) and (
+            dom_meta["title"] == "DOM 抓到的标题"
+            and dom_meta["description"] == "OCR 转写的简介"
+            and [row["text"] for row in dom_meta["comments"]] == ["OCR 评论"]
+            and dom_meta.get("comments_from_ocr") is True
+        )
+        kept = {"title": "", "comments": [{"author": "", "text": "DOM 评论", "likes": ""}]}
+        ocr_ok = ocr_ok and not _fill_missing_text(kept, {"comments": [{"text": "OCR 评论"}]}, 5) and (
+            kept["comments"][0]["text"] == "DOM 评论"
+        )
+        # 评论归一：去空、去重、按上限截断（DOM 直抓的评论是真实文字，绝不编造）
+        rows = _normalize_comments(
+            ["好看", "", {"author": "某人", "text": "好看", "likes": "12"}, {"text": "第三条"}], 5
+        )
+        comments_ok = [row["text"] for row in rows] == ["好看", "第三条"]
+        # 没启用图像输入（LLM_VISION 默认关）时：抽了帧也**不交模型**，如实标 vision_skipped + simulated
+        saved_vision = cfg.llm.vision
+        cfg.llm.vision = False
+        try:
+            vu = _understand_video(
+                shots,
+                {"title": "回归视频", "description": "简介", "comments": rows},
+                cfg.surf,
+                {"frames": 6, "advancing_frames": 5, "watched_seconds": 10.0, "played": True},
+            )
+        finally:
+            cfg.llm.vision = saved_vision
+        vu_ok = (
+            vu["simulated"] is True
+            and bool(vu["visual_summary"])
+            and vu["frames_used"] == 6
+            and vu.get("vision_skipped") is True
+            and vu["groups_used"] == 0
+        )
+        try:
+            _understand_video([], {"title": "x"}, cfg.surf)
+            vu_empty = False
+        except SurfUnavailable:
+            vu_empty = True
+        wsession = create_session(
+            TaskRecord(id=watch_task_id, tenant="default", brief=Brief(brand="测试")),
+            topic=topic,
+            provider="sample",
+            watch_videos=True,
+        )
+        watch_degrade = wsession.get("watch_videos") is False and any(
+            "看懂视频" in str(w) for w in wsession.get("warnings") or []
+        )
+        bwatch = bsession.get("watch_videos") is True
+        # 指定视频链接（真人「就是要看这条」）：带 urls 即视为要在线看，且落进会话供审计
+        usession = create_session(
+            TaskRecord(id=urls_task_id, tenant="default", brief=Brief(brand="测试")),
+            topic=topic,
+            provider="browser",
+            video_urls=["https://example.com/watch?v=1"],
+        )
+        urls_ok = usession.get("video_urls") == ["https://example.com/watch?v=1"] and bool(
+            usession.get("watch_videos")
+        )
+
+        # ⑥ 配了读图网关时：**一组一组**交 VLM（每组一次多模态调用）→再一次纯文本汇总；
+        #    真网关没产出可解析画面描述 = 诚实失败，绝不拿空摘要冒充看懂。
+        import json as _json
+
+        import app.core.surf as surf_mod
+        from app.core.surf import SurfDigestError
+        from app.llm.types import LLMResponse
+
+        calls: list[tuple[str, int]] = []
+
+        def _stub_chat(request):
+            picked = max((len(msg.images or []) for msg in request.messages), default=0)
+            calls.append((request.purpose, picked))
+            payload = (
+                {
+                    "segment_summary": f"第 {len(calls)} 组画面：博主在演示产品",
+                    "on_screen_text": "画面字幕文字",
+                    "is_playing": True,
+                    "confidence": "high",
+                }
+                if request.purpose.endswith("frames")
+                else {
+                    "visual_summary": "整段：开箱→上手试用→给出结论",
+                    "on_screen_text": "画面字幕文字",
+                    "comment_insights": "评论集中在价格与续航",
+                    "confidence": "high",
+                }
+            )
+            return LLMResponse(content=_json.dumps(payload, ensure_ascii=False), provider="openai")
+
+        saved_chat, saved_vision_fn = surf_mod.chat, surf_mod.vision_enabled
+        saved_group = cfg.surf.vlm_group_frames
+        surf_mod.chat = _stub_chat
+        surf_mod.vision_enabled = lambda *a, **k: True
+        cfg.surf.vlm_group_frames = 2
+        try:
+            vr = _understand_video(
+                shots,
+                {"title": "回归视频", "description": "简介", "uploader": "UP主", "comments": rows},
+                cfg.surf,
+                {"frames": 6, "advancing_frames": 5, "watched_seconds": 10.0, "played": True},
+            )
+            group_calls_ok = (
+                [purpose.split(".")[-1] for purpose, _ in calls]
+                == ["frames", "frames", "frames", "merge"]
+                and max(size for purpose, size in calls if purpose.endswith("frames")) == 2
+                and vr["groups_used"] == 3
+                and len(vr["segments"]) == 3
+                and vr["merged"] is True
+                and vr["simulated"] is False
+                and vr["segments"][2]["from"] == 8.0
+                and bool(vr["comment_insights"])
+            )
+            surf_mod.chat = lambda request: LLMResponse(
+                content="模型跑题了，一个 JSON 都没给", provider="openai"
+            )
+            try:
+                _understand_video(shots, {"title": "回归视频"}, cfg.surf, {"frames": 6})
+                no_fabricate_ok = False
+            except SurfDigestError:
+                no_fabricate_ok = True
+        finally:
+            surf_mod.chat = saved_chat
+            surf_mod.vision_enabled = saved_vision_fn
+            cfg.surf.vlm_group_frames = saved_group
+
+        # ⑦ 截图 OCR 兜底（DOM 抓不到标题/简介/评论时）：没读图网关**连截都不截**；
+        #    离线/降级引擎给的「转写」一律不采信；真网关给的转写只填 DOM 空缺的字段。
+        class _FakePage:
+            """假页面：只用来验证「该不该截图、该不该采信」，一被越界调用就报错。"""
+
+            def __init__(self, allow_shot: bool) -> None:
+                self.allow_shot = allow_shot
+                self.frames: list[str] = []
+                self.mouse = self
+
+            def wheel(self, *_args) -> None:
+                pass
+
+            def wait_for_timeout(self, _ms: int) -> None:
+                pass
+
+            def locator(self, _sel: str):
+                raise LookupError("没有展开按钮")
+
+            def screenshot(self, **_kwargs) -> bytes:
+                if not self.allow_shot:
+                    raise AssertionError("没有读图网关时不应该截任何一张图")
+                return b"\x89PNG\r\n\x1a\n"
+
+        ocr_no_shot_ok = surf_mod._ocr_page_text(_FakePage(False), cfg.surf) == {}
+        saved_chat = surf_mod.chat
+        saved_vision_fn = surf_mod.vision_enabled
+        surf_mod.vision_enabled = lambda *a, **k: True
+        try:
+            surf_mod.chat = lambda request: LLMResponse(
+                content=_json.dumps({"title": "OCR 标题", "comments": [{"text": "OCR 评论"}]}),
+                provider="openai",
+                simulated=True,
+            )
+            ocr_placeholder_ok = surf_mod._ocr_page_text(_FakePage(True), cfg.surf) == {}
+            surf_mod.chat = lambda request: LLMResponse(
+                content=_json.dumps(
+                    {
+                        "title": "OCR 标题",
+                        "description": "OCR 简介",
+                        "comments": [{"author": "甲", "text": "OCR 评论", "likes": "3"}],
+                    },
+                    ensure_ascii=False,
+                ),
+                provider="openai",
+            )
+            transcribed = surf_mod._ocr_page_text(_FakePage(True), cfg.surf)
+            filled = {"title": "DOM 标题", "description": "", "uploader": "", "views": "", "publish_date": "", "comments": []}
+            ocr_real_ok = bool(transcribed.get("comments")) and _fill_missing_text(filled, transcribed, 5) and (
+                filled["title"] == "DOM 标题"
+                and filled["description"] == "OCR 简介"
+                and filled["comments"][0]["text"] == "OCR 评论"
+            )
+        finally:
+            surf_mod.chat = saved_chat
+            surf_mod.vision_enabled = saved_vision_fn
+        print(
+            f"    在线看视频：分组切帧={chunk_ok}｜成本按组估={calls_ok}｜评论归一={comments_ok}｜"
+            f"OCR 只补空={ocr_ok}｜无视觉网关不假装看懂={vu_ok}｜空帧诚实失败={vu_empty}"
+        )
+        print(
+            f"    看视频入口：sample 不假装={watch_degrade}｜browser 记录 watch={bwatch}｜"
+            f"指定视频链接={urls_ok}"
+        )
+        print(
+            f"    分组交 VLM：逐组调用后汇总={group_calls_ok}｜真网关空产出诚实失败={no_fabricate_ok}"
+        )
+        print(
+            f"    截图 OCR 兜底：无读图网关不截图={ocr_no_shot_ok}｜离线转写不采信={ocr_placeholder_ok}｜"
+            f"真转写只补 DOM 空缺={ocr_real_ok}"
+        )
+
+        # ⑧ 真人式浏览（随机节奏 / 站内搜索 / 列表翻页 / 信息流多跳 / 展开全文与评论区）：
+        #    用**假浏览器**跑通 browser 通道的整条控制流（全程不联网、不装 Playwright），断言：
+        #    滚动幅度与停留确有浮动且开新页前先犹豫、站内搜索走站点自己的搜索框并如实反映搜成没搜、
+        #    翻页只点站点自己的「下一页/加载更多」（没控件、点了没变、页数用尽都如实停下）、
+        #    多跳只点白名单内的同域条目、挑条目按标题认出主题词的排序（并记下凭哪几个词点进去）、
+        #    访问页数一律不越 SURF_MAX_PAGES。
+        import types as _types
+        from types import SimpleNamespace as _Ns
+        from urllib.parse import urlparse as _urlparse
+
+        def _fake_public(url: str) -> str:
+            """假 DNS：只按主机名判公网/内网，让 SSRF 拒绝口径在离线环境也能被验到。"""
+            host = (_urlparse(url).hostname or "").lower()
+            if host in ("localhost", "127.0.0.1", "10.0.0.1") or host.endswith(".local"):
+                raise surf_mod.WebUnavailable(f"拒绝抓取内网/保留地址：{host}")
+            return url
+
+        class _FakeLoc:
+            """假元素句柄：只有「本真有搜索框/遮罩按钮/下一页/展开全文」时才对相应选择器给出可点的结果。"""
+
+            def __init__(self, page, sel: str) -> None:
+                self.page = page
+                self.sel = sel
+
+            @property
+            def first(self):
+                return self
+
+            def _hit(self) -> bool:
+                if self.sel in surf_mod._SEARCH_INPUT_SELECTORS:
+                    return self.page.has_box
+                if self.sel in surf_mod._CONSENT_SELECTORS:
+                    return self.page.has_consent
+                if self.sel in surf_mod._NEXT_PAGE_SELECTORS:
+                    return self.page.has_next
+                if self.sel.startswith("text=") and self.sel[5:] in surf_mod._ARTICLE_EXPAND_LABELS:
+                    return self.page.has_expand
+                return False
+
+            def count(self) -> int:
+                if self.sel in surf_mod._SUGGESTION_SELECTORS:
+                    self.page.sug_probes += 1
+                    return len(self.page.suggestions)
+                return 1 if self._hit() else 0
+
+            def nth(self, index: int):
+                return _FakeSuggestion(self.page, index)
+
+            def is_visible(self) -> bool:
+                return self._hit()
+
+            def click(self, **_kwargs) -> None:
+                if not self._hit():
+                    raise AssertionError(f"不该点一个不存在的元素：{self.sel}")
+                self.page.clicks.append(self.sel)
+                if self.sel in surf_mod._NEXT_PAGE_SELECTORS:
+                    self.page.advance_list()  # 真翻了下一页（地址与正文都变）
+                elif self.sel.startswith("text="):
+                    self.page.expanded += 1  # 展开了折叠的全文
+
+            def press_sequentially(self, text: str, delay: int = 0) -> None:
+                self.page.typed.append((text, delay))
+                self.page.last_query = text  # 框里现在是什么词，回车就搜哪个词
+
+            def fill(self, text: str) -> None:
+                self.page.filled.append(text)
+                self.page.last_query = text
+
+            def press(self, key: str) -> None:
+                self.page.keys.append(key)
+                if key == "Enter" and self.page.results_url:
+                    # 搜哪个词就跳到哪个词的结果页（同一个词重复搜还是同一个地址）
+                    self.page._url = self.page.results_for(self.page.last_query)
+
+            def inner_text(self) -> str:
+                return ""
+
+            def get_attribute(self, _name: str) -> str:
+                return ""
+
+        class _FakeSuggestion:
+            """搜索框打字时站点弹出的**联想下拉里的一条**：读得到文字，点下去就跳那个词的结果页。
+
+            `sug_click_fails=True` 模拟那种「只有样式、没有真实点击处理」的下拉——点不动，
+            真人会把这个词抄进框里再回车，引擎也该这样退回，而不是假装点了。
+            """
+
+            def __init__(self, page, index: int) -> None:
+                self.page = page
+                self.index = index
+
+            def inner_text(self, **_kwargs) -> str:
+                return self.page.suggestions[self.index]
+
+            def click(self, **_kwargs) -> None:
+                if self.page.sug_click_fails:
+                    raise AssertionError("联想项点不动（模拟没有点击处理的下拉）")
+                word = self.page.suggestions[self.index]
+                self.page.sug_clicked.append(word)
+                self.page.last_query = word
+                if self.page.results_url:
+                    self.page._url = self.page.results_for(word)
+
+        class _FakeSurfPage:
+            """假浏览器页：把「访问了什么、滚了多少、打了什么字、翻了第几页」全部记账，供事后核对。"""
+
+            def __init__(
+                self,
+                *,
+                has_box,
+                links,
+                results_url,
+                has_consent=True,
+                has_next=False,
+                next_changes=True,
+                has_comments=False,
+                has_expand=False,
+                result_links=None,
+                suggestions=(),
+                sug_click_fails=False,
+                body_text="",
+            ) -> None:
+                self.has_box = has_box
+                self.has_consent = has_consent
+                self.has_next = has_next
+                self.next_changes = next_changes
+                self.has_comments = has_comments
+                self.has_expand = has_expand
+                self.links = list(links)
+                self.results_url = results_url
+                self.result_links = result_links  # 每版搜索词对应的结果页条目（None=结果页照旧显示 links）
+                self.suggestions = list(suggestions)  # 打字时站点弹出的联想下拉（空 = 这站根本没有联想层）
+                self.sug_click_fails = sug_click_fails
+                self.body_text = body_text  # 指定页面正文（用来模拟「读到门口就被挡住」那种短页）
+                self.sug_clicked: list[str] = []  # 真点过哪几条联想项（按点下去的顺序）
+                self.sug_probes = 0  # 探过几次联想下拉（关掉开关时必须一次都没有）
+                self.last_query = ""  # 搜索框里现在挂着哪个词
+                self.query_urls: dict[str, str] = {}
+                self.frames: list = []
+                self.visited: list[str] = []
+                self.clicks: list[str] = []
+                self.typed: list[tuple[str, int]] = []
+                self.filled: list[str] = []
+                self.keys: list[str] = []
+                self.deltas: list[int] = []
+                self.waits: list[int] = []
+                self._url = "about:blank"
+                self._base_url = ""
+                self.page_index = 1
+                self.expanded = 0
+                self.mouse = self
+
+            @property
+            def url(self) -> str:
+                return self._url
+
+            def goto(self, url: str, **_kwargs) -> None:
+                self.visited.append(url)
+                self._url = url
+                self._base_url = url
+                self.page_index = 1
+
+            def advance_list(self) -> None:
+                """点「下一页」：`next_changes=False` 模拟那种点了没反应的控件（页面一律不许变样）。"""
+                if not self.next_changes:
+                    return
+                self.page_index += 1
+                self._url = f"{self._base_url}?page={self.page_index}"
+
+            def inner_text(self, _sel: str) -> str:
+                if self.body_text:  # 指定了就用它当正文（模拟登录墙/订阅墙那种「短到像一扇门」的页面）
+                    return self.body_text
+                return (
+                    f"正文 {self._url}｜列表第 {self.page_index} 页"
+                    + "｜折叠起来的全文内容。" * self.expanded
+                )
+
+            def title(self) -> str:
+                return "页面标题"
+
+            def wait_for_timeout(self, ms: int) -> None:
+                self.waits.append(int(ms))
+
+            def wait_for_load_state(self, _state: str, **_kwargs) -> None:
+                pass
+
+            def wheel(self, _dx: int, dy: int) -> None:
+                self.deltas.append(int(dy))
+
+            def locator(self, sel: str):
+                return _FakeLoc(self, sel)
+
+            def eval_on_selector_all(self, _sel, _js, *_args):
+                return [{"text": text, "href": href} for text, href in self.current_links]
+
+            def evaluate(self, script, _arg=None):
+                if script is surf_mod._LINK_ITEMS_JS:
+                    return [{"text": text, "href": href} for text, href in self.current_links]
+                if script is surf_mod._COLLECT_COMMENTS_JS:
+                    return list(self._FAKE_COMMENTS) if self.has_comments else []
+                return []
+
+            @property
+            def current_links(self) -> list:
+                """结果页显示的是**这一版关键词**搜出来的条目，信息流页还是那几条 feed links。"""
+                if not self.result_links or not self.results_url or not self._url.startswith(
+                    self.results_url
+                ):
+                    return self.links
+                index = max(0, min(len(self.result_links) - 1, len(self.typed) - 1))
+                return self.result_links[index]
+
+            def results_for(self, query: str) -> str:
+                """搜哪个词就有一个属于那个词的结果页地址（同一个词重复搜仍是同一个地址）。"""
+                if query not in self.query_urls:
+                    step = len(self.query_urls)
+                    self.query_urls[query] = (
+                        self.results_url if step == 0 else f"{self.results_url}&r={step}"
+                    )
+                return self.query_urls[query]
+
+            _FAKE_COMMENTS = [
+                {"author": "网友甲", "text": "这个我之前踩过坑，实测更靠谱", "likes": "128"},
+                {"author": "网友乙", "text": "反对 up 主的结论，价格差太多了", "likes": "77"},
+                {"author": "", "text": "求链接", "likes": ""},
+            ]
+
+        class _FakeBrowser:
+            def __init__(self, page) -> None:
+                self.page = page
+                self.closed = False
+                self.headless: bool | None = None
+
+            def new_page(self):
+                return self.page
+
+            def close(self) -> None:
+                self.closed = True
+
+        def _install_fake_playwright(page):
+            browser = _FakeBrowser(page)
+
+            class _Chromium:
+                def launch(self, headless=True):
+                    browser.headless = headless
+                    return browser
+
+            class _FakePlaywright:
+                def __init__(self) -> None:
+                    self.chromium = _Chromium()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+            sync_mod = _types.ModuleType("playwright.sync_api")
+            sync_mod.sync_playwright = lambda: _FakePlaywright()
+            pkg_mod = _types.ModuleType("playwright")
+            pkg_mod.sync_api = sync_mod
+            saved_modules = {
+                "playwright": sys.modules.get("playwright"),
+                "playwright.sync_api": sys.modules.get("playwright.sync_api"),
+            }
+            sys.modules["playwright"] = pkg_mod
+            sys.modules["playwright.sync_api"] = sync_mod
+            return browser, saved_modules
+
+        feed_links = [
+            ("白名单内第一条", "https://example.com/post/1"),
+            ("白名单内第二条", "https://example.com/post/2"),
+            ("白名单内第三条", "https://example.com/post/3"),
+            ("外站条目", "https://other.com/post/x"),
+            ("内网条目", "http://127.0.0.1/post"),
+            ("视频条目", "https://example.com/video/888"),
+            ("图片直链", "https://example.com/a.png"),
+        ]
+        # 真人挑条目是**扫标题**：同域之内先点标题认得出主题词的那几条，认不出主题的往后排
+        focus_links = [
+            ("本站热门推荐", "https://example.com/post/1"),
+            ("露营装备避坑指南", "https://example.com/post/2"),
+            ("本周编辑精选", "https://example.com/post/3"),
+            ("测评：3 件帐篷实测", "https://example.com/post/4"),
+        ]
+        # 要在线看的视频也一样先扫标题：单会话只看 1 条时，看点哪条正是这一眼决定的
+        video_links = [
+            ("随便一个视频", "https://example.com/video/1"),
+            ("露营装备实测视频", "https://example.com/video/2"),
+        ]
+        surf_cfg = _Ns(
+            provider="browser",
+            headless=True,
+            allowed_domains=["example.com"],
+            seed_sites=["https://example.com/feed"],
+            topics=["露营装备测评"],
+            max_pages=4,
+            scroll_rounds=2,
+            settle_ms=800,
+            timeout_ms=5_000,
+            queries_per_topic=1,
+            cards_per_session=3,
+            pool_max=50,
+            auto_enabled=False,
+            tick_seconds=3_600,
+            watch_videos=False,
+            video_frames=2,
+            video_frame_interval_ms=100,
+            vlm_group_frames=2,
+            max_videos_per_session=1,
+            scrape_comments=False,
+            max_comments=5,
+            crop_to_video=False,
+            click_into_videos=False,
+            human_pace=True,
+            search_on_seeds=True,
+            hops_per_page=2,
+            list_pages=2,
+            page_comments=False,
+            page_gap_ms=1_500,
+            topic_focus=True,
+            search_retries=0,
+            use_suggestions=True,
+            suggestions_max=8,
+            avoid_walls=True,
+        )
+        saved_public = surf_mod._ensure_public_url
+        try:
+            surf_mod._ensure_public_url = _fake_public
+
+            def _run_surf(
+                *,
+                has_box: bool = True,
+                results_url: str = "https://example.com/search?q=x",
+                watch_videos: bool = False,
+                cfg_used=None,
+                has_next: bool = False,
+                next_changes: bool = True,
+                has_comments: bool = False,
+                has_expand: bool = False,
+                links=None,
+                result_links=None,
+                read_before: frozenset = frozenset(),
+                video_urls: tuple = (),
+                suggestions: tuple = (),
+                sug_click_fails: bool = False,
+                body_text: str = "",
+            ):
+                page = _FakeSurfPage(
+                    has_box=has_box,
+                    links=links or feed_links,
+                    results_url=results_url,
+                    has_next=has_next,
+                    next_changes=next_changes,
+                    has_comments=has_comments,
+                    has_expand=has_expand,
+                    result_links=result_links,
+                    suggestions=suggestions,
+                    sug_click_fails=sug_click_fails,
+                    body_text=body_text,
+                )
+                browser, saved_modules = _install_fake_playwright(page)
+                try:
+                    got = surf_mod._gather_browser(
+                        "露营装备测评",
+                        cfg_used or surf_cfg,
+                        watch_videos=watch_videos,
+                        video_urls=video_urls,
+                        read_before=read_before,
+                    )
+                finally:
+                    for name, value in saved_modules.items():
+                        if value is None:
+                            sys.modules.pop(name, None)
+                        else:
+                            sys.modules[name] = value
+                return got, page, browser
+
+            browse_signals, browse_page, browse_browser = _run_surf()
+            by_kind: dict[str, list[dict]] = {}
+            for item in browse_signals:
+                by_kind.setdefault(str(item.get("kind")), []).append(item)
+            content = [item for item in browse_signals if item.get("kind") in ("page", "search", "item")]
+            notes_text = "；".join(str(item.get("excerpt") or "") for item in by_kind.get("note", []))
+            all_signal_urls = " ".join(str(item.get("url") or "") for item in browse_signals)
+            pace_ok = (
+                len(set(browse_page.deltas)) > 1
+                and all(150 <= dy <= 3_000 for dy in browse_page.deltas)
+                and len(set(browse_page.waits)) > 1
+                and any(w != surf_cfg.settle_ms for w in browse_page.waits)
+            )
+            machine_ok = True
+            saved_pace = cfg.surf.human_pace
+            cfg.surf.human_pace = False
+            try:
+                from app.core.surf import _dwell as _dwell_plain, _pace_rng as _pace_rng_plain
+
+                strict_rng = _pace_rng_plain(cfg.surf, "doctor")
+                px_samples = {_dwell_plain(cfg.surf, strict_rng) for _ in range(6)}
+                machine_ok = strict_rng is None and px_samples == {(1_200, max(0, cfg.surf.settle_ms))}
+            finally:
+                cfg.surf.human_pace = saved_pace
+            search_ok = (
+                bool(by_kind.get("search"))
+                and by_kind["search"][0].get("via") == "search"
+                and by_kind["search"][0]["url"] == browse_page.results_url
+                and browse_page.typed
+                and browse_page.typed[0][0] == "露营装备测评"
+                and browse_page.typed[0][1] > 0
+                and "Enter" in browse_page.keys
+            )
+            hop_ok = (
+                len(by_kind.get("item", [])) == 2
+                and all(item.get("via") == "feed" for item in by_kind.get("item", []))
+                and [item.get("listed_as") for item in by_kind.get("item", [])]
+                == ["白名单内第一条", "白名单内第二条"]
+                and all("example.com" in str(item.get("url")) for item in by_kind.get("item", []))
+                and {item["url"] for item in by_kind["item"]} <= set(browse_page.visited)
+            )
+            budget_ok = len(content) == surf_cfg.max_pages and "SURF_MAX_PAGES" in notes_text
+            boundary_ok = (
+                "other.com" not in all_signal_urls
+                and "127.0.0.1" not in all_signal_urls
+                and "/video/888" not in all_signal_urls
+                and "a.png" not in all_signal_urls
+                and "白名单外" in notes_text
+            )
+            consent_ok = any(sel in browse_page.clicks for sel in surf_mod._CONSENT_SELECTORS)
+            close_ok = browse_browser.closed is True
+            no_box_signals, no_box_page, _ = _run_surf(has_box=False, results_url="")
+            no_box_ok = (
+                not any(item.get("kind") == "search" for item in no_box_signals)
+                and not no_box_page.typed
+                and "搜索框" in "；".join(
+                    str(item.get("excerpt") or "") for item in no_box_signals if item.get("kind") == "note"
+                )
+            )
+            picks, offsite = surf_mod._pick_hops(
+                [{"text": "外站条目", "href": "https://other.com/x"}],
+                {"example.com"},
+                2,
+                home_url="https://example.com/feed",
+                visited=set(),
+            )
+            hop_off_ok = picks == [] and offsite == 1
+            # 看视频与浏览共用同一份页数预算：从信息流记下的视频链接要**点进去看**，
+            # 假页面没有播放器 → 如实落 video_error（带入口 via=feed），绝不假装看懂
+            watch_cfg = _Ns(
+                **{
+                    **vars(surf_cfg),
+                    "hops_per_page": 0,
+                    "click_into_videos": True,
+                    "max_videos_per_session": 1,
+                }
+            )
+            watch_signals, watch_page, _ = _run_surf(
+                results_url="", watch_videos=True, cfg_used=watch_cfg
+            )
+            video_rows = [
+                item for item in watch_signals if str(item.get("kind") or "").startswith("video")
+            ]
+            watch_ok = (
+                bool(video_rows)
+                and video_rows[0].get("via") == "feed"
+                and video_rows[0].get("kind") == "video_error"
+                and "https://example.com/video/888" in {item.get("url") for item in video_rows}
+                and "https://example.com/video/888" in watch_page.visited
+            )
+            browse_ok = (
+                bool(video_rows)
+                and {item.get("url") for item in video_rows}
+                == {"https://example.com/video/888"}
+                and all(item.get("via") == "feed" for item in video_rows)
+                and len(video_rows) == 1
+                and sum(
+                    1 for item in browse_signals if item.get("kind") != "note"
+                )
+                <= surf_cfg.max_pages
+            )
+
+            # ⑧b 列表翻页 / 展开全文 / 页面评论区 / 页间停顿：翻页翻的是站点自己的控件，
+            #     做不到的（没控件、点了没反应、页数用尽）一律如实停下并写进说明，绝不假装多刷了页
+            gap_samples = {
+                surf_mod._gap_like_human(surf_cfg, surf_mod._pace_rng(surf_cfg, f"gap-{i}"))
+                for i in range(8)
+            }
+            gap_ok = (
+                len(gap_samples) > 1
+                and all(
+                    int(surf_cfg.page_gap_ms * 0.35) <= g <= min(20_000, int(surf_cfg.page_gap_ms * 1.8))
+                    for g in gap_samples
+                )
+                and surf_mod._gap_like_human(surf_cfg, None) == surf_cfg.page_gap_ms
+            )
+            browse_gap_ok = (
+                bool(content)
+                and content[0].get("gap_ms") == 0  # 会话第一页没什么可犹豫的，不该硬停
+                and all(int(item.get("gap_ms") or 0) > 0 for item in by_kind.get("item", []))
+            )
+            no_next_ok = not any(item.get("list_page") for item in browse_signals) and (
+                "下一页" in notes_text
+            )
+            paged_cfg = _Ns(
+                **{
+                    **vars(surf_cfg),
+                    "list_pages": 3,
+                    "hops_per_page": 0,
+                    "search_on_seeds": False,
+                    "max_pages": 6,
+                }
+            )
+            paged_signals, paged_page, _ = _run_surf(
+                results_url="", has_next=True, cfg_used=paged_cfg
+            )
+            paged_rows = [item for item in paged_signals if item.get("kind") == "page"]
+            paged_notes = "；".join(
+                str(item.get("excerpt") or "")
+                for item in paged_signals
+                if item.get("kind") == "note"
+            )
+            paged_ok = (
+                [item.get("list_page") for item in paged_rows] == [None, 2, 3]
+                and all(item.get("paged_by") for item in paged_rows[1:])
+                and any(sel in paged_page.clicks for sel in surf_mod._NEXT_PAGE_SELECTORS)
+                and len(paged_rows) <= paged_cfg.max_pages
+                and "列表第 2 页" in surf_mod._digest_prompt("露营装备测评", paged_signals, 3)
+                and not paged_notes
+            )
+            stuck_signals, _stuck_page, _stuck_browser = _run_surf(
+                results_url="", has_next=True, next_changes=False, cfg_used=paged_cfg
+            )
+            stuck_ok = (
+                not any(item.get("list_page") for item in stuck_signals)
+                and "页面没变化"
+                in "；".join(
+                    str(item.get("excerpt") or "")
+                    for item in stuck_signals
+                    if item.get("kind") == "note"
+                )
+            )
+            tight_cfg = _Ns(**{**vars(paged_cfg), "max_pages": 2, "list_pages": 4})
+            tight_signals, _tight_page, _tight_browser = _run_surf(
+                results_url="", has_next=True, cfg_used=tight_cfg
+            )
+            tight_notes = "；".join(
+                str(item.get("excerpt") or "")
+                for item in tight_signals
+                if item.get("kind") == "note"
+            )
+            tight_ok = (
+                len([item for item in tight_signals if item.get("kind") == "page"])
+                <= tight_cfg.max_pages
+                and "列表后面的页没有再翻" in tight_notes
+            )
+            text_cfg = _Ns(
+                **{
+                    **vars(surf_cfg),
+                    "list_pages": 1,
+                    "hops_per_page": 1,
+                    "search_on_seeds": False,
+                    "page_comments": True,
+                    "max_pages": 3,
+                }
+            )
+            text_kwargs = {"results_url": "", "has_comments": True, "has_expand": True}
+            text_signals, _text_page, _text_browser = _run_surf(cfg_used=text_cfg, **text_kwargs)
+            read_rows = [item for item in text_signals if item.get("kind") in ("page", "item")]
+            page_comments_ok = (
+                bool(read_rows)
+                and all(item.get("comments") for item in read_rows)
+                and {
+                    row.get("text") for item in read_rows for row in item.get("comments") or []
+                }
+                == {row["text"] for row in _FakeSurfPage._FAKE_COMMENTS}
+                and all(item.get("expanded") for item in read_rows)
+                and "评论区：" in surf_mod._digest_prompt("露营装备测评", text_signals, 3)
+            )
+            comments_off_signals, _co_page, _co_browser = _run_surf(
+                cfg_used=_Ns(**{**vars(text_cfg), "page_comments": False}), **text_kwargs
+            )
+            comments_off_ok = not any(
+                item.get("comments")
+                for item in comments_off_signals
+                if item.get("kind") in ("page", "item")
+            )
+
+            # ⑧c 扫标题挑条目：同域之内先点标题认得出主题词的那几条（凭哪几个词点进去写在 picked_for），
+            #     整版一个都认不出就如实说明「是按列表原顺序顺路读的」，绝不假装条条都贴主题
+            tokens_ok = (
+                surf_mod._topic_tokens("露营装备测评")[:2] == ("露营", "营装")
+                and surf_mod._topic_tokens("") == ()
+                and surf_mod._relevance("随便一条标题", ("露营",)) == (0, [])
+                and surf_mod._relevance("露营 3 件装备清单", ("露营", "装备"))[0] == 3
+            )
+            ranked, _ = surf_mod._pick_hops(
+                [{"text": text, "href": href} for text, href in focus_links],
+                {"example.com"},
+                2,
+                home_url="https://example.com/feed",
+                visited=set(),
+                topic_tokens=surf_mod._topic_tokens("露营装备测评"),
+            )
+            rank_ok = (
+                [str(item.get("url") or "") for item in ranked]
+                == ["https://example.com/post/2", "https://example.com/post/4"]
+                and "露营" in str(ranked[0].get("why") or "")
+            )
+            plain_picks, _ = surf_mod._pick_hops(
+                [{"text": text, "href": href} for text, href in focus_links],
+                {"example.com"},
+                2,
+                home_url="https://example.com/feed",
+                visited=set(),
+            )
+            plain_rank_ok = [str(item.get("url") or "") for item in plain_picks] == [
+                "https://example.com/post/1",
+                "https://example.com/post/2",
+            ] and not any(item.get("why") for item in plain_picks)
+            focus_cfg = _Ns(
+                **{**vars(surf_cfg), "list_pages": 1, "search_on_seeds": False, "max_pages": 4}
+            )
+            focus_kwargs = {"links": focus_links, "results_url": ""}
+            video_kwargs = {"links": video_links, "results_url": ""}
+            focus_signals, _focus_page, _focus_browser = _run_surf(cfg_used=focus_cfg, **focus_kwargs)
+            focus_items = [item for item in focus_signals if item.get("kind") == "item"]
+            focus_ok = (
+                [item.get("listed_as") for item in focus_items]
+                == ["露营装备避坑指南", "测评：3 件帐篷实测"]
+                and all(item.get("picked_for") for item in focus_items)
+                and "因标题含" in surf_mod._digest_prompt("露营装备测评", focus_signals, 3)
+            )
+            focus_off_signals, _off_page, _off_browser = _run_surf(
+                cfg_used=_Ns(**{**vars(focus_cfg), "topic_focus": False}), **focus_kwargs
+            )
+            focus_off_ok = (
+                [
+                    item.get("listed_as")
+                    for item in focus_off_signals
+                    if item.get("kind") == "item"
+                ]
+                == ["本站热门推荐", "露营装备避坑指南"]
+                and not any(item.get("picked_for") for item in focus_off_signals)
+            )
+            blind_ok = "没认出本次主题的词" in notes_text and not any(
+                item.get("picked_for") for item in browse_signals
+            )
+            # 要在线看的视频也先扫标题：贴主题的排到前面（单会话只看 1 条时看点哪条就是这一眼决定的）
+            video_cfg = _Ns(
+                **{
+                    **vars(surf_cfg),
+                    "hops_per_page": 0,
+                    "list_pages": 1,
+                    "search_on_seeds": False,
+                    "click_into_videos": True,
+                    "max_videos_per_session": 1,
+                }
+            )
+            video_signals, _video_page, _video_browser = _run_surf(
+                watch_videos=True, cfg_used=video_cfg, **video_kwargs
+            )
+            vid_rows = [
+                item for item in video_signals if str(item.get("kind") or "").startswith("video")
+            ]
+            video_focus_ok = (
+                len(vid_rows) == 1
+                and vid_rows[0].get("url") == "https://example.com/video/2"
+                and vid_rows[0].get("via") == "feed"
+                and "露营" in str(vid_rows[0].get("picked_for") or "")
+                and vid_rows[0].get("listed_as") == "露营装备实测视频"
+                and "因标题含" in surf_mod._digest_prompt("露营装备测评", video_signals, 3)
+            )
+            video_blind_ok = (
+                not any(item.get("picked_for") for item in video_rows)
+                and "视频链接标题都没认出"
+                in "；".join(
+                    str(item.get("excerpt") or "")
+                    for item in watch_signals
+                    if item.get("kind") == "note"
+                )
+            )
+
+            # ⑧d 搜不对题就换个说法再搜：整句搜出来的结果标题里一个主题词都认不出时，**清空搜索框把词说短**
+            #     再搜一次；再没有更短的说法可换就照旧读最后一版，并如实写明换过哪几版词（绝不偷偷多搜、也不假装搜到了）
+            variant_ok = (
+                surf_mod._query_variants("露营装备测评", 2) == ("露营装备测评", "露营装备")
+                and surf_mod._query_variants("露营装备测评", 1) == ("露营装备测评",)
+                and surf_mod._query_variants("咖啡，入门推荐/避坑", 3)
+                == ("咖啡，入门推荐/避坑", "咖啡", "入门推荐")
+                and surf_mod._query_variants("露营", 3) == ("露营",)
+                and surf_mod._query_variants("", 3) == ()
+            )
+            off_topic_results = [
+                ("本站热门推荐", "https://example.com/post/9"),
+                ("编辑精选", "https://example.com/post/8"),
+            ]
+            retry_base = "https://example.com/search?q="
+            retry_cfg = _Ns(
+                **{
+                    **vars(surf_cfg),
+                    "hops_per_page": 0,
+                    "list_pages": 1,
+                    "max_pages": 3,
+                    "search_retries": 1,
+                }
+            )
+            retry_kwargs = {
+                "results_url": retry_base,
+                "result_links": [off_topic_results, focus_links],
+            }
+            retry_signals, retry_page, _ = _run_surf(cfg_used=retry_cfg, **retry_kwargs)
+            retry_rows = [item for item in retry_signals if item.get("kind") == "search"]
+            retry_notes = "；".join(
+                str(item.get("excerpt") or "")
+                for item in retry_signals
+                if item.get("kind") == "note"
+            )
+            retry_ok = (
+                [query for query, _delay in retry_page.typed] == ["露营装备测评", "露营装备"]
+                and "" in retry_page.filled  # 第二次搜之前真把框里的旧词清掉了
+                and len(retry_rows) == 1  # 第一版那页没读（不贴主题，只留下说明）
+                and retry_rows[0].get("url") == f"{retry_base}&r=1"
+                and retry_rows[0].get("query") == "露营装备"
+                and retry_rows[0].get("search_tried") == ["露营装备测评", "露营装备"]
+                and "换个更短的说法再搜" in retry_notes
+                and "换了 1 次说法才搜到" in retry_notes
+                and "站内搜索关键词" in surf_mod._digest_prompt("露营装备测评", retry_signals, 3)
+            )
+            exhausted_signals, exhausted_page, _ = _run_surf(
+                cfg_used=_Ns(**{**vars(retry_cfg), "search_retries": 2}),
+                results_url=retry_base,
+                result_links=[off_topic_results, off_topic_results],
+            )
+            exhausted_rows = [
+                item for item in exhausted_signals if item.get("kind") == "search"
+            ]
+            exhausted_notes = "；".join(
+                str(item.get("excerpt") or "")
+                for item in exhausted_signals
+                if item.get("kind") == "note"
+            )
+            exhausted_ok = (
+                [query for query, _delay in exhausted_page.typed] == ["露营装备测评", "露营装备"]
+                and len(exhausted_rows) == 1
+                and exhausted_rows[0].get("url") == f"{retry_base}&r=1"
+                and "才搜到" not in exhausted_notes  # 没搜到对题的东西就不说「搜到了」
+                and "换个更短的说法再搜" in exhausted_notes
+            )
+            no_retry_ok = (
+                len(browse_page.typed) == 1
+                and by_kind["search"][0].get("query") == "露营装备测评"
+                and not any(item.get("search_tried") for item in browse_signals)
+            )
+
+            # ⑧e 读过的不重读：上几轮真读进去的条目记在跨会话浏览历史里，这一轮挑条目就跳过它们、
+            #     改读没见过的新条目；整版都是读过的照样按原顺序重读并如实说明；用户指定的链接永远照看
+            memo_cfg = _Ns(**{**vars(focus_cfg), "search_on_seeds": False})
+            read_once = frozenset(
+                {"https://example.com/post/2", "https://example.com/post/4"}
+            )
+            memo_signals, _memo_page, _memo_browser = _run_surf(
+                cfg_used=memo_cfg, links=focus_links, read_before=read_once
+            )
+            memo_items = [item for item in memo_signals if item.get("kind") == "item"]
+            memo_notes = "；".join(
+                str(item.get("excerpt") or "")
+                for item in memo_signals
+                if item.get("kind") == "note"
+            )
+            memo_ok = (
+                [item.get("url") for item in memo_items]
+                == ["https://example.com/post/1", "https://example.com/post/3"]
+                and not any(item.get("url") in read_once for item in memo_items)
+                and "跳过 2 条上几轮就读过的条目" in memo_notes
+                and "改读没见过的新条目" in memo_notes
+            )
+            all_read = frozenset(href for _text, href in focus_links)
+            reread_signals, _reread_page, _reread_browser = _run_surf(
+                cfg_used=memo_cfg, links=focus_links, read_before=all_read
+            )
+            reread_notes = "；".join(
+                str(item.get("excerpt") or "")
+                for item in reread_signals
+                if item.get("kind") == "note"
+            )
+            reread_ok = (
+                bool([item for item in reread_signals if item.get("kind") == "item"])
+                and "上几轮都读过" in reread_notes
+                and "没找到没见过的新条目" in reread_notes
+                and "跳过" not in reread_notes  # 全都重读了，就不能说「跳过了几条」
+            )
+            memo_video_signals, _mv_page, _mv_browser = _run_surf(
+                watch_videos=True,
+                cfg_used=video_cfg,
+                links=video_links,
+                results_url="",
+                read_before=frozenset({"https://example.com/video/2"}),
+            )
+            memo_video_rows = [
+                item
+                for item in memo_video_signals
+                if str(item.get("kind") or "").startswith("video")
+            ]
+            memo_video_notes = "；".join(
+                str(item.get("excerpt") or "")
+                for item in memo_video_signals
+                if item.get("kind") == "note"
+            )
+            memo_video_ok = (
+                bool(memo_video_rows)
+                and memo_video_rows[0].get("url") == "https://example.com/video/1"
+                and all(item.get("url") != "https://example.com/video/2" for item in memo_video_rows)
+                and "1 条顺路发现的视频页上几轮已经看过" in memo_video_notes
+            )
+            # 用户显式点名要看的视频，哪怕上几轮看过也照样看（记忆不能盖过用户的明确要求）
+            direct_signals, _d_page, _d_browser = _run_surf(
+                watch_videos=True,
+                cfg_used=video_cfg,
+                links=video_links,
+                results_url="",
+                read_before=frozenset({"https://example.com/video/2"}),
+                video_urls=("https://example.com/video/2",),
+            )
+            direct_rows = [
+                item for item in direct_signals if str(item.get("kind") or "").startswith("video")
+            ]
+            direct_ok = (
+                bool(direct_rows)
+                and direct_rows[0].get("url") == "https://example.com/video/2"
+                and direct_rows[0].get("via") == "direct"
+                and "上几轮已经看过"
+                not in "；".join(
+                    str(item.get("excerpt") or "")
+                    for item in direct_signals
+                    if item.get("kind") == "note"
+                )
+            )
+            # 历史存储本身：只记真读进去的条目/视频、按租户隔离、同一页再读只 bump 遍数、
+            # 超上限先忘最旧的、开关关掉既不记也不跳、清掉即归零
+            saved_remember = cfg.surf.remember_read
+            saved_history_max = cfg.surf.history_max
+            hist_tenant, other_tenant = "doctor-hist", "doctor-hist-other"
+            try:
+                surf_mod.clear_history(hist_tenant)
+                surf_mod.clear_history(other_tenant)
+                first = [
+                    {
+                        "kind": "item",
+                        "url": "https://example.com/post/1",
+                        "title": "露营装备避坑指南",
+                        "via": "feed",
+                    },
+                    {
+                        "kind": "video",
+                        "url": "https://example.com/video/2",
+                        "title": "露营装备实测视频",
+                        "via": "feed",
+                    },
+                    {"kind": "page", "url": "https://example.com/feed", "title": "起点站首页", "via": "seed"},
+                    {"kind": "error", "url": "https://example.com/post/7", "title": "访问失败", "via": "feed"},
+                    {"kind": "note", "title": "本轮浏览说明", "excerpt": "说明"},
+                ]
+                stored = surf_mod.remember_read_pages(
+                    first, topic="露营装备测评", tenant=hist_tenant
+                )
+                urls = surf_mod.read_history(hist_tenant)
+                leaked = surf_mod.read_history(other_tenant)
+                again = surf_mod.remember_read_pages(
+                    [dict(first[0])], topic="露营装备测评", tenant=hist_tenant
+                )
+                reads = {row["url"]: row["reads"] for row in surf_mod.list_history(hist_tenant)}
+                titles = {row["url"]: row.get("title") for row in surf_mod.list_history(hist_tenant)}
+                store_ok = (
+                    stored == 2  # 只记条目页与视频页：首页/失败页/说明都不算「读过」
+                    and urls
+                    == frozenset(
+                        {"https://example.com/post/1", "https://example.com/video/2"}
+                    )
+                    and not leaked  # 别的租户看不见这个租户读过的页
+                    and again == 1
+                    and reads == {"https://example.com/post/1": 2, "https://example.com/video/2": 1}
+                    and titles["https://example.com/post/1"] == "露营装备避坑指南"
+                )
+                merged = [
+                    {
+                        "kind": "item",
+                        "url": "https://example.com/post/1",
+                        "title": "露营装备避坑指南",
+                        "via": "search",
+                    },
+                    {"kind": "note", "title": "本轮浏览说明", "excerpt": "原有说明"},
+                ]
+                surf_mod._remember_read_note(merged, topic="露营装备测评", tenant=hist_tenant)
+                note_rows = [item for item in merged if item.get("kind") == "note"]
+                merge_ok = len(note_rows) == 1 and "记进浏览历史" in str(note_rows[0].get("excerpt"))
+                cfg.surf.history_max = 20
+                many = [
+                    {
+                        "kind": "item",
+                        "url": f"https://example.com/post/m{i}",
+                        "title": f"条目 m{i}",
+                        "via": "feed",
+                    }
+                    for i in range(25)
+                ]
+                surf_mod.remember_read_pages(many, topic="露营装备测评", tenant=hist_tenant)
+                prune_ok = len(surf_mod.list_history(hist_tenant)) == 20
+                before_off = len(surf_mod.list_history(hist_tenant))
+                cfg.surf.remember_read = False
+                off_urls = surf_mod.read_history(hist_tenant)
+                off_written = surf_mod.remember_read_pages(
+                    [dict(first[0])], topic="露营装备测评", tenant=hist_tenant
+                )
+                cfg.surf.remember_read = True
+                off_ok = (
+                    not off_urls  # 关掉开关=没有记忆，挑条目时什么都不会跳过
+                    and off_written == 0
+                    and len(surf_mod.list_history(hist_tenant)) == before_off  # 也没偷偷记
+                )
+                cleared = surf_mod.clear_history(hist_tenant)
+                clear_ok = bool(cleared) and not surf_mod.list_history(hist_tenant)
+            finally:
+                cfg.surf.remember_read = saved_remember
+                cfg.surf.history_max = saved_history_max
+                surf_mod.clear_history(hist_tenant)
+                surf_mod.clear_history(other_tenant)
+
+            # ⑧f 站内搜索也瞄一眼打字时站点弹出的**联想下拉**：认得出本次主题词的才点上（这一版词是
+            #     站点自己的叫法，不是我们切的词）；一条都认不出就照原词回车（绝不为了点联想改主题）；
+            #     联想项点不动就退回「把词打回搜索框再回车」；关掉开关连下拉都不读；这站没有下拉就一字不提
+            sug_cfg = _Ns(**{**vars(retry_cfg), "search_retries": 0})
+            sug_words = surf_mod._topic_tokens("露营装备测评")
+            sug_pure_ok = (
+                surf_mod._pick_suggestion(
+                    [("露营好物", "h1"), ("露营装备清单", "h2"), ("全站热搜榜", "h3")], sug_words
+                )[0]
+                == "露营装备清单"  # 不点第一条，挑认出主题词最多的那条
+                and surf_mod._pick_suggestion(
+                    [("露营装备清单", "h1"), ("露营装备推荐", "h2")], sug_words
+                )[0]
+                == "露营装备清单"  # 同分时保持站点给的原顺序（站点排序本身是信息）
+                and surf_mod._pick_suggestion([("全站热搜榜", "h1")], sug_words) == ("", None, [])
+            )
+            hot_words = ("露营好物", "露营装备清单", "全站热搜榜")
+
+            def _sug_case(**kwargs):
+                signals, page, _browser = _run_surf(
+                    cfg_used=kwargs.pop("cfg_used", sug_cfg), links=focus_links, **kwargs
+                )
+                rows = [item for item in signals if item.get("kind") == "search"]
+                notes = "；".join(
+                    str(item.get("excerpt") or "")
+                    for item in signals
+                    if item.get("kind") == "note"
+                )
+                return signals, page, rows, notes
+
+            picked_signals, picked_page, picked_rows, picked_notes = _sug_case(
+                suggestions=hot_words
+            )
+            sug_hit_ok = (
+                picked_page.sug_clicked == ["露营装备清单"]  # 真点下去的就是那条
+                # 打进搜索框的仍是原词，只是没回车：点中联想项直接就跳了结果页
+                and [query for query, _delay in picked_page.typed] == ["露营装备测评"]
+                and "Enter" not in picked_page.keys
+                and len(picked_rows) == 1
+                and picked_rows[0].get("query") == "露营装备清单"
+                and not picked_rows[0].get("search_tried")  # 只搜了一版词，不硬凑「换过说法」的记录
+                and picked_rows[0].get("suggested") == "露营装备清单"
+                and picked_rows[0].get("url") == picked_page.results_url
+                and "站点自己给的联想词" in picked_notes
+                and "因为里面认出了露营、营装、装备" in picked_notes
+                and "站点打字时自己弹出来的联想词"
+                in surf_mod._digest_prompt("露营装备测评", picked_signals, 3)
+            )
+            _cap_signals, cap_page, cap_rows, _cap_notes = _sug_case(
+                cfg_used=_Ns(**{**vars(sug_cfg), "suggestions_max": 1}),
+                suggestions=hot_words,
+            )
+            sug_cap_ok = (
+                cap_page.sug_clicked == ["露营好物"]  # 只读回第一条联想，挑无可挑
+                and bool(cap_rows)
+                and cap_rows[0].get("suggested") == "露营好物"
+            )
+            blind_signals, blind_page, blind_rows, blind_notes = _sug_case(
+                suggestions=("全站热搜榜", "编辑精选推荐")
+            )
+            sug_blind_ok = (
+                not blind_page.sug_clicked
+                and blind_page.filled == [""]  # 只清了框里的旧词，没把哪条联想打回去
+                and "Enter" in blind_page.keys  # 照原词回车
+                and [query for query, _delay in blind_page.typed] == ["露营装备测评"]
+                and bool(blind_rows)
+                and blind_rows[0].get("query") == "露营装备测评"
+                and not blind_rows[0].get("suggested")
+                and "一条都没认出本次主题的词" in blind_notes
+                and "不为一条联想改主题" in blind_notes
+                and "联想" not in surf_mod._digest_prompt("露营装备测评", blind_signals, 3)
+            )
+            noop_signals, noop_page, noop_rows, noop_notes = _sug_case(
+                suggestions=hot_words, sug_click_fails=True
+            )
+            sug_stuck_ok = (
+                not noop_page.sug_clicked  # 那种只有样式、没有点击处理的下拉：点就是没点
+                and noop_page.filled == ["", "露营装备清单"]  # 退回真人做法：词打回框里再回车
+                and "Enter" in noop_page.keys
+                and bool(noop_rows)
+                and noop_rows[0].get("query") == "露营装备清单"
+                and noop_rows[0].get("suggested") == "露营装备清单"
+                and "联想项点不动，是把这个词打回搜索框再回车的" in noop_notes
+            )
+            off_signals, off_page, off_rows, off_notes = _sug_case(
+                cfg_used=_Ns(**{**vars(sug_cfg), "use_suggestions": False}),
+                suggestions=hot_words,
+            )
+            sug_off_ok = (
+                off_page.sug_probes == 0  # 关掉开关连联想下拉都不读一眼
+                and not off_page.sug_clicked
+                and [query for query, _delay in off_page.typed] == ["露营装备测评"]
+                and "Enter" in off_page.keys
+                and bool(off_rows)
+                and off_rows[0].get("query") == "露营装备测评"
+                and not any(item.get("suggested") for item in off_signals)
+                and "联想" not in off_notes
+            )
+            plain_signals, plain_page, plain_rows, plain_notes = _sug_case()
+            sug_plain_ok = (
+                plain_page.sug_probes > 0  # 读过了，只是这站根本没弹联想下拉
+                and not plain_page.sug_clicked
+                and plain_page.filled == [""]
+                and bool(plain_rows)
+                and plain_rows[0].get("query") == "露营装备测评"
+                and not any(item.get("suggested") for item in plain_signals)
+                and "联想" not in plain_notes  # 没看到下拉就一个字都不提，绝不假装看到过建议
+            )
+
+            # ⑧g 读到门口就退出来：登录墙/订阅墙/人机验证/维护页都如实标出来（不绕墙，也不把墙上的话当正文），
+            #     判得保守（长正文里顺口提一句「登录」不误判），关掉开关照旧当正文读；被挡住的页不算「读过的页」
+            wall_pure_ok = (
+                surf_mod._wall_reason("露营装备清单", "本站露营装备测评文章，请先登录后阅读完整内容")[0]
+                == "登录墙"
+                and surf_mod._wall_reason("付费专栏", "开通会员才能看全文")[0] == "订阅墙"
+                and surf_mod._wall_reason("安全验证", "Checking your browser, verify you are a human")[0]
+                == "人机验证"
+                and surf_mod._wall_reason("页面不存在", "内容已被删除")[0] == "维护/出错页"
+                # 正文长到不像一扇门 → 就算里面提了一句「先登录同步收藏」也不误判成墙
+                and surf_mod._wall_reason(
+                    "露营装备清单", "这篇稿子很长。" + "＊" * 700 + " 顺带一提登录后可同步收藏"
+                ) == ("", "")
+                # 短页面但没有墙话 = 只是一篇短帖子，不是墙
+                and surf_mod._wall_reason("露营装备清单", "三种帐篷杆的对比，编辑部的实测") == ("", "")
+            )
+            wall_body = "本站露营装备测评文章，请先登录后阅读完整内容。"
+            wall_cfg = _Ns(**{**vars(memo_cfg), "hops_per_page": 1})
+            wall_signals, _wall_page, _wall_browser = _run_surf(
+                cfg_used=wall_cfg, links=focus_links, results_url="", body_text=wall_body
+            )
+            wall_rows = [item for item in wall_signals if item.get("kind") in ("page", "item")]
+            wall_notes = "；".join(
+                str(item.get("excerpt") or "")
+                for item in wall_signals
+                if item.get("kind") == "note"
+            )
+            wall_ok = (
+                len(wall_rows) == 2  # 起点页与点进去的那条条目都被同一扇门挡住
+                and all(item.get("wall") == "登录墙" for item in wall_rows)
+                and all(item.get("excerpt") == wall_body for item in wall_rows)  # 门口原话照记，但不冒充正文
+                and all("没有绕墙" in "；".join(item.get("warnings") or []) for item in wall_rows)
+                and "有 2 页读到门口就被挡住" in wall_notes
+                and "这一页被登录墙挡住"
+                in surf_mod._digest_prompt("露营装备测评", wall_signals, 3)
+                and "绝不能拿它当内容证据出卡" in surf_mod._SURF_SYSTEM
+            )
+            long_body = "露营装备测评要点：请先登录" + "＊" * 400
+            long_signals, _long_page, _long_browser = _run_surf(
+                cfg_used=wall_cfg, links=focus_links, results_url="", body_text=long_body
+            )
+            long_rows = [item for item in long_signals if item.get("kind") in ("page", "item")]
+            wall_trim_ok = (
+                bool(long_rows)
+                and all(item.get("wall") == "登录墙" for item in long_rows)
+                # 门口那几句话只留这么长（够看出是哪种墙就停）
+                and all(
+                    len(str(item.get("excerpt") or "")) == surf_mod._WALL_EXCERPT_CHARS
+                    for item in long_rows
+                )
+                and all(str(item.get("excerpt") or "").endswith("…") for item in long_rows)
+            )
+            off_signals2, _o2_page, _o2_browser = _run_surf(
+                cfg_used=_Ns(**{**vars(wall_cfg), "avoid_walls": False}),
+                links=focus_links,
+                results_url="",
+                body_text=wall_body,
+            )
+            off_rows2 = [item for item in off_signals2 if item.get("kind") in ("page", "item")]
+            off_notes2 = "；".join(
+                str(item.get("excerpt") or "")
+                for item in off_signals2
+                if item.get("kind") == "note"
+            )
+            wall_off_ok = (
+                bool(off_rows2)
+                and not any(item.get("wall") for item in off_signals2)  # 关掉开关就不判墙
+                and "门口" not in off_notes2
+                and all(item.get("excerpt") == wall_body for item in off_rows2)  # 墙话照旧当正文（用户选的口径）
+            )
+            # 被墙挡住的页**没读到内容**，不装成「上几轮读过的」写进浏览历史
+            wall_tenant = "doctor-wall"
+            try:
+                surf_mod.clear_history(wall_tenant)
+                stored_wall = surf_mod.remember_read_pages(
+                    [
+                        {
+                            "kind": "item",
+                            "url": "https://example.com/post/wall",
+                            "title": "要登录才看的那篇",
+                            "wall": "登录墙",
+                            "via": "feed",
+                        },
+                        {
+                            "kind": "item",
+                            "url": "https://example.com/post/read",
+                            "title": "真读完的那篇",
+                            "via": "feed",
+                        },
+                    ],
+                    topic="露营装备测评",
+                    tenant=wall_tenant,
+                )
+                wall_hist_ok = (
+                    stored_wall == 1
+                    and surf_mod.read_history(wall_tenant)
+                    == frozenset({"https://example.com/post/read"})
+                )
+            finally:
+                surf_mod.clear_history(wall_tenant)
+        finally:
+            surf_mod._ensure_public_url = saved_public
+        print(
+            f"    真人式浏览：随机节奏={pace_ok}｜关掉后机器节奏={machine_ok}｜先关遮罩={consent_ok}｜"
+            f"站内搜索={search_ok}"
+        )
+        print(
+            f"    信息流多跳：只点白名单同域条目={hop_ok}｜页数不越上限={budget_ok}｜"
+            f"没搜索框就如实不搜={no_box_ok}｜越界条目不收且不假装={boundary_ok}｜"
+            f"纯函数拒绝越界={hop_off_ok}｜浏览器一定关掉={close_ok}"
+        )
+        print(
+            f"    列表翻页与页间停顿：翻到第 3 页={paged_ok}｜页数用尽就停={tight_ok}｜"
+            f"点了没变即停={stuck_ok}｜没控件只刷第一页={no_next_ok}｜"
+            f"停顿随机={gap_ok}｜第一页不硬停={browse_gap_ok}"
+        )
+        print(
+            f"    展开全文与页面评论区：点开折叠全文并逐条抓评论={page_comments_ok}｜"
+            f"关掉开关就不抓={comments_off_ok}"
+        )
+        print(
+            f"    扫标题挑条目：主题切词={tokens_ok}｜贴主题条目排在前={rank_ok}｜"
+            f"关掉就按列表顺序={plain_rank_ok}｜端到端点进贴题条目={focus_ok}｜"
+            f"开关关掉即退回原顺序={focus_off_ok}｜认不出主题词即如实说明={blind_ok}｜"
+            f"信号写明凭哪几个词点进={bool(focus_items) and all(i.get('picked_for') for i in focus_items)}｜"
+            f"要在线看的视频也先扫标题={video_focus_ok}｜"
+            f"视频标题认不出即如实说明={video_blind_ok}"
+        )
+        print(
+            f"    搜不对题就换个说法再搜：把主题说短={variant_ok}｜"
+            f"清空搜索框换词并只读贴主题那版={retry_ok}｜"
+            f"没有更短的说法就照旧读最后一版={exhausted_ok}｜"
+            f"关掉开关（retries=0）只搜一次={no_retry_ok}"
+        )
+        print(
+            f"    读过的不重读（跨会话浏览历史）：这轮跳过读过的条目改读新的={memo_ok}｜"
+            f"整版都读过仍按原顺序重读并如实说明={reread_ok}｜"
+            f"看过的视频不重复点进={memo_video_ok}｜用户指定的链接照样看={direct_ok}｜"
+            f"只记真读到的页·按租户隔离·再读只加遍数={store_ok}｜"
+            f"记了几条并进同一条浏览说明={merge_ok}｜超上限先忘最旧的={prune_ok}｜"
+            f"关掉开关既不记也不跳={off_ok}｜清掉即归零={clear_ok}"
+        )
+        print(
+            f"    站内搜索也看站点弹出的联想词：只挑认出主题词的那条、同分保持站点顺序={sug_pure_ok}｜"
+            f"点中贴主题的联想词并把这版词记成站点给的={sug_hit_ok}｜"
+            f"只读回前几条（上限生效）={sug_cap_ok}｜"
+            f"一条都认不出就照原词搜且不为联想改主题={sug_blind_ok}｜"
+            f"联想项点不动就退回打回框里再回车={sug_stuck_ok}｜"
+            f"关掉开关连下拉都不读={sug_off_ok}｜这站没下拉就一个字都不提={sug_plain_ok}"
+        )
+        print(
+            f"    读到门口就退出来：认出四种墙且长正文不误判={wall_pure_ok}｜"
+            f"墙上原话照记但不冒充正文、汇总点名被挡页数={wall_ok}｜"
+            f"门口摘录按长度截断={wall_trim_ok}｜"
+            f"关掉开关照旧当正文读={wall_off_ok}｜被挡的页不写进读过的历史={wall_hist_ok}"
+        )
+        print(f"    浏览与看视频同预算：信息流点进视频页={browse_ok}｜看片诚实失败={watch_ok}")
+    finally:
+        cfg.surf.provider = saved_provider
+        cfg.surf.pool_max = saved_pool_max
+        # 回收 doctor 触发的会话与残留灵感卡，不污染真实灵感池
+        for tid in (sample_task_id, browser_task_id, http_task_id, watch_task_id, urls_task_id):
+            drop_task(tid)
+        for cid in created_card_ids:
+            drop_pool_card(cid)
+
+    cleanup_ok = not list_sessions(task_id=sample_task_id) and all(
+        get_pool_card(cid, tenant="default") is None for cid in created_card_ids
+    )
+    print(f"    作业/灵感回收：sessions&pool 清空={cleanup_ok}")
+
+    ok = (
+        accepted
+        and sample_done
+        and render_ok
+        and in_pool
+        and pool_ok
+        and browser_fail
+        and http_fail
+        and chunk_ok
+        and calls_ok
+        and comments_ok
+        and ocr_ok
+        and urls_ok
+        and group_calls_ok
+        and no_fabricate_ok
+        and ocr_no_shot_ok
+        and ocr_placeholder_ok
+        and ocr_real_ok
+        and vu_ok
+        and vu_empty
+        and watch_degrade
+        and bwatch
+        and pace_ok
+        and machine_ok
+        and consent_ok
+        and search_ok
+        and hop_ok
+        and budget_ok
+        and boundary_ok
+        and no_box_ok
+        and hop_off_ok
+        and gap_ok
+        and browse_gap_ok
+        and paged_ok
+        and tight_ok
+        and stuck_ok
+        and no_next_ok
+        and page_comments_ok
+        and comments_off_ok
+        and tokens_ok
+        and rank_ok
+        and plain_rank_ok
+        and focus_ok
+        and focus_off_ok
+        and blind_ok
+        and video_focus_ok
+        and variant_ok
+        and retry_ok
+        and exhausted_ok
+        and no_retry_ok
+        and memo_ok
+        and reread_ok
+        and memo_video_ok
+        and direct_ok
+        and store_ok
+        and merge_ok
+        and prune_ok
+        and off_ok
+        and clear_ok
+        and sug_pure_ok
+        and sug_hit_ok
+        and sug_cap_ok
+        and sug_blind_ok
+        and sug_stuck_ok
+        and sug_off_ok
+        and sug_plain_ok
+        and wall_pure_ok
+        and wall_ok
+        and wall_trim_ok
+        and wall_off_ok
+        and wall_hist_ok
+        and video_blind_ok
+        and browse_ok
+        and watch_ok
+        and close_ok
+        and cleanup_ok
+    )
+    if not ok:
+        print("    ! 灵感冲浪异常：请检查 app/core/surf.py 的状态机、诚实失败与灵感池存储。")
+    return ok
+
+
+def check_dubbing() -> bool:
+    """校验全自动配音（**真实功能**，非样例）：台词切分与说话人识别、sample 离线
+    通道生命周期、**引擎通道真实合成**（Windows 上真跑一次 sapi，产出可播放的 wav、
+    按实长重建时间轴、拼整轨）、缺配置/缺参考音频 fail-loud（点名环境变量与说话人）、
+    合成音频引用安全边界、成本计费口径、租户隔离与作业回收（含落盘音频目录）；
+    并验证**跨语言译制配音**（逐句译成目标语言、原句保留、离线占位译文必须自报）。
+
+    诚实口径是这里最硬的断言：sapi 不消费参考音频就必须在汇总里写明「未克隆」，
+    拿不到真音频只能失败，绝不交一份静音或占位成品冒充配音。
+    """
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import DATA_DIR, get_config
+    from app.core.dubbing import (
+        DEFAULT_NARRATOR,
+        _estimate_cost,
+        build_manifest,
+        create_job,
+        detect_language,
+        drop_task,
+        get_job,
+        list_jobs,
+        render_timeline_text,
+        resolve_audio_path,
+        resolve_provider,
+        resolve_voice_path,
+        translate_manifest,
+    )
+    from app.core.types import Brief, TaskRecord
+
+    print("\n[全自动配音（引擎真实合成）]")
+
+    cfg = get_config()
+
+    def _dub_task(tid: str, tenant: str = "default") -> TaskRecord:
+        return TaskRecord(id=tid, tenant=tenant, brief=Brief(brand="测试"))
+
+    script = "甲：你终于来了。\n乙（低声）：别出声，跟我走。\n雨越下越大，没有人回答。"
+    # 故意不给旁白配参考音频，验证缺音点名
+    voices = {"甲": "assets/jia.wav", "乙": "assets/yi.wav"}
+
+    # 1) 清单：切出 3 句、3 位说话人（无标记行归旁白），旁白缺音
+    manifest = build_manifest(script, voices=voices, provider="sample")
+    manifest_ok = (
+        manifest["line_count"] == 3
+        and set(manifest["speakers"]) == {"甲", "乙", DEFAULT_NARRATOR}
+        and manifest["segments"][0]["speaker"] == "甲"
+        and manifest["segments"][2]["speaker"] == DEFAULT_NARRATOR
+        and manifest["missing_voices"] == [DEFAULT_NARRATOR]
+        and all(seg["duration_seconds"] > 0 for seg in manifest["segments"])
+    )
+    print(
+        f"    台词切分/说话人识别：{manifest['line_count']} 句／"
+        f"{len(manifest['speakers'])} 人｜缺音点名={manifest['missing_voices']}｜"
+        f"{'正确' if manifest_ok else '异常'}"
+    )
+
+    # 1b) 小说式句式：有标记（前置/后置）要认得，没标记的叙述句归旁白不冒充
+    novel = '甲说：“你终于来了。”\n「别出声。」乙低声说。\n他叹了口气，转身离开。\n“谁？”\n他叹了口气说：“走吧。”'
+    nm = build_manifest(novel, voices={}, provider="sample")
+    novel_ok = (
+        nm["line_count"] == 5
+        and nm["segments"][0]["speaker"] == "甲"  # 前置：剥离「说」取名字，引号已剥
+        and nm["segments"][0]["text"] == "你终于来了。"
+        and nm["segments"][1]["speaker"] == "乙"  # 后置：「「台词」乙低声说。」
+        and nm["segments"][1]["text"] == "别出声。"
+        and nm["segments"][2]["speaker"] == DEFAULT_NARRATOR  # 叙述句不冒充说话人
+        and bool(nm["segments"][2]["issue"])
+        and nm["segments"][3]["text"] == "谁？"  # 纯引号行：剥引号后归旁白并标注
+        and bool(nm["segments"][3]["issue"])
+        and nm["segments"][4]["speaker"] == DEFAULT_NARRATOR  # 「了」字叙述句前置也不采信
+        and bool(nm["segments"][4]["issue"])
+        and set(nm["speakers"]) == {"甲", "乙", DEFAULT_NARRATOR}
+    )
+    print(f"    小说式句式识别：前置/后置/叙述句/纯引号 全部归位={novel_ok}")
+
+    saved_api_url = cfg.dubbing.api_url
+    saved_budget = cfg.cost_budget_usd
+    try:
+        cfg.dubbing.api_url = ""  # 默认离线态：无网关
+
+        task = _dub_task("doctor-dub-1")
+        job = create_job(task, script_text=script, voices=voices, provider="sample")
+        accepted = job["status"] == "queued" and job["provider"] == "sample"
+        final = list_jobs(task_id=task.id, now=datetime.now(timezone.utc) + timedelta(seconds=90))
+        row = final[0] if final else {}
+        summary = row.get("summary") or {}
+        done_ok = (
+            row.get("status") == "done"
+            and summary.get("simulated") is True
+            and summary.get("line_count") == 3
+            and all(
+                str(seg.get("audio_url", "")).startswith("sample://")
+                for seg in summary.get("segments") or []
+            )
+            and bool(row.get("timeline_path"))
+        )
+        lifecycle_ok = accepted and done_ok
+        print(f"    sample 离线通道：受理={accepted}｜推进完成+时间轴汇总={done_ok}")
+
+        # 2) 时间轴汇总正文：每段含源文本 + 参考音频 + 配音（用户要的「汇总」）
+        timeline_text = render_timeline_text(summary)
+        timeline_ok = (
+            "源文本" in timeline_text
+            and "配音" in timeline_text
+            and "参考音频" in timeline_text
+            and "时长口径" in timeline_text
+            and "你终于来了" in timeline_text
+        )
+        print(f"    时间轴汇总 txt：含源文本／参考音频／配音={timeline_ok}")
+
+        # 3) 租户隔离
+        visible = get_job(job["id"], tenant="default") is not None
+        leaked = get_job(job["id"], tenant="acme") is not None
+        tenant_ok = visible and not leaked
+        print(f"    租户隔离：本租户可见={visible}｜跨租户泄漏={leaked}")
+
+        # 4) real + 无网关（默认态）→ 显式失败，绝不触网、绝不假装配音
+        real_no_gw = create_job(
+            _dub_task("doctor-dub-2"), script_text=script, voices=voices, provider="real"
+        )
+        gateway_fail = real_no_gw["status"] == "failed" and "未配置" in str(real_no_gw["error"])
+        print(f"    real（未配网关）：status={real_no_gw['status']}｜error={str(real_no_gw['error'])[:30]}…")
+
+        # 5) real + 配了网关但旁白缺参考音频 → 提交前失败并点名说话人（不触网）
+        cfg.dubbing.api_url = "https://dub-gw.example.invalid/tts"
+        cfg.cost_budget_usd = 100.0  # 排除成本熔断，确保命中缺音分支
+        real_missing = create_job(
+            _dub_task("doctor-dub-3"), script_text=script, voices=voices, provider="real"
+        )
+        missing_fail = real_missing["status"] == "failed" and DEFAULT_NARRATOR in str(real_missing["error"])
+        print(f"    real（缺参考音频）：status={real_missing['status']}｜点名说话人={missing_fail}")
+    finally:
+        cfg.dubbing.api_url = saved_api_url
+        cfg.cost_budget_usd = saved_budget
+
+    # 6) 空文本（解析不出台词）→ 直接拒绝（路由层转 409）
+    empty_ok = False
+    try:
+        create_job(
+            TaskRecord(id="doctor-dub-4", tenant="default", brief=Brief(brand="测试")),
+            script_text="   ",
+            provider="sample",
+        )
+    except ValueError:
+        empty_ok = True
+    print(f"    空文本防护：拒绝={empty_ok}")
+
+    # 7) 本地参考音频路径边界 + 各通道计费口径（系统/自建音色零成本、云端按字符）
+    path_ok = (
+        resolve_voice_path("../secret.wav")[0] is None and resolve_voice_path("nope.wav")[0] is None
+    )
+    est_ok = (
+        _estimate_cost(manifest, "sample") == 0.0
+        and _estimate_cost(manifest, "sapi") == 0.0
+        and _estimate_cost(manifest, "sovits") == 0.0
+        and _estimate_cost(manifest, "elevenlabs") > 0.0
+    )
+    print(
+        f"    参考音频路径安全边界：越界/缺失拒绝={path_ok}"
+        f"｜计费口径（本机/自建归零、云端按字符）={est_ok}"
+    )
+
+    # 8) 合成音频引用边界：只认 dubbing/<本作业>/<文件名>，跨作业与越路径一律拒绝
+    ref_ok = (
+        resolve_audio_path("dubbing/dub_other/seg_0001.wav", "dub_mine")[0] is None
+        and resolve_audio_path("dubbing/dub_mine/../../secret.wav", "dub_mine")[0] is None
+        and resolve_audio_path("/etc/passwd", "dub_mine")[0] is None
+        and resolve_audio_path("https://gw.example/a.wav", "dub_mine")[0] is None
+        and resolve_audio_path("dubbing/dub_mine/", "dub_mine")[0] is None
+    )
+    print(f"    合成音频引用边界：跨作业/越界/绝对路径/远端/目录 全部拒绝={ref_ok}")
+
+    # 9) 通道选择：auto 只在真引擎里择优，未知通道不静默变身
+    chosen, auto_note = resolve_provider("auto")
+    provider_ok = (
+        chosen in ("sample", "sapi", "sovits", "elevenlabs", "real")
+        and resolve_provider("not-a-provider")[0] == "sample"
+    )
+    print(
+        f"    通道选择：auto→{chosen}（{auto_note or '未配置任何引擎，回退 sample 模拟'}）"
+        f"｜未知通道归位 sample={provider_ok}"
+    )
+
+    # 10) 引擎通道 fail-loud：缺 key/端点在**受理时**就点名环境变量，绝不静默换通道
+    saved_sovits = cfg.dubbing.sovits_base_url
+    saved_el_key = cfg.dubbing.elevenlabs_api_key
+    cfg.dubbing.sovits_base_url = ""
+    cfg.dubbing.elevenlabs_api_key = ""
+    cfg.cost_budget_usd = 100.0  # 排除成本熔断，确保命中缺配置分支
+    try:
+        sovits_job = create_job(
+            _dub_task("doctor-dub-5"), script_text=script, voices=voices, provider="sovits"
+        )
+        eleven_job = create_job(
+            _dub_task("doctor-dub-6"), script_text=script, voices=voices, provider="elevenlabs"
+        )
+    finally:
+        cfg.dubbing.sovits_base_url = saved_sovits
+        cfg.dubbing.elevenlabs_api_key = saved_el_key
+        cfg.cost_budget_usd = saved_budget
+    missing_engine_ok = (
+        sovits_job["status"] == "failed"
+        and "DUBBING_SOVITS_BASE_URL" in str(sovits_job["error"])
+        and eleven_job["status"] == "failed"
+        and "DUBBING_ELEVENLABS_API_KEY" in str(eleven_job["error"])
+    )
+    print(f"    sovits／elevenlabs 缺配置：受理即失败并点名变量={missing_engine_ok}")
+
+    # 11) sapi 端到端：Windows 上真的合成可播放 wav（真功能要拿真音频当证据）
+    sapi_job = create_job(
+        _dub_task("doctor-dub-7"), script_text=script, voices=voices, provider="sapi"
+    )
+    row = sapi_job
+    deadline = time.time() + 240
+    while row.get("status") in ("queued", "synthesizing") and time.time() < deadline:
+        time.sleep(2)
+        row = get_job(str(sapi_job["id"]), tenant="default") or row
+    if row.get("status") == "failed":
+        # 本机不具备条件（非 Windows / 无 PowerShell / 无中文音色）：显式失败，绝不交占位成品
+        sapi_ok = bool(str(row.get("error") or "")) and not row.get("summary")
+        print(f"    sapi 通道：本机不可用→显式失败无汇总={sapi_ok}｜{str(row.get('error'))[:46]}…")
+    else:
+        engine_summary = row.get("summary") or {}
+        segs = engine_summary.get("segments") or []
+        sapi_ok = (
+            row.get("status") == "done"
+            and engine_summary.get("simulated") is False
+            and len(segs) == 3
+            and all(str(seg.get("audio_ref") or "") for seg in segs)
+            and all(
+                resolve_audio_path(str(seg.get("audio_ref")), str(sapi_job["id"]))[0] is not None
+                and (DATA_DIR / str(seg.get("audio_ref"))).stat().st_size > 200
+                for seg in segs
+            )
+            and all(float(seg.get("duration_seconds") or 0) > 0 for seg in segs)  # 静音即不合格
+            and all(seg.get("estimated") is False for seg in segs)  # wav 走实测
+            and bool(engine_summary.get("full_audio"))
+            and any("克隆" in str(x) for x in engine_summary.get("issues") or [])
+            and bool(row.get("timeline_path"))
+        )
+        print(
+            f"    sapi 本机真合成：status={row.get('status')}"
+            f"｜真音频+实长时间轴+整轨+不克隆标注={sapi_ok}"
+        )
+
+    # 12) 跨语言译制：离线引擎产出**占位译文**——原文必须保留、必须自报非真实翻译；
+    #     目标语言＝源语言时不翻译（直接配原文），绝不默默拿原文冒充译文
+    zh_manifest = build_manifest(script, voices=voices, provider="sample")
+    translate_manifest(zh_manifest, target_lang="en")
+    trans_ok = (
+        zh_manifest.get("translated") is True
+        and zh_manifest.get("source_lang") == "zh"
+        and zh_manifest.get("target_lang") == "en"
+        and zh_manifest.get("translation_simulated") is True  # 离线：占位译文必须自报
+        and all(
+            seg.get("source_text") and seg.get("text") != seg.get("source_text")
+            for seg in zh_manifest["segments"]
+        )
+        and detect_language("你好，世界") == "zh"
+        and detect_language("hello world") == "en"
+    )
+    same_manifest = build_manifest(script, voices=voices, provider="sample")
+    translate_manifest(same_manifest, target_lang="zh")
+    same_ok = (
+        same_manifest.get("translated") is False
+        and not same_manifest["segments"][0].get("source_text")
+    )
+    trans_task = _dub_task("doctor-dub-8")
+    create_job(trans_task, script_text=script, voices=voices, provider="sample", target_lang="en")
+    trans_rows = list_jobs(task_id=trans_task.id, now=datetime.now(timezone.utc) + timedelta(seconds=90))
+    trow = trans_rows[0] if trans_rows else {}
+    tsum = trow.get("summary") or {}
+    trans_e2e_ok = (
+        trow.get("status") == "done"
+        and tsum.get("translated") is True
+        and tsum.get("translation_simulated") is True
+        and all(s.get("source_text") for s in tsum.get("segments") or [])
+        and "译制配音" in render_timeline_text(tsum)
+        and "原文" in render_timeline_text(tsum)
+        and "译配" in render_timeline_text(tsum)
+    )
+    print(
+        f"    跨语言译制：占位译文+原文保留+自报={trans_ok}"
+        f"｜目标=源不译={same_ok}｜sample 端到端对照={trans_e2e_ok}"
+    )
+
+    touched = [
+        "doctor-dub-1",
+        "doctor-dub-2",
+        "doctor-dub-3",
+        "doctor-dub-5",
+        "doctor-dub-6",
+        "doctor-dub-7",
+        "doctor-dub-8",
+    ]
+    sapi_dir = DATA_DIR / "dubbing" / str(sapi_job["id"])
+    cleanup_ok = (
+        all(drop_task(t) >= 1 for t in touched)
+        and all(not list_jobs(task_id=t) for t in touched)
+        and not sapi_dir.exists()
+    )
+    print(f"    作业回收：记录清空 + 已落盘音频目录回收={cleanup_ok}")
+
+    ok = (
+        manifest_ok
+        and novel_ok
+        and lifecycle_ok
+        and timeline_ok
+        and tenant_ok
+        and gateway_fail
+        and missing_fail
+        and empty_ok
+        and path_ok
+        and ref_ok
+        and est_ok
+        and provider_ok
+        and missing_engine_ok
+        and sapi_ok
+        and trans_ok
+        and same_ok
+        and trans_e2e_ok
+        and cleanup_ok
+    )
+    if not ok:
+        print(
+            "    ! 全自动配音异常：请检查 app/core/dubbing.py 的台词切分、引擎合成、"
+            "诚实失败与时间轴汇总。"
+        )
     return ok
 
 
@@ -2604,6 +4613,8 @@ def main() -> int:
         imagegen = check_imagegen()
         videogen = check_videogen()
         videounderstand = check_video_understand()
+        surf = check_surf()
+        dubbing = check_dubbing()
         petgen = check_petgen()
         skillgen = check_skillgen()
         copyright_check = check_copyright()
@@ -2637,6 +4648,8 @@ def main() -> int:
         "图片生成样例": imagegen,
         "视频生成样例": videogen,
         "视频理解样例": videounderstand,
+        "灵感冲浪（自主浏览）": surf,
+        "全自动配音（真实引擎）": dubbing,
         "桌面宠物样例": petgen,
         "创作技能提炼样例": skillgen,
         "二创版权清单": copyright_check,
@@ -2660,10 +4673,27 @@ def main() -> int:
             "OTLP 导出链路 id 一致、层级与智能体归属保留；"
             "W3C traceparent 可跨进程延续、采样只作用于导出面；"
             "数字人渲染样例的清单、惰性推进、租户隔离与失败路径均符合预期；"
+            "全自动配音的台词切分与说话人识别、时间轴汇总（含源文本/参考音频/配音）、"
+            "引擎通道真实合成（sapi 本机出真 wav）、缺配置/缺参考音频受理即点名变量与说话人；"
             "桌面宠物样例的真帧落盘、色键透明、宠物包内运行器与诚实失败"
             "（未配图片端点 / 成本熔断 / 无视觉指导）均符合预期；"
             "创作技能提炼样例的作品采集口径、SKILL.md 真落盘与诚实失败"
             "（行内时间戳不误判为字幕 / 未配模型网关 / 成本熔断 / 无作品）均符合预期；"
+            "灵感冲浪的会话生命周期与诚实失败（未装 Playwright / 未配白名单 / 未配检索网关均点名）、"
+            "在线看视频的**分组截图逐组交 VLM 再一次汇总**与「没配读图网关就只截帧不交模型」（vision_skipped）、"
+            "真人式浏览（随机节奏与机器节奏分野、站内搜索成功与「没搜索框就不搜」、点站点自己的「下一页」接着刷列表、"
+            "展开全文与页面评论区逐条抓取、挑条目先扫标题认出主题词（并记下凭哪几个词点进去，"
+            "要在线看的视频也一样从贴主题的标题里挑）、搜不对题就清空搜索框换个更短的说法再搜"
+            "（换过哪几版关键词全记在信号上）、"
+            "打字时也用站点弹出的搜索联想（只点认得出主题词的那条、这一版关键词记成站点给的 suggested、"
+            "认不出就照原词回车不为联想改主题、点不动就退回打回搜索框再回车、没下拉就一字不提）、"
+            "读到门口就被登录/订阅/人机验证/维护页挡住时只记下门口那几句话（标成 wall，不冒充正文也不绕墙，"
+            "被挡的页不算读过的页）、"
+            "读过的条目下一轮改读没见过的（跨会话浏览历史按租户隔离、只记真读到的页、"
+            "整版都读过仍按原顺序重读并如实说明、用户指定的链接永远照看、关掉开关即不记也不跳）、"
+            "信息流多跳只点同域内容页、"
+            "起点/搜索/列表后续页/条目/视频共用 SURF_MAX_PAGES 预算并把没刷到的部分写进浏览说明、越界与环回链接一律不访问）、"
+            "跨任务灵感池的租户隔离与残留回收均符合预期；"
             "Brief 素材的画幅为文件头实测值、本地素材路径受限于 assets/ 目录、"
             "离线链路如实声明「不读图」且带素材的任务仍能跑完；"
             "确定性计算沙箱在受限语法内可复现求值、越权语法一律拦截，"
@@ -2711,6 +4741,8 @@ def main() -> int:
         print("  · 视频生成样例异常，请检查 app/core/videogen.py 的清单、成本熔断与状态机。")
     if not videounderstand:
         print("  · 视频理解样例异常，请检查 app/core/videounderstand.py 的状态机、诚实失败与存储。")
+    if not dubbing:
+        print("  · 全自动配音异常，请检查 app/core/dubbing.py 的台词切分、引擎合成、时间轴汇总与诚实失败。")
     if not petgen:
         print("  · 桌面宠物样例异常，请检查 app/core/petgen.py 的状态机、帧落盘与诚实失败。")
     if not skillgen:

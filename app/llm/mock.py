@@ -3522,6 +3522,69 @@ def generate_video_script(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def generate_translate(ctx: dict[str, Any]) -> dict[str, Any]:
+    """译制配音的离线**占位**翻译：形状与真实网关译文一致，内容按目标语种加标记。
+
+    离线引擎不具备翻译能力，这里如实产出「[目标语种] 原句」占位串——
+    dubbing 侧据 response.simulated 标注 ``translation_simulated``，
+    绝不把占位串当成真实译文（真实译制请配置 LLM_* 真实网关）。"""
+    target = as_str(ctx.get("target_lang"), "").strip().lower() or "target"
+    segments = [rec(item) for item in as_obj_array(ctx.get("segments"))]
+    translations: list[dict[str, Any]] = []
+    for position, item in enumerate(segments, start=1):
+        index = int(as_num(item.get("index"), position))
+        text = as_str(item.get("text"))
+        translations.append({"index": index, "text": f"[{target}] {text}" if text else ""})
+    return {"translations": translations}
+
+
+def generate_surf_digest(ctx: dict[str, Any]) -> dict[str, Any]:
+    """灵感冲浪的离线**占位**消化：形状与真实 LLM 消化出的灵感卡一致，内容按信号确定性拼出。
+
+    离线引擎不具备「读懂网页/看视频后产生创意」的能力，这里如实产出与主题/信号弱相关的
+    占位灵感卡——surf 侧据 response.simulated 标注 ``simulated=True``，绝不把占位当真实灵感
+    （真实冲浪消化请配 LLM_* 真实网关 + browser/http 通道）。"""
+    topic = as_str(ctx.get("topic"), "").strip() or "未命名主题"
+    signals = [rec(item) for item in as_obj_array(ctx.get("signals"))]
+    want = int(as_num(ctx.get("max_cards"), 5))
+    want = max(1, min(20, want))
+    cards: list[dict[str, Any]] = []
+    for position in range(1, want + 1):
+        signal = signals[(position - 1) % len(signals)] if signals else {}
+        src = as_str(signal.get("url")) or as_str(signal.get("title"))
+        title = as_str(signal.get("title")) or f"信号{position}"
+        cards.append(
+            {
+                "idea": f"[离线占位] 围绕「{topic}」的灵感 {position}：借「{title}」的角度切入",
+                "angle": f"（占位，非真实冲浪所得）从 {title} 提炼与 {topic} 的结合点",
+                "hook": f"[{topic}] 开场钩子 {position}",
+                "why_now": "离线占位：未联网、未真实消化，不代表真实热点",
+                "sources": [src] if src else [],
+            }
+        )
+    return {"cards": cards}
+
+
+def generate_surf_videounderstand(ctx: dict[str, Any]) -> dict[str, Any]:
+    """冲浪看视频的离线**占位**看懂：形状与真实 VLM 看懂一致，内容按标题/帧数确定性拼出。
+
+    离线引擎不读图，无法真的「看懂」画面，这里如实产出占位描述——surf 侧据 response.simulated
+    标注 ``simulated=True``，绝不把占位当真实看懂（真实看懂需配支持图像输入的 LLM_* 多模态网关）。
+    """
+    video = rec(ctx.get("video"))
+    title = as_str(video.get("title")).strip() or "未命名视频"
+    frames = int(as_num(ctx.get("frame_count"), 0))
+    comments = as_str(video.get("comments")).strip()
+    return {
+        "visual_summary": f"（离线占位、未真实看懂）对《{title}》的 {frames} 张画面截图的占位描述",
+        "on_screen_text": f"（离线占位）未从画面转写真实文字（《{title}》）",
+        "comment_insights": (
+            f"（离线占位）结合评论的占位洞察：{comments[:60]}" if comments else "（离线占位）无评论可参"
+        ),
+        "confidence": "low",
+    }
+
+
 # ------------------------------------------------------------------ #
 # 生成器注册表                                                        #
 # ------------------------------------------------------------------ #
@@ -3544,6 +3607,9 @@ GENERATORS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "DOC.digest.map": generate_digest_map,
     "DOC.digest.reduce": generate_digest_reduce,
     "A4.copy.version": generate_copy_version,
+    "DUB.translate": generate_translate,
+    "SURF.digest": generate_surf_digest,
+    "SURF.videounderstand": generate_surf_videounderstand,
 }
 
 

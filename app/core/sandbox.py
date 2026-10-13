@@ -52,9 +52,15 @@ _BINOP_FUNCS: dict[type[ast.operator], Any] = {
 }
 
 #: 允许调用的数学函数（只认名字，不认属性调用）
+# math.cbrt 是 3.11+ 才有的标准库入口；低版本用 copysign 等价实现回退，
+# 保证沙箱函数面不随解释器版本漂移。
+_CBRT = getattr(math, "cbrt", None) or (
+    lambda x: math.copysign(abs(x) ** (1.0 / 3.0), x)
+)
+
 _ALLOWED_FUNCS: dict[str, Any] = {
     "abs": abs,
-    "cbrt": math.cbrt,
+    "cbrt": _CBRT,
     "ceil": math.ceil,
     "exp": math.exp,
     "floor": math.floor,

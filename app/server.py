@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from .api.routes import create_api_router
 from .config import API_TOKENS, ROOT_DIR, STORAGE_MODE, ensure_dirs, get_config
 from .core import otel
+from .core import surf
 from .core.blackboard import blackboard
 from .core.orchestrator import orchestrator
 from .core.store import task_store
@@ -81,9 +82,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         f"｜Turn Budget {config.turn_budget}"
     )
 
-    # 发布自动投递：仅在显式开启时启动后台巡检，默认关闭以保持进程「零副作用」
+    # 发布自动投递 / 灵感自主冲浪：各自仅在显式开启时启动后台巡检，
+    # 默认关闭以保持进程「零副作用」（无外网连接、不自动囤灵感）。
     stop = asyncio.Event()
     ticker: asyncio.Task[None] | None = None
+    surf_ticker: asyncio.Task[None] | None = None
     if config.publish.auto_dispatch:
         interval = max(5, config.publish.tick_seconds)
 
@@ -106,12 +109,37 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         ticker = asyncio.create_task(_publish_loop())
         log.info(f"发布自动投递已启用：每 {interval}s 巡检一次到期排期")
 
+    if config.surf.auto_enabled:
+        surf_interval = max(30, config.surf.tick_seconds)
+
+        async def _surf_loop() -> None:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=surf_interval)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+                try:
+                    started = await asyncio.to_thread(surf.autonomous_tick)
+                    if started:
+                        log.info(f"自主冲浪：本轮发起 {started} 个会话（按 SURF_TOPICS）")
+                except Exception as error:  # noqa: BLE001 - 冲浪失败不能拖垮服务
+                    log.warn("自主冲浪巡检失败", error)
+
+        surf_ticker = asyncio.create_task(_surf_loop())
+        log.info(
+            f"灵感自主冲浪已启用：每 {surf_interval}s 按 SURF_TOPICS 囤一轮"
+            f"（通道 {config.surf.provider}）"
+        )
+
     try:
         yield
     finally:
         stop.set()
         if ticker is not None:
             ticker.cancel()
+        if surf_ticker is not None:
+            surf_ticker.cancel()
         log.info("正在优雅退出…")
         # 先 flush OTLP 再落盘：BatchSpanProcessor 里可能还有未发送的 span
         otel.shutdown()

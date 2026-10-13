@@ -7,7 +7,8 @@
 断点续跑后端、评估配置与聚合、记忆库租户视角、六维评分结构、`judge.scored` 事件、
 **调用轨迹的 span 树层级与 OTel 形状导出**、**入站 traceparent 的跨进程延续**、
 **数字人 / 桌宠 / 视频理解样例的创建 → 惰性推进 → 完成闭环**、
-**创作技能提炼的量化落盘 → SKILL.md 预览 → 技能包下载 → 沉淀记忆库**。
+**创作技能提炼的量化落盘 → SKILL.md 预览 → 技能包下载 → 沉淀记忆库**、
+**灵感冲浪的占位灵感 → 灵感池沉淀 → 选卡注入 Brief → 跨会话浏览历史（没真读就不记）**.
 
 用途：改完评估/租户/追踪相关代码后先跑它，比直接上 smoke 更快拿到「哪里断了」。
 
@@ -502,6 +503,54 @@ try:
         check("删任务回收技能作业", purged["purged_skillgen_jobs"], 2)
         check("技能目录随任务回收",
               sorted(p.name for p in (DATA / "skills").iterdir()) if (DATA / "skills").exists() else [], [])
+
+        print("[灵感冲浪 HTTP 契约：sample 产占位灵感、浏览记忆只认真读到的页]")
+        surf_cfg_view = client.get("/api/settings").json()["surf"]
+        hist = client.get("/api/surf/history").json()
+        # 本轮没跑 browser 通道 → 一份读过的页都没记；空库必须如实返回空，不拿别的存储凑数
+        check("浏览历史（空库）items", hist["items"], [])
+        check("浏览历史 remember 跟随配置", hist["remember"], surf_cfg_view["rememberRead"])
+        check("浏览历史上限 max 跟随配置", hist["max"], surf_cfg_view["historyMax"])
+        # 「读到门口就退出（登录/订阅/验证墙）」的开关也得在设置快照里，前端才有地方关它
+        check("挡墙开关在设置快照里", isinstance(surf_cfg_view.get("avoidWalls"), bool), True)
+        check("浏览历史 limit 生效", client.get("/api/surf/history?limit=1").json()["items"], [])
+        surf_job = client.post(f"/api/tasks/{tid}/surf", json={
+            "provider": "sample", "topic": "核验露营装备",
+        }).json()["session"]
+        check("样例会话受理为 queued", surf_job["status"], "queued")
+        deadline = time.time() + 40
+        surf_final: dict = surf_job
+        while time.time() < deadline:
+            listed = client.get(f"/api/tasks/{tid}/surf").json()["sessions"]
+            surf_final = next((s for s in listed if s["id"] == surf_job["id"]), {})
+            if surf_final.get("status") in ("done", "failed"):
+                break
+            time.sleep(0.5)
+        check("样例会话推进到 done", surf_final.get("status"), "done")
+        surf_cards = surf_final.get("cards") or []
+        check("样例灵感全部标注为占位", bool(surf_cards) and all(
+            bool(card.get("simulated")) for card in surf_cards), True)
+        surf_card_ids = {str(card["id"]) for card in surf_cards}
+        pool_ids = {str(card["id"]) for card in client.get("/api/surf/pool").json()["cards"]}
+        check("样例灵感沉淀进跨任务灵感池", bool(surf_card_ids) and surf_card_ids <= pool_ids, True)
+        check("sample 通道不写浏览记忆", client.get("/api/surf/history").json()["items"], [])
+        check("清浏览记忆（本来就没记）", client.delete("/api/surf/history").json(),
+              {"ok": True, "removed": 0, "tenant": "default"})
+        applied_surf = client.post(f"/api/tasks/{tid}/surf/apply",
+                                   json={"cardIds": [str(surf_cards[0]["id"])]})
+        check("选中灵感注入 Brief", applied_surf.status_code, 200)
+        check("注入的是【灵感冲浪】块", any(
+            str(c).startswith("【灵感冲浪】") for c in applied_surf.json()["constraints"]), True)
+        check("注入的简报如实带占位标注", "占位" in next(
+            str(c) for c in applied_surf.json()["constraints"] if str(c).startswith("【灵感冲浪】")), True)
+        check("重复注入不堆叠（覆盖同一块）", sum(
+            1 for c in client.post(f"/api/tasks/{tid}/surf/apply",
+                                   json={"cardIds": [str(surf_cards[0]["id"])]}).json()["constraints"]
+            if str(c).startswith("【灵感冲浪】")), 1)
+        check("一张卡都没选 → 409",
+              client.post(f"/api/tasks/{tid}/surf/apply", json={"cardIds": []}).status_code, 409)
+        check("池里没有的卡 → 404",
+              client.post(f"/api/tasks/{tid}/surf/apply", json={"cardIds": ["si_missing"]}).status_code, 404)
 
         print("[生成通道 span 对齐]")
         gen_trace = client.get(f"/api/tasks/{vid}/trace").json()

@@ -222,6 +222,25 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS videounderstand_jobs_tenant_idx
       ON videounderstand_jobs (tenant, created_at, id)
     """,
+    # 10d) 全自动配音作业（同上构，供 dubbing.py 使用；参考音频与时间轴 txt 在磁盘，只有作业进表）
+    """
+    CREATE TABLE IF NOT EXISTS dubbing_jobs (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL,
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'queued',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS dubbing_jobs_task_idx ON dubbing_jobs (task_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS dubbing_jobs_tenant_idx
+      ON dubbing_jobs (tenant, created_at, id)
+    """,
     # 10c) 桌面宠物作业（同上构，供 petgen.py 使用；帧与宠物包是文件，只有作业进表）
     """
     CREATE TABLE IF NOT EXISTS pet_jobs (
@@ -259,6 +278,57 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS skill_jobs_tenant_idx
       ON skill_jobs (tenant, created_at, id)
+    """,
+    # 11b) 灵感冲浪会话（同上构，供 surf.py 使用；作业 dict 全量含 signals/cards/history）
+    """
+    CREATE TABLE IF NOT EXISTS surf_jobs (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL,
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'queued',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS surf_jobs_task_idx ON surf_jobs (task_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS surf_jobs_tenant_idx
+      ON surf_jobs (tenant, created_at, id)
+    """,
+    # 11c) 灵感池（跨任务 idea 库，供 surf.py 使用；卡 dict 全量含 payload，与作业表同构但不随任务删除）
+    """
+    CREATE TABLE IF NOT EXISTS surf_insights (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL DEFAULT '',
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'card',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS surf_insights_tenant_idx
+      ON surf_insights (tenant, created_at, id)
+    """,
+    # 11d) 冲浪浏览历史（跨会话「读过哪些页」的记忆，与灵感池同构：按租户存、不随任务删除）
+    """
+    CREATE TABLE IF NOT EXISTS surf_history (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL DEFAULT '',
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'seen',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS surf_history_tenant_idx
+      ON surf_history (tenant, created_at, id)
     """,
     # 12) 租约审计镜像（可选观测位，默认不写；租约权威源在 Redis）
     """

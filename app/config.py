@@ -58,6 +58,14 @@ VideoGenProviderName = Literal["sample", "http"]
 #: sample = 内置离线样例（不调网关、只出带 simulated 标记的占位视觉摘要骨架）；
 #: real = 整集视频交给**原生支持视频输入的理解网关**（一集一次调用）真理解，未配网关即显式失败
 VideoUnderstandProviderName = Literal["sample", "real"]
+#: 配音提供方（见 core/dubbing.py）：真实出音频的功能，五个引擎通道 + 离线联调通道：
+#: sample = 离线模拟（不出真音频，专供联调/回归）；sapi = 本机系统音色真合成（Windows
+#: SAPI，零依赖零费用，但**不克隆参考音频**，汇总里如实标注）；sovits = 自建
+#: GPT-SoVITS/CosyVoice 克隆服务（参考音频零样本克隆，免费离线）；elevenlabs = 云端
+#: Instant Voice Clone（参考音频上传克隆 + 逐句合成）；real = 「POST 建任务 → GET
+#: 查状态」最小契约的自定义配音网关；auto = 按 elevenlabs→sovits→sapi→real 择优取
+#: 第一个已配置可用的引擎，全都没配则回退 sample 并在汇总里写明
+DubbingProviderName = Literal["sample", "auto", "sapi", "sovits", "elevenlabs", "real"]
 #: 桌面宠物提供方（见 core/petgen.py）：sample = 内置离线样例引擎，用纯标准库
 #: PNG 编码器画出真实可用的动作帧（简笔形象、非美术稿）；imagegen = 复用
 #: IMAGEGEN_* 端点逐帧出真图（跨帧形象一致性由 prompt 承担，未做切帧/对齐后处理）
@@ -71,6 +79,12 @@ JudgeModeName = Literal["off", "advisory", "blocking"]
 JudgeProviderName = Literal["offline", "llm"]
 #: 联网检索提供方：none = 不联网（默认，离线可跑）；http = 走自建搜索网关
 SearchProviderName = Literal["none", "http"]
+#: 灵感冲浪提供方（见 core/surf.py）：像真人上网刷信息/看视频信号、消化成灵感卡：
+#: sample = 离线确定性占位（不联网、产 simulated 灵感，供联调/回归）；
+#: browser = 真·无头浏览器（Playwright，惰性 import，未装/未配白名单即显式失败）；
+#: http = 复用既有联网检索网关（web_search+page_fetch）做轻量冲浪；
+#: auto = 按 browser→http→sample 择优
+SurfProviderName = Literal["sample", "auto", "browser", "http"]
 
 #: 存储后端：file（默认，JSON + SQLite，零依赖离线可跑）| pg（PostgreSQL + Redis，支持多副本）。
 #: 替换契约与实现指引见 storage_contract.md；PG 实现只在 ``pg`` 模式下被 import（零依赖保证）。
@@ -313,6 +327,51 @@ class VideoUnderstandSettings:
 
 
 @dataclass
+class DubbingSettings:
+    """全自动化配音设置（见 ``app/core/dubbing.py``）——**真实出音频**的功能。
+
+    台词切分与说话人识别在系统内真做；声音克隆/合成按通道交给引擎执行：
+
+    * ``sample``（离线联调通道，不出真音频）：确定性模拟「排队 → 合成 → 完成」，
+      产出带 simulated 标记的时间轴汇总，供回归与流程联调；
+    * ``sapi``：本机 Windows 系统音色**真合成**（零依赖、离线、零费用）。注意：
+      该通道不消费参考音频做克隆，说话人映射到已安装音色，汇总中**如实标注**；
+    * ``sovits``：自建 GPT-SoVITS / CosyVoice 克隆服务（``DUBBING_SOVITS_BASE_URL``，
+      参考音频零样本克隆，逐句返回 wav）；
+    * ``elevenlabs``：云端 Instant Voice Clone（上传参考音频建音色 → 逐句合成 mp3）；
+    * ``real``：按 ``DUBBING_API_URL`` 对接「POST 建台词清单 → GET 查状态」的自定义
+      配音网关。
+
+    任一真实通道前置不满足（缺 key/端点、缺参考音频、超预算）即**显式失败，
+    绝不假装配音**。
+    """
+
+    provider: DubbingProviderName = "sample"
+    #: real 通道的建任务端点（POST）；为空时 real provider 直接报「未配置」
+    api_url: str = ""
+    #: 调用上述端点的鉴权头（以 ``Bearer `` 前缀拼接）
+    api_key: str = ""
+    #: 提交/轮询的单次请求超时（毫秒）
+    timeout_ms: int = 60_000
+    #: 单作业最多配音的台词行数（克隆按句计费，防止一次把整本剧本烧出去）
+    max_lines: int = 200
+    #: 时间轴估算语速（字/秒）：先估后配，真实合成完成后按音频实长重建
+    chars_per_second: float = 4.5
+    #: sovits 通道：GPT-SoVITS api_v2 / CosyVoice 服务地址（如 http://127.0.0.1:9880）
+    sovits_base_url: str = ""
+    #: sovits 通道的文本语种（GPT-SoVITS 的 text_lang，如 zh / en / ja）
+    sovits_language: str = "zh"
+    #: elevenlabs 通道 API 地址（默认官方 v1，私有部署可改）
+    elevenlabs_base_url: str = "https://api.elevenlabs.io/v1"
+    #: elevenlabs 通道密钥（xi-api-key 头）；未配置时该通道显式不可用
+    elevenlabs_api_key: str = ""
+    #: elevenlabs 合成模型（multilingual 支持中文）
+    elevenlabs_model_id: str = "eleven_multilingual_v2"
+    #: sapi 通道限定使用的系统音色（逗号分隔的 VoiceInfo.Name；空 = 用全部已安装音色）
+    sapi_voices: str = ""
+
+
+@dataclass
 class PetGenSettings:
     """桌面宠物生成设置（开发样例，见 ``app/core/petgen.py``）。
 
@@ -383,6 +442,109 @@ class SearchSettings:
 
 
 @dataclass
+class SurfSettings:
+    """灵感冲浪接入设置（见 ``app/core/surf.py``）——像真人上网刷信息/看视频，消化成灵感库。
+
+    冲浪**不内置任何浏览器或搜索服务**：真引擎通道要么惰性用 Playwright（``browser``），
+    要么复用系统既有联网检索网关（``http``，见 ``app/core/web.py``）。消化灵感走系统既有
+    模型网关（``LLM_*``，不另持端点与密钥），与 skillgen llm 同一取舍。
+
+    * ``sample``（默认，零依赖、零外网）：离线把主题展开成查询，产**带 simulated 标记的
+      占位灵感卡**（不联网、不调浏览器），保证 API/UI/回归可联调；
+    * ``browser``：真·无头浏览器（Playwright）navigate→滚动→抽取正文/热榜。**惰性** import，
+      未安装或没配 ``SURF_ALLOWED_DOMAINS`` 白名单即**显式失败、绝不假装浏览过**；
+    * ``http``：复用 ``WEB_SEARCH_API_URL`` 检索网关做轻量冲浪，未配即显式失败；
+    * ``auto``：按 browser→http→sample 择优，全不可用回退 sample 并在卡里写明。
+
+    安全：只访问 ``SURF_ALLOWED_DOMAINS`` 白名单内的公开站点，复用 web.py 的 SSRF 拒绝口径；
+    **不下载在线视频文件**——``watch_videos`` 开启后走「像真人点播放→播放中截图抽帧→一组截图交
+    VLM 看懂」的在线看路径（仅 browser 生效）；未装浏览器 / 未配视觉网关时**绝不假装看懂**并如实标 ``simulated``。
+    关闭时视频只作**信号**记录（标题/链接）。
+    """
+
+    provider: SurfProviderName = "sample"
+    #: 无头模式（browser 通道）：True=后台运行，False=可见窗口（本机调试用）
+    headless: bool = True
+    #: 允许浏览的域名白名单；为空时 browser 通道拒绝冲浪（安全边界）
+    allowed_domains: list[str] = field(default_factory=list)
+    #: 冲浪起点站点/热榜 URL；browser 通道优先访问这些，其次按查询搜索
+    seed_sites: list[str] = field(default_factory=list)
+    #: 无主题时后台自主冲浪的话题清单；供调度器轮询囤灵感
+    topics: list[str] = field(default_factory=list)
+    #: 单次会话最多浏览/抓取的页面数（防一次把预算烧穿）
+    max_pages: int = 6
+    #: browser 通道每页滚动次数（模拟真人下滑看信息流）
+    scroll_rounds: int = 3
+    #: browser 通道每次滚动后的等待毫秒（等懒加载内容渲染）
+    settle_ms: int = 1200
+    #: 单次浏览器操作/请求超时（毫秒）
+    timeout_ms: int = 30_000
+    #: 每个主题展开的搜索查询数
+    queries_per_topic: int = 3
+    #: 每次会话消化产出的灵感卡上限
+    cards_per_session: int = 5
+    #: 灵感池跨任务保留的卡片上限（超出按新旧裁剪）
+    pool_max: int = 200
+    #: 是否由后台定时器自主冲浪囤灵感（默认关闭，保持进程零副作用）
+    auto_enabled: bool = False
+    #: 后台自主冲浪的检查间隔（秒）
+    tick_seconds: int = 3600
+    #: 「看懂视频」开关（仅 browser 通道生效）：像真人点播放按钮→播放中抽帧截图→一组截图交 VLM 看懂。
+    #: 默认关（保持零副作用、离线不假装看懂）；开了且真装了 Playwright 才会播放与截图。
+    watch_videos: bool = False
+    #: 每个视频在播放中截取的画面帧数（交 VLM 的截图上限，控成本；实际还受硬上限约束）
+    video_frames: int = 8
+    #: 抽帧间隔毫秒（播放中每隔多久截一张，模拟真人边看边截）
+    video_frame_interval_ms: int = 1_200
+    #: 每组发给 VLM 的截图张数：真人是一段一段看的，故把一组截图交一次多模态调用，
+    #: 多组结果再汇总成整段理解（组数 ≈ ceil(video_frames / vlm_group_frames)）
+    vlm_group_frames: int = 4
+    #: 单次会话最多「看懂」几个视频（控成本与时长；其余视频只作信号记录）
+    max_videos_per_session: int = 2
+    #: 是否抓取视频页的标题 / 简介 / 评论文字（DOM 直抓；截图里的文字由 VLM 兼做 OCR 转写）
+    scrape_comments: bool = True
+    #: 每个视频页最多收集多少条评论（逐条抓内容，滚动懒加载后取前 N 条）
+    max_comments: int = 12
+    #: 截图范围：True=只截播放器画面元素（含 iframe 内的播放器），False=整页截图（信息多、画面小）
+    crop_to_video: bool = True
+    #: 像真人一样从信息流里点进视频页：浏览页面时收集页内视频链接并逐条进入在线看
+    click_into_videos: bool = True
+    #: 真人节奏：每页的滚动幅度与停留时长随机浮动（False=等距滚动、固定等待的机器节奏）
+    human_pace: bool = True
+    #: 站内搜索：像真人那样用**起点站自己的搜索框**逐字打字搜主题，再读结果页；
+    #: 找不到搜索框或回车后页面没变化，如实不搜（不假装搜过）
+    search_on_seeds: bool = True
+    #: 信息流多跳：每个页面从条目里挑几条**普通内容页**点进去继续读（0=只看当前页不点进）
+    hops_per_page: int = 2
+    #: 列表翻页：像真人那样点站点自己的「下一页/加载更多」，一个列表最多刷几页（1=只看第一页）。
+    #: 每翻一页都算进 SURF_MAX_PAGES 的共用预算；没这个控件或点了页面没变就如实停下（不硬拼 ?page=2）
+    list_pages: int = 2
+    #: 正文页也读评论区：点开「展开全文」再取正文，并像真人那样翻到底逐条抓评论（抓不到就空，绝不编造）
+    page_comments: bool = True
+    #: 开新页之前的停顿基准毫秒（真人是「看一眼、想一下、再点」；human_pace 开启时按它随机浮动，0=不停）
+    page_gap_ms: int = 1_500
+    #: 挑条目先扫标题：信息流里同域条目按「标题认不认得出本次主题的词」排序（认得出的先点，并把
+    #: 凭哪几个词点进去写成 picked_for）；关掉就退回列表原顺序，不再按主题挑
+    topic_focus: bool = True
+    #: 搜不对题就换个说法再搜：结果页标题里一个主题词都认不出时，清空搜索框把关键词说短再搜，
+    #: 最多再搜几次（0=整句搜一次就完）。换的词只从本次主题里切出来，不凭空造词
+    search_retries: int = 1
+    #: 打字时看站点自己弹出的搜索联想：只点**认得出本次主题词**的那一条（点不动就把那个词打回框里再回车），
+    #: 一条都认不出就照原词回车——换联想词是把话说得像站内的叫法，不是换主题，也绝不凭空造词
+    use_suggestions: bool = True
+    #: 一次最多读回几条联想候选（各站下拉长度不同，超了就不再看后面的）
+    suggestions_max: int = 8
+    #: 读到门口就退出来：页面短到像一扇门且写着「请先登录/付费阅读/请输入验证码/页面不存在」时，
+    #: 如实标成墙（信号 wall）、只留门口那几句话，不绕墙也不把墙话当正文；关掉=照旧当正文读
+    avoid_walls: bool = True
+    #: 记住读过哪些页（跨会话）：上几轮真读进去的条目/看完的视频记在 surf_history 里，
+    #: 下一轮挑条目就跳过它们改读没见过的（整版都读过时照样重读并如实说明）；关掉=每轮都当第一次刷
+    remember_read: bool = True
+    #: 每个租户最多记多少条读过的页（真人也记不住几百个页面；超了就忘最旧的，忘了的下一轮会重新读）
+    history_max: int = 300
+
+
+@dataclass
 class TracingSettings:
     """分布式追踪设置（plan.md 2.4）。
 
@@ -434,9 +596,11 @@ class RuntimeConfig:
     image_gen: ImageGenSettings = field(default_factory=ImageGenSettings)
     video_gen: VideoGenSettings = field(default_factory=VideoGenSettings)
     video_understand: VideoUnderstandSettings = field(default_factory=VideoUnderstandSettings)
+    dubbing: DubbingSettings = field(default_factory=DubbingSettings)
     pet_gen: PetGenSettings = field(default_factory=PetGenSettings)
     skill_gen: SkillGenSettings = field(default_factory=SkillGenSettings)
     search: SearchSettings = field(default_factory=SearchSettings)
+    surf: SurfSettings = field(default_factory=SurfSettings)
     tracing: TracingSettings = field(default_factory=TracingSettings)
 
 
@@ -458,6 +622,18 @@ def _bool(value: str | None, fallback: bool) -> bool:
     if value is None:
         return fallback
     return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _csv(value: str | None) -> list[str]:
+    """把逗号/分号/换行分隔的字符串拆成去空、去重、保序的列表。"""
+    seen: set[str] = set()
+    items: list[str] = []
+    for chunk in (value or "").replace(";", ",").replace("\n", ",").split(","):
+        part = chunk.strip()
+        if part and part not in seen:
+            seen.add(part)
+            items.append(part)
+    return items
 
 
 def _build_config() -> RuntimeConfig:
@@ -542,6 +718,24 @@ def _build_config() -> RuntimeConfig:
             api_key=(os.environ.get("VIDEOUNDERSTAND_API_KEY") or "").strip(),
             timeout_ms=max(1_000, _int(os.environ.get("VIDEOUNDERSTAND_TIMEOUT_MS"), 120_000)),
         ),
+        dubbing=DubbingSettings(
+            provider=_dubbing_provider(),
+            api_url=(os.environ.get("DUBBING_API_URL") or "").strip(),
+            api_key=(os.environ.get("DUBBING_API_KEY") or "").strip(),
+            timeout_ms=max(1_000, _int(os.environ.get("DUBBING_TIMEOUT_MS"), 60_000)),
+            max_lines=min(1000, max(1, _int(os.environ.get("DUBBING_MAX_LINES"), 200))),
+            chars_per_second=min(20.0, max(0.5, _num(os.environ.get("DUBBING_CHARS_PER_SECOND"), 4.5))),
+            sovits_base_url=(os.environ.get("DUBBING_SOVITS_BASE_URL") or "").strip(),
+            sovits_language=(os.environ.get("DUBBING_SOVITS_LANGUAGE") or "zh").strip() or "zh",
+            elevenlabs_base_url=(
+                os.environ.get("DUBBING_ELEVENLABS_BASE_URL") or "https://api.elevenlabs.io/v1"
+            ).strip().rstrip("/"),
+            elevenlabs_api_key=(os.environ.get("DUBBING_ELEVENLABS_API_KEY") or "").strip(),
+            elevenlabs_model_id=(
+                os.environ.get("DUBBING_ELEVENLABS_MODEL") or "eleven_multilingual_v2"
+            ).strip(),
+            sapi_voices=(os.environ.get("DUBBING_SAPI_VOICES") or "").strip(),
+        ),
         pet_gen=PetGenSettings(
             provider=_pet_gen_provider(),
             frame_size=min(192, max(32, _int(os.environ.get("PETGEN_FRAME_SIZE"), 96))),
@@ -560,6 +754,48 @@ def _build_config() -> RuntimeConfig:
             timeout_ms=max(1_000, _int(os.environ.get("WEB_SEARCH_TIMEOUT_MS"), 8_000)),
             fetch_pages=_bool(os.environ.get("WEB_SEARCH_FETCH_PAGES"), True),
             max_pages=min(10, max(0, _int(os.environ.get("WEB_SEARCH_MAX_PAGES"), 2))),
+        ),
+        surf=SurfSettings(
+            provider=_surf_provider(),
+            headless=_bool(os.environ.get("SURF_HEADLESS"), True),
+            allowed_domains=_csv(os.environ.get("SURF_ALLOWED_DOMAINS")),
+            seed_sites=_csv(os.environ.get("SURF_SEED_SITES")),
+            topics=_csv(os.environ.get("SURF_TOPICS")),
+            max_pages=min(20, max(1, _int(os.environ.get("SURF_MAX_PAGES"), 6))),
+            scroll_rounds=min(10, max(0, _int(os.environ.get("SURF_SCROLL_ROUNDS"), 3))),
+            settle_ms=min(10_000, max(0, _int(os.environ.get("SURF_SETTLE_MS"), 1200))),
+            timeout_ms=max(1_000, _int(os.environ.get("SURF_TIMEOUT_MS"), 30_000)),
+            queries_per_topic=min(10, max(1, _int(os.environ.get("SURF_QUERIES_PER_TOPIC"), 3))),
+            cards_per_session=min(20, max(1, _int(os.environ.get("SURF_CARDS_PER_SESSION"), 5))),
+            pool_max=min(1000, max(10, _int(os.environ.get("SURF_POOL_MAX"), 200))),
+            auto_enabled=_bool(os.environ.get("SURF_AUTO_ENABLED"), False),
+            tick_seconds=max(60, _int(os.environ.get("SURF_TICK_SECONDS"), 3600)),
+            watch_videos=_bool(os.environ.get("SURF_WATCH_VIDEOS"), False),
+            video_frames=min(24, max(1, _int(os.environ.get("SURF_VIDEO_FRAMES"), 8))),
+            video_frame_interval_ms=min(
+                10_000, max(0, _int(os.environ.get("SURF_VIDEO_FRAME_INTERVAL_MS"), 1_200))
+            ),
+            vlm_group_frames=min(12, max(1, _int(os.environ.get("SURF_VLM_GROUP_FRAMES"), 4))),
+            max_videos_per_session=min(
+                10, max(1, _int(os.environ.get("SURF_MAX_VIDEOS_PER_SESSION"), 2))
+            ),
+            scrape_comments=_bool(os.environ.get("SURF_SCRAPE_COMMENTS"), True),
+            max_comments=min(50, max(1, _int(os.environ.get("SURF_MAX_COMMENTS"), 12))),
+            crop_to_video=_bool(os.environ.get("SURF_CROP_TO_VIDEO"), True),
+            click_into_videos=_bool(os.environ.get("SURF_CLICK_INTO_VIDEOS"), True),
+            human_pace=_bool(os.environ.get("SURF_HUMAN_PACE"), True),
+            search_on_seeds=_bool(os.environ.get("SURF_SEARCH_ON_SEEDS"), True),
+            hops_per_page=min(10, max(0, _int(os.environ.get("SURF_HOPS_PER_PAGE"), 2))),
+            list_pages=min(8, max(1, _int(os.environ.get("SURF_LIST_PAGES"), 2))),
+            page_comments=_bool(os.environ.get("SURF_PAGE_COMMENTS"), True),
+            page_gap_ms=min(30_000, max(0, _int(os.environ.get("SURF_PAGE_GAP_MS"), 1_500))),
+            topic_focus=_bool(os.environ.get("SURF_TOPIC_FOCUS"), True),
+            search_retries=min(3, max(0, _int(os.environ.get("SURF_SEARCH_RETRIES"), 1))),
+            use_suggestions=_bool(os.environ.get("SURF_USE_SUGGESTIONS"), True),
+            suggestions_max=min(20, max(1, _int(os.environ.get("SURF_SUGGESTIONS_MAX"), 8))),
+            avoid_walls=_bool(os.environ.get("SURF_AVOID_WALLS"), True),
+            remember_read=_bool(os.environ.get("SURF_REMEMBER_READ"), True),
+            history_max=min(5_000, max(20, _int(os.environ.get("SURF_HISTORY_MAX"), 300))),
         ),
         tracing=TracingSettings(
             otlp_endpoint=(os.environ.get("OTLP_ENDPOINT") or "").strip(),
@@ -607,6 +843,11 @@ def _video_understand_provider() -> str:
     return raw if raw in ("sample", "real") else "sample"
 
 
+def _dubbing_provider() -> str:
+    raw = (os.environ.get("DUBBING_PROVIDER") or "sample").strip().lower()
+    return raw if raw in ("sample", "auto", "sapi", "sovits", "elevenlabs", "real") else "sample"
+
+
 def _pet_gen_provider() -> str:
     raw = (os.environ.get("PETGEN_PROVIDER") or "sample").strip().lower()
     return raw if raw in ("sample", "imagegen") else "sample"
@@ -620,6 +861,11 @@ def _skill_gen_provider() -> str:
 def _search_provider() -> str:
     raw = (os.environ.get("WEB_SEARCH_PROVIDER") or "none").strip().lower()
     return raw if raw in ("none", "http") else "none"
+
+
+def _surf_provider() -> str:
+    raw = (os.environ.get("SURF_PROVIDER") or "sample").strip().lower()
+    return raw if raw in ("sample", "auto", "browser", "http") else "sample"
 
 
 _SAMPLERS = (
@@ -702,12 +948,60 @@ _FLAT_PERSIST_ENV: dict[str, str] = {
     "videounderstandApiUrl": "VIDEOUNDERSTAND_API_URL",
     "videounderstandApiKey": "VIDEOUNDERSTAND_API_KEY",
     "videounderstandTimeoutMs": "VIDEOUNDERSTAND_TIMEOUT_MS",
+    "dubbingProvider": "DUBBING_PROVIDER",
+    "dubbingApiUrl": "DUBBING_API_URL",
+    "dubbingApiKey": "DUBBING_API_KEY",
+    "dubbingTimeoutMs": "DUBBING_TIMEOUT_MS",
+    "dubbingMaxLines": "DUBBING_MAX_LINES",
+    "dubbingCharsPerSecond": "DUBBING_CHARS_PER_SECOND",
+    "dubbingSovitsBaseUrl": "DUBBING_SOVITS_BASE_URL",
+    "dubbingSovitsLanguage": "DUBBING_SOVITS_LANGUAGE",
+    "dubbingElevenlabsBaseUrl": "DUBBING_ELEVENLABS_BASE_URL",
+    "dubbingElevenlabsApiKey": "DUBBING_ELEVENLABS_API_KEY",
+    "dubbingElevenlabsModel": "DUBBING_ELEVENLABS_MODEL",
+    "dubbingSapiVoices": "DUBBING_SAPI_VOICES",
     "petgenProvider": "PETGEN_PROVIDER",
     "petgenFrameSize": "PETGEN_FRAME_SIZE",
     "petgenMaxFrames": "PETGEN_MAX_FRAMES",
     "petgenTimeoutMs": "PETGEN_TIMEOUT_MS",
     "skillgenProvider": "SKILLGEN_PROVIDER",
     "skillgenMaxWorks": "SKILLGEN_MAX_WORKS",
+    "surfProvider": "SURF_PROVIDER",
+    "surfHeadless": "SURF_HEADLESS",
+    "surfAllowedDomains": "SURF_ALLOWED_DOMAINS",
+    "surfSeedSites": "SURF_SEED_SITES",
+    "surfTopics": "SURF_TOPICS",
+    "surfMaxPages": "SURF_MAX_PAGES",
+    "surfScrollRounds": "SURF_SCROLL_ROUNDS",
+    "surfSettleMs": "SURF_SETTLE_MS",
+    "surfTimeoutMs": "SURF_TIMEOUT_MS",
+    "surfQueriesPerTopic": "SURF_QUERIES_PER_TOPIC",
+    "surfCardsPerSession": "SURF_CARDS_PER_SESSION",
+    "surfPoolMax": "SURF_POOL_MAX",
+    "surfAutoEnabled": "SURF_AUTO_ENABLED",
+    "surfTickSeconds": "SURF_TICK_SECONDS",
+    "surfWatchVideos": "SURF_WATCH_VIDEOS",
+    "surfVideoFrames": "SURF_VIDEO_FRAMES",
+    "surfVideoFrameIntervalMs": "SURF_VIDEO_FRAME_INTERVAL_MS",
+    "surfVlmGroupFrames": "SURF_VLM_GROUP_FRAMES",
+    "surfMaxVideosPerSession": "SURF_MAX_VIDEOS_PER_SESSION",
+    "surfScrapeComments": "SURF_SCRAPE_COMMENTS",
+    "surfMaxComments": "SURF_MAX_COMMENTS",
+    "surfCropToVideo": "SURF_CROP_TO_VIDEO",
+    "surfClickIntoVideos": "SURF_CLICK_INTO_VIDEOS",
+    "surfHumanPace": "SURF_HUMAN_PACE",
+    "surfSearchOnSeeds": "SURF_SEARCH_ON_SEEDS",
+    "surfHopsPerPage": "SURF_HOPS_PER_PAGE",
+    "surfListPages": "SURF_LIST_PAGES",
+    "surfPageComments": "SURF_PAGE_COMMENTS",
+    "surfPageGapMs": "SURF_PAGE_GAP_MS",
+    "surfTopicFocus": "SURF_TOPIC_FOCUS",
+    "surfSearchRetries": "SURF_SEARCH_RETRIES",
+    "surfUseSuggestions": "SURF_USE_SUGGESTIONS",
+    "surfSuggestionsMax": "SURF_SUGGESTIONS_MAX",
+    "surfAvoidWalls": "SURF_AVOID_WALLS",
+    "surfRememberRead": "SURF_REMEMBER_READ",
+    "surfHistoryMax": "SURF_HISTORY_MAX",
     "searchProvider": "WEB_SEARCH_PROVIDER",
     "searchApiUrl": "WEB_SEARCH_API_URL",
     "searchApiKey": "WEB_SEARCH_API_KEY",
@@ -782,8 +1076,10 @@ def _load_persisted_settings() -> None:
         ("imageGen", "imagegen"),
         ("videoGen", "videogen"),
         ("videoUnderstand", "videounderstand"),
+        ("dubbing", "dubbing"),
         ("petGen", "petgen"),
         ("skillGen", "skillgen"),
+        ("surf", "surf"),
         ("search", "search"),
         ("tracing", "tracing"),
     ):
@@ -894,6 +1190,20 @@ def save_persisted_settings() -> None:
                 "apiKey": c.video_understand.api_key,
                 "timeoutMs": c.video_understand.timeout_ms,
             },
+            "dubbing": {
+                "provider": c.dubbing.provider,
+                "apiUrl": c.dubbing.api_url,
+                "apiKey": c.dubbing.api_key,
+                "timeoutMs": c.dubbing.timeout_ms,
+                "maxLines": c.dubbing.max_lines,
+                "charsPerSecond": c.dubbing.chars_per_second,
+                "sovitsBaseUrl": c.dubbing.sovits_base_url,
+                "sovitsLanguage": c.dubbing.sovits_language,
+                "elevenlabsBaseUrl": c.dubbing.elevenlabs_base_url,
+                "elevenlabsApiKey": c.dubbing.elevenlabs_api_key,
+                "elevenlabsModel": c.dubbing.elevenlabs_model_id,
+                "sapiVoices": c.dubbing.sapi_voices,
+            },
             "petGen": {
                 "provider": c.pet_gen.provider,
                 "frameSize": c.pet_gen.frame_size,
@@ -903,6 +1213,44 @@ def save_persisted_settings() -> None:
             "skillGen": {
                 "provider": c.skill_gen.provider,
                 "maxWorks": c.skill_gen.max_works,
+            },
+            "surf": {
+                "provider": c.surf.provider,
+                "headless": c.surf.headless,
+                "allowedDomains": list(c.surf.allowed_domains),
+                "seedSites": list(c.surf.seed_sites),
+                "topics": list(c.surf.topics),
+                "maxPages": c.surf.max_pages,
+                "scrollRounds": c.surf.scroll_rounds,
+                "settleMs": c.surf.settle_ms,
+                "timeoutMs": c.surf.timeout_ms,
+                "queriesPerTopic": c.surf.queries_per_topic,
+                "cardsPerSession": c.surf.cards_per_session,
+                "poolMax": c.surf.pool_max,
+                "autoEnabled": c.surf.auto_enabled,
+                "tickSeconds": c.surf.tick_seconds,
+                "watchVideos": c.surf.watch_videos,
+                "videoFrames": c.surf.video_frames,
+                "videoFrameIntervalMs": c.surf.video_frame_interval_ms,
+                "vlmGroupFrames": c.surf.vlm_group_frames,
+                "maxVideosPerSession": c.surf.max_videos_per_session,
+                "scrapeComments": c.surf.scrape_comments,
+                "maxComments": c.surf.max_comments,
+                "cropToVideo": c.surf.crop_to_video,
+                "clickIntoVideos": c.surf.click_into_videos,
+                "humanPace": c.surf.human_pace,
+                "searchOnSeeds": c.surf.search_on_seeds,
+                "hopsPerPage": c.surf.hops_per_page,
+                "listPages": c.surf.list_pages,
+                "pageComments": c.surf.page_comments,
+                "pageGapMs": c.surf.page_gap_ms,
+                "topicFocus": c.surf.topic_focus,
+                "searchRetries": c.surf.search_retries,
+                "useSuggestions": c.surf.use_suggestions,
+                "suggestionsMax": c.surf.suggestions_max,
+                "avoidWalls": c.surf.avoid_walls,
+                "rememberRead": c.surf.remember_read,
+                "historyMax": c.surf.history_max,
             },
             "search": {
                 "provider": c.search.provider,
@@ -1095,6 +1443,24 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
     )
     _apply_flat(
         patch,
+        _config.dubbing,
+        {
+            "dubbingProvider": ("provider", ("sample", "auto", "sapi", "sovits", "elevenlabs", "real")),
+            "dubbingApiUrl": ("api_url", None),
+            "dubbingApiKey": ("api_key", None),
+            "dubbingTimeoutMs": ("timeout_ms", None),
+            "dubbingMaxLines": ("max_lines", None),
+            "dubbingCharsPerSecond": ("chars_per_second", None),
+            "dubbingSovitsBaseUrl": ("sovits_base_url", None),
+            "dubbingSovitsLanguage": ("sovits_language", None),
+            "dubbingElevenlabsBaseUrl": ("elevenlabs_base_url", None),
+            "dubbingElevenlabsApiKey": ("elevenlabs_api_key", None),
+            "dubbingElevenlabsModel": ("elevenlabs_model_id", None),
+            "dubbingSapiVoices": ("sapi_voices", None),
+        },
+    )
+    _apply_flat(
+        patch,
         _config.pet_gen,
         {
             "petgenProvider": ("provider", ("sample", "imagegen")),
@@ -1109,6 +1475,49 @@ def update_config(patch: dict[str, Any]) -> RuntimeConfig:
         {
             "skillgenProvider": ("provider", ("rules", "llm")),
             "skillgenMaxWorks": ("max_works", None),
+        },
+    )
+    _apply_flat(
+        patch,
+        _config.surf,
+        {
+            "surfProvider": ("provider", ("sample", "auto", "browser", "http")),
+            "surfHeadless": ("headless", None),
+            # 白名单/起点站/话题为字符串列表，逐项校验与去重在路由层做，这里原样写入（空数组 = 清空）
+            "surfAllowedDomains": ("allowed_domains", None),
+            "surfSeedSites": ("seed_sites", None),
+            "surfTopics": ("topics", None),
+            "surfMaxPages": ("max_pages", None),
+            "surfScrollRounds": ("scroll_rounds", None),
+            "surfSettleMs": ("settle_ms", None),
+            "surfTimeoutMs": ("timeout_ms", None),
+            "surfQueriesPerTopic": ("queries_per_topic", None),
+            "surfCardsPerSession": ("cards_per_session", None),
+            "surfPoolMax": ("pool_max", None),
+            "surfAutoEnabled": ("auto_enabled", None),
+            "surfTickSeconds": ("tick_seconds", None),
+            "surfWatchVideos": ("watch_videos", None),
+            "surfVideoFrames": ("video_frames", None),
+            "surfVideoFrameIntervalMs": ("video_frame_interval_ms", None),
+            "surfVlmGroupFrames": ("vlm_group_frames", None),
+            "surfMaxVideosPerSession": ("max_videos_per_session", None),
+            "surfScrapeComments": ("scrape_comments", None),
+            "surfMaxComments": ("max_comments", None),
+            "surfCropToVideo": ("crop_to_video", None),
+            "surfClickIntoVideos": ("click_into_videos", None),
+            "surfHumanPace": ("human_pace", None),
+            "surfSearchOnSeeds": ("search_on_seeds", None),
+            "surfHopsPerPage": ("hops_per_page", None),
+            "surfListPages": ("list_pages", None),
+            "surfPageComments": ("page_comments", None),
+            "surfPageGapMs": ("page_gap_ms", None),
+            "surfTopicFocus": ("topic_focus", None),
+            "surfSearchRetries": ("search_retries", None),
+            "surfUseSuggestions": ("use_suggestions", None),
+            "surfSuggestionsMax": ("suggestions_max", None),
+            "surfAvoidWalls": ("avoid_walls", None),
+            "surfRememberRead": ("remember_read", None),
+            "surfHistoryMax": ("history_max", None),
         },
     )
     _apply_flat(
@@ -1171,6 +1580,26 @@ def _apply_flat(patch: dict[str, Any], target: Any, mapping: dict[str, tuple[str
             value = min(8, max(1, int(value)))
         elif attr == "max_works":
             value = min(20, max(1, int(value)))
+        elif attr == "video_frames":
+            value = min(24, max(1, int(value)))
+        elif attr == "vlm_group_frames":
+            value = min(12, max(1, int(value)))
+        elif attr == "max_videos_per_session":
+            value = min(10, max(1, int(value)))
+        elif attr == "max_comments":
+            value = min(50, max(1, int(value)))
+        elif attr == "hops_per_page":
+            value = min(10, max(0, int(value)))
+        elif attr == "list_pages":
+            value = min(8, max(1, int(value)))
+        elif attr == "search_retries":
+            value = min(3, max(0, int(value)))
+        elif attr == "suggestions_max":
+            value = min(20, max(1, int(value)))
+        elif attr == "history_max":
+            value = min(5_000, max(20, int(value)))
+        elif attr == "page_gap_ms":
+            value = min(30_000, max(0, int(value)))
         elif attr == "max_frames":
             value = min(64, max(1, int(value)))
         elif attr == "sample_ratio":
@@ -1199,6 +1628,13 @@ def _mask(secret: str) -> str:
     if not secret:
         return ""
     return f"{secret[:4]}{'*' * max(0, len(secret) - 8)}{secret[-4:]}"
+
+
+def _playwright_available() -> bool:
+    """是否装了 Playwright（browser 冲浪通道的真引擎）。仅探测 spec，**不 import**（零副作用）。"""
+    import importlib.util
+
+    return importlib.util.find_spec("playwright") is not None
 
 
 def public_config() -> dict[str, Any]:
@@ -1320,6 +1756,34 @@ def public_config() -> dict[str, Any]:
                 or bool(_config.video_understand.api_url)
             ),
         },
+        "dubbing": {
+            "provider": _config.dubbing.provider,
+            "apiUrl": _config.dubbing.api_url,
+            "apiKey": "",
+            "apiKeySet": len(_config.dubbing.api_key) > 0,
+            "sovitsBaseUrl": _config.dubbing.sovits_base_url,
+            "sovitsLanguage": _config.dubbing.sovits_language,
+            "elevenlabsBaseUrl": _config.dubbing.elevenlabs_base_url,
+            "elevenlabsApiKey": "",
+            "elevenlabsApiKeySet": len(_config.dubbing.elevenlabs_api_key) > 0,
+            "elevenlabsModel": _config.dubbing.elevenlabs_model_id,
+            "sapiVoices": _config.dubbing.sapi_voices,
+            "engines": {
+                "elevenlabs": len(_config.dubbing.elevenlabs_api_key) > 0,
+                "sovits": bool(_config.dubbing.sovits_base_url),
+                "real": bool(_config.dubbing.api_url),
+            },
+            "apiKeyMasked": _mask(_config.dubbing.api_key),
+            "timeoutMs": _config.dubbing.timeout_ms,
+            "maxLines": _config.dubbing.max_lines,
+            "charsPerSecond": _config.dubbing.chars_per_second,
+            "configured": (
+                _config.dubbing.provider in ("sample", "sapi", "auto")
+                or bool(_config.dubbing.api_url)
+                or bool(_config.dubbing.sovits_base_url)
+                or bool(_config.dubbing.elevenlabs_api_key)
+            ),
+        },
         "petGen": {
             "provider": _config.pet_gen.provider,
             "frameSize": _config.pet_gen.frame_size,
@@ -1338,6 +1802,55 @@ def public_config() -> dict[str, Any]:
             "configured": (
                 _config.skill_gen.provider == "rules"
                 or (_config.llm.provider == "openai" and bool(_config.llm.base_url))
+            ),
+        },
+        "surf": {
+            "provider": _config.surf.provider,
+            "headless": _config.surf.headless,
+            "allowedDomains": list(_config.surf.allowed_domains),
+            "seedSites": list(_config.surf.seed_sites),
+            "topics": list(_config.surf.topics),
+            "maxPages": _config.surf.max_pages,
+            "scrollRounds": _config.surf.scroll_rounds,
+            "settleMs": _config.surf.settle_ms,
+            "timeoutMs": _config.surf.timeout_ms,
+            "queriesPerTopic": _config.surf.queries_per_topic,
+            "cardsPerSession": _config.surf.cards_per_session,
+            "poolMax": _config.surf.pool_max,
+            "autoEnabled": _config.surf.auto_enabled,
+            "tickSeconds": _config.surf.tick_seconds,
+            "watchVideos": _config.surf.watch_videos,
+            "videoFrames": _config.surf.video_frames,
+            "videoFrameIntervalMs": _config.surf.video_frame_interval_ms,
+            "vlmGroupFrames": _config.surf.vlm_group_frames,
+            "maxVideosPerSession": _config.surf.max_videos_per_session,
+            "scrapeComments": _config.surf.scrape_comments,
+            "maxComments": _config.surf.max_comments,
+            "cropToVideo": _config.surf.crop_to_video,
+            "clickIntoVideos": _config.surf.click_into_videos,
+            "humanPace": _config.surf.human_pace,
+            "searchOnSeeds": _config.surf.search_on_seeds,
+            "hopsPerPage": _config.surf.hops_per_page,
+            "listPages": _config.surf.list_pages,
+            "pageComments": _config.surf.page_comments,
+            "pageGapMs": _config.surf.page_gap_ms,
+            "topicFocus": _config.surf.topic_focus,
+            "searchRetries": _config.surf.search_retries,
+            "useSuggestions": _config.surf.use_suggestions,
+            "suggestionsMax": _config.surf.suggestions_max,
+            "avoidWalls": _config.surf.avoid_walls,
+            "rememberRead": _config.surf.remember_read,
+            "historyMax": _config.surf.history_max,
+            # browser 通道真能冲浪 = 装了 Playwright 且配了域名白名单；否则 auto 会回退
+            "browserAvailable": _playwright_available(),
+            # 在线看视频的前置：装了 Playwright + 配了白名单（起点站或请求里的视频链接均可）；
+            # 画面是否**真看懂**还取决于 visionConfigured，两者缺一即如实降级/失败
+            "watchReady": _playwright_available() and bool(_config.surf.allowed_domains),
+            "visionConfigured": _config.llm.provider == "openai" and bool(_config.llm.vision),
+            "configured": (
+                _config.surf.provider in ("sample", "auto")
+                or (_config.surf.provider == "browser" and _playwright_available() and bool(_config.surf.allowed_domains))
+                or (_config.surf.provider == "http" and _config.search.provider == "http" and bool(_config.search.api_url))
             ),
         },
         "search": {

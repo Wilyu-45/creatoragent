@@ -148,6 +148,34 @@ export interface PublicConfigView {
     timeoutMs: number;
     configured: boolean;
   };
+  /** 全自动配音设置（真实功能：引擎逐句合成真音频；sample 为离线联调通道） */
+  dubbing: {
+    provider: 'sample' | 'auto' | 'sapi' | 'sovits' | 'elevenlabs' | 'real';
+    apiUrl: string;
+    apiKey: string;
+    apiKeySet: boolean;
+    apiKeyMasked: string;
+    /** sovits：自建 GPT-SoVITS/CosyVoice 克隆服务地址 */
+    sovitsBaseUrl: string;
+    /** sovits：文本语种（text_lang） */
+    sovitsLanguage: string;
+    /** elevenlabs：API 地址与密钥 */
+    elevenlabsBaseUrl: string;
+    elevenlabsApiKey: string;
+    elevenlabsApiKeySet: boolean;
+    /** elevenlabs：合成模型 */
+    elevenlabsModel: string;
+    /** sapi：限定使用的系统音色（逗号分隔，空 = 全部已安装） */
+    sapiVoices: string;
+    /** 各真实引擎是否已配置（auto 择优的依据，面板展示可用性提示） */
+    engines: { elevenlabs: boolean; sovits: boolean; real: boolean };
+    timeoutMs: number;
+    /** 单作业最多配音的台词行数（超出直接拒绝，防整本剧本一次烧出去） */
+    maxLines: number;
+    /** 时间轴估算语速（字/秒），合成完成后按音频实长重建 */
+    charsPerSecond: number;
+    configured: boolean;
+  };
   /** 联网检索网关设置（web_search / page_fetch 工具的上游） */
   search: {
     provider: 'none' | 'http';
@@ -176,6 +204,79 @@ export interface PublicConfigView {
     /** 单次作业最多纳入几份作品 */
     maxWorks: number;
     /** 当前默认通道是否可用：llm 需 LLM_* 已配真实网关，否则界面提示改走 rules */
+    configured: boolean;
+  };
+  /** 灵感冲浪设置（像真人上网刷信息/看视频 → 消化成灵感卡 → 沉淀跨任务 idea 库） */
+  surf: {
+    provider: 'sample' | 'auto' | 'browser' | 'http';
+    headless: boolean;
+    /** browser 通道只访问这些域名白名单站点 */
+    allowedDomains: string[];
+    /** browser 通道的起点站 URL */
+    seedSites: string[];
+    /** 自主冲浪按这些主题各囤一轮 */
+    topics: string[];
+    maxPages: number;
+    scrollRounds: number;
+    settleMs: number;
+    timeoutMs: number;
+    queriesPerTopic: number;
+    cardsPerSession: number;
+    /** 灵感池最多沉淀多少张卡（超出裁最旧的） */
+    poolMax: number;
+    autoEnabled: boolean;
+    tickSeconds: number;
+    /** 看懂视频开关（仅 browser 通道真播放+截图抽帧→交 VLM） */
+    watchVideos: boolean;
+    /** 每个视频播放中截取的画面帧数 */
+    videoFrames: number;
+    /** 抽帧间隔毫秒 */
+    videoFrameIntervalMs: number;
+    /** 每组交 VLM 的截图张数（真人一段一段看：每组一次多模态调用，多组再汇总） */
+    vlmGroupFrames: number;
+    /** 单次会话最多看懂几个视频 */
+    maxVideosPerSession: number;
+    /** 是否抓取视频页的标题/简介/评论文字 */
+    scrapeComments: boolean;
+    /** 每个视频页最多收集多少条评论 */
+    maxComments: number;
+    /** 截图只截播放器画面元素（false = 整页截图） */
+    cropToVideo: boolean;
+    /** 像真人一样从信息流点进视频页在线看 */
+    clickIntoVideos: boolean;
+    /** 真人节奏：每轮滚动幅度与停留随机浮动（false = 等距滚 + 固定等的机器节奏） */
+    humanPace: boolean;
+    /** 用起点站自己的搜索框搜主题（没搜索框就如实不搜） */
+    searchOnSeeds: boolean;
+    /** 信息流多跳：每页点进几条普通内容页继续读（0 = 不点进） */
+    hopsPerPage: number;
+    /** 列表翻页：点站点自己的「下一页/加载更多」，一个列表最多刷几页（1 = 只看第一页） */
+    listPages: number;
+    /** 正文页也点开「展开全文」并逐条抓评论区（抓不到就空，绝不编造） */
+    pageComments: boolean;
+    /** 开新页之前的停顿基准毫秒（真人节奏下按它随机浮动，0 = 不停顿） */
+    pageGapMs: number;
+    /** 挑条目先扫标题：同域条目按「标题认不认得出主题词」排序点进（关 = 退回列表原顺序） */
+    topicFocus: boolean;
+    /** 站内搜索结果不贴主题时，把关键词说短再搜几次（0 = 整句搜一次就完） */
+    searchRetries: number;
+    /** 打字时看站点自己弹出的搜索联想：只点认得出本次主题词的那条（关 = 一律按原词回车） */
+    useSuggestions: boolean;
+    /** 一次最多读回几条联想候选 */
+    suggestionsMax: number;
+    /** 读到门口就退出来：认出登录墙/订阅墙/人机验证/维护页时如实标注，不绕墙也不把墙话当正文（关 = 照旧当正文读） */
+    avoidWalls: boolean;
+    /** 跨会话记住读过哪些页（下一轮挑条目就跳过它们改读新的；关 = 每轮都当第一次刷） */
+    rememberRead: boolean;
+    /** 每个租户最多记多少条读过的页（超了就先忘最旧的，忘了的下轮会重新读） */
+    historyMax: number;
+    /** Playwright 是否已安装（browser 通道能否真跑） */
+    browserAvailable: boolean;
+    /** 在线看视频的三个前置是否齐备（Playwright + 白名单 + 起点站/指定视频链接） */
+    watchReady: boolean;
+    /** LLM 网关是否声明支持图像输入（LLM_VISION）；否则画面只如实标「未看懂」 */
+    visionConfigured: boolean;
+    /** 当前默认通道是否可用（browser 需装 Playwright + 配白名单；http 需配搜索网关） */
     configured: boolean;
   };
   /** 分布式追踪设置（进程内追踪始终完整；OTLP 只作用于导出面） */
@@ -868,6 +969,286 @@ export interface VideoUnderstandView {
 }
 
 /* ------------------------------------------------------------------ */
+/* 灵感冲浪（像真人上网刷信息/看视频 → 消化成灵感卡 → 沉淀跨任务 idea 库）  */
+/* ------------------------------------------------------------------ */
+
+/** 一张灵感卡（冲浪消化所得的点子/切入角度/开场钩子/为何现在火/参考链接）。 */
+export interface SurfCard {
+  id: string;
+  topic: string;
+  idea: string;
+  angle: string;
+  hook: string;
+  why_now: string;
+  sources: string[];
+  /** 产出该卡的通道：sample | browser | http（auto 已解析为具体通道） */
+  provider: string;
+  /** true = 离线/降级引擎的占位灵感（非真实冲浪所得） */
+  simulated: boolean;
+  /** 来源任务（跨任务 idea 库，可能为空） */
+  task_id: string;
+  created_at: string;
+}
+
+/** 一条从页面 DOM 直抓的评论（视频页与正文页都抓；作者/点赞抓不到就留空，画面里的评论文字另由截图 OCR 兜底）。 */
+export interface SurfComment {
+  author: string;
+  text: string;
+  likes: string;
+}
+
+/** 一组截图交 VLM 的画面结论（真人一段一段看，一组一次多模态调用）。 */
+export interface SurfSegment {
+  index: number;
+  frames: number;
+  /** 该组首帧的播放时刻（秒） */
+  from: number;
+  /** 该组末帧的播放时刻（秒） */
+  to: number;
+  summary: string;
+  on_screen_text: string;
+  is_playing: boolean;
+  confidence: string;
+  simulated: boolean;
+}
+
+/** 一条冲浪信号：page/hot/search 为文本信号；video 为「在线看视频」看懂所得（含画面摘要/OCR/评论洞察）。 */
+export interface SurfSignal {
+  kind?: string;
+  /** 这条信号是怎么来的：seed=起点站首页 / search=站内搜索结果页 / feed=信息流点进的条目页 / direct=指定链接 */
+  via?: string;
+  title?: string;
+  url?: string;
+  /** 跳转后实际落在的页面（被重定向时与 url 不同） */
+  landed_on?: string;
+  /** 信息流里看到的条目标题（真人是照着它点进去的，页面标题可能不同） */
+  listed_as?: string;
+  /** 点进这条正文或视频是扫标题时认出了哪几个主题词（没有这个字段 = 按页面顺序顺路看的） */
+  picked_for?: string;
+  /** 站内搜索这一页时用的关键词（真人先搜整句，搜不到对题的再把话说短） */
+  query?: string;
+  /** 这一版关键词是**站点打字时自己弹出来的联想词**（没有这个字段 = 用的是我们自己切的词） */
+  suggested?: string;
+  /** 为读到这一页依次搜过哪几版关键词（多于一条 = 换过说法再搜） */
+  search_tried?: string[];
+  /** 这一页被什么挡住了（登录墙/订阅墙/人机验证/维护出错页）：摘录只是门口那几句话，**没读到正文、也没绕过去** */
+  wall?: string;
+  /** 文本信号的滚动/停留证据（真人式浏览：滚了几轮、原地停了几次、合计停留毫秒） */
+  scrolls?: number;
+  pauses?: number;
+  dwell_ms?: number;
+  /** 开这页之前像真人那样先停的毫秒（同会话连续操作为 0） */
+  gap_ms?: number;
+  /** 这是列表的第几页（点了站点自己的「下一页/加载更多」才读到的后续页） */
+  list_page?: number;
+  /** 是靠点哪个控件翻到这一页的（如「下一页」「加载更多」） */
+  paged_by?: string;
+  /** 点开了几处「展开全文」——不点只抓得到被截断的第一段 */
+  expanded?: number;
+  excerpt?: string;
+  /** video 信号专有字段 */
+  frames?: number;
+  /** 是否确认播放器真的在播（点播放后播放时刻有推进） */
+  played?: boolean;
+  /** 分组看懂：组数与每组张数 */
+  groups?: number;
+  group_frames?: number;
+  segments?: SurfSegment[];
+  /** 多组结论是否再经一次文本汇总 */
+  merged?: boolean;
+  /** 观看证据：播放推进的帧数与观看秒数（截图只在内存，不落盘、不下载视频） */
+  advancing_frames?: number;
+  watch_seconds?: number;
+  duration?: number;
+  /** 截了多帧但播放时刻没推进 = 其实没播起来 */
+  stalled?: boolean;
+  /** 网关未启用图像输入：抽了帧但没有画面结论 */
+  vision_skipped?: boolean;
+  /** 页面文字（标题/简介/评论）里含整页截图 OCR 的逐字转写（区别于 DOM 直抓） */
+  ocr_texts?: boolean;
+  visual_summary?: string;
+  on_screen_text?: string;
+  comment_insights?: string;
+  description?: string;
+  uploader?: string;
+  views?: string;
+  publish_date?: string;
+  /** DOM 逐条直抓的评论（视频页与正文页都有；旧数据可能是字符串，展示两者都兼容，抓不到就没有 = 绝不编造） */
+  comments?: SurfComment[] | string;
+  confidence?: string;
+  simulated?: boolean;
+  /** 这条视频的诚实边界告警（没播起来 / 评论没抓到 / 未看懂画面） */
+  warnings?: string[];
+}
+
+/** 一次冲浪会话（作业整机）：生命周期 queued→surfing→digesting→done|failed。 */
+export interface SurfSessionView {
+  id: string;
+  task_id: string;
+  tenant: string;
+  /** 解析后的具体通道 sample | browser | http */
+  provider: string;
+  /** 用户请求的通道（可能为 auto/sample） */
+  requested_provider: string;
+  topic: string;
+  /** 本会话是否在线看视频（仅 browser 会真播放与抽帧） */
+  watch_videos: boolean;
+  /** 指定要在线看的视频页链接（越界的会如实记为 skipped 信号） */
+  video_urls?: string[];
+  /** queued | surfing | digesting | done | failed */
+  status: string;
+  progress: number;
+  signals: SurfSignal[];
+  cards: SurfCard[];
+  simulated: boolean;
+  estimated_cost_usd: number;
+  warnings: string[];
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+  error: string;
+  history: { ts: string; from: string; to: string; note: string }[];
+}
+
+export interface SurfTaskView {
+  task_id: string;
+  sessions: SurfSessionView[];
+}
+
+export interface SurfPoolView {
+  cards: SurfCard[];
+}
+
+/** 浏览历史里的一条：上几轮**真读进去过**的条目页 / 在线看完的视频页（列表页与首页不算）。 */
+export interface SurfHistoryItem {
+  id: string;
+  tenant: string;
+  url: string;
+  topic: string;
+  title: string;
+  /** 当时是怎么进来的：feed=信息流点进 / search=站内搜索结果 / direct=用户指定 */
+  via?: string;
+  first_seen: string;
+  last_seen: string;
+  /** 累计读过几遍（同一页再读只 bump 这个数与 last_seen，不重复记账） */
+  reads: number;
+}
+
+export interface SurfHistoryView {
+  /** SURF_REMEMBER_READ 是否开着；关着时 items 恒空（没记就是没记） */
+  remember: boolean;
+  /** 每个租户最多记多少条（SURF_HISTORY_MAX） */
+  max: number;
+  items: SurfHistoryItem[];
+}
+
+/* ------------------------------------------------------------------ */
+/* 全自动配音（真实功能：剧情文本 + 参考音频 → 引擎逐句合成 → 时间轴汇总） */
+/* ------------------------------------------------------------------ */
+
+/** 时间轴汇总中的一段台词（源文本 + 所用参考音频 + 配音音频）。 */
+export interface DubbingSegment {
+  index: number;
+  speaker: string;
+  text: string;
+  /** 跨语言译制时的原句（未译制为空）；text 已是目标语言译文 */
+  source_text?: string;
+  /** 该说话人的参考音频引用（assets/ 相对路径或 http(s)） */
+  voice_ref: string;
+  /** 已合成音频的落盘引用（dubbing/<job_id>/seg_xxxx.wav）；空 = 未出音频/模拟 */
+  audio_ref?: string;
+  start_second: number;
+  duration_seconds: number;
+  end_second: number;
+  audio_url: string;
+  /** true = 时长为估算值（real 完成后按真实时长重建） */
+  estimated: boolean;
+  /** 如实标注（如「未识别到说话人标记，已归入旁白」） */
+  issue: string;
+}
+
+/** 配音完成后的时间轴汇总（每段含源文本与配音）。 */
+export interface DubbingSummary {
+  job_id: string;
+  task_id: string;
+  provider: string;
+  /** true = 模拟音频（sample:// 占位，非真实合成） */
+  simulated: boolean;
+  /** true = 已跨语言译制（text 为目标语言，原句见 source_text） */
+  translated?: boolean;
+  source_lang?: string;
+  target_lang?: string;
+  /** true = 译文为离线/降级引擎产出的占位串，非真实翻译 */
+  translation_simulated?: boolean;
+  line_count: number;
+  speakers: string[];
+  voices: Record<string, string>;
+  duration_seconds: number;
+  segments: DubbingSegment[];
+  /** 整轨音频引用（全段同参数 wav 时后端拼接）；缺省 = 未拼 */
+  full_audio?: string;
+  full_audio_url?: string;
+  warnings: string[];
+  issues: string[];
+}
+
+export interface DubbingJobView {
+  id: string;
+  task_id: string;
+  tenant: string;
+  /** sample | auto | sapi | sovits | elevenlabs | real（auto 已解析为具体引擎） */
+  provider: string;
+  /** 用户创建时选的通道（与 provider 不同时即 auto 择优结果） */
+  requested_provider?: string;
+  /** queued | synthesizing | done | failed */
+  status: string;
+  progress: number;
+  channel: string;
+  script_text: string;
+  voices: Record<string, string>;
+  target_lang?: string;
+  source_lang?: string;
+  translated?: boolean;
+  translation_simulated?: boolean;
+  line_count: number;
+  speakers: string[];
+  duration_seconds: number;
+  estimated_cost_usd: number;
+  /** 时间轴汇总 txt 的相对引用；空 = 未导出 */
+  timeline_path: string;
+  remote_id: string;
+  attempts: number;
+  summary: DubbingSummary | null;
+  manifest: {
+    provider: string;
+    line_count: number;
+    speakers: string[];
+    voices: Record<string, string>;
+    missing_voices: string[];
+    chars_per_second: number;
+    duration_seconds: number;
+    target_lang?: string;
+    source_lang?: string;
+    translated?: boolean;
+    translation_simulated?: boolean;
+    segments: DubbingSegment[];
+    warnings: string[];
+  };
+  error: string;
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+  history: { ts: string; from: string; to: string; note: string }[];
+}
+
+export interface DubbingView {
+  task_id: string;
+  jobs: DubbingJobView[];
+}
+
+/* ------------------------------------------------------------------ */
 /* 桌面宠物（开发样例：动作帧 → 可运行宠物包）                            */
 /* ------------------------------------------------------------------ */
 
@@ -1218,6 +1599,46 @@ export const api = {
       `/api/tasks/${id}/video-understanding/apply`,
       { method: 'POST', body: JSON.stringify(payload) },
     ),
+  /* ---------------- 灵感冲浪（会话 + 跨任务 idea 库） ---------------- */
+  surfTask: (id: string) => request<SurfTaskView>(`/api/tasks/${id}/surf`),
+  createSurf: (
+    id: string,
+    payload: { provider?: string; topic?: string; watchVideos?: boolean; videoUrls?: string[] } = {},
+  ) =>
+    request<{ task_id: string; session: SurfSessionView }>(`/api/tasks/${id}/surf`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  /** 无任务归属的一次冲浪（供「灵感库」页主动囤灵感）；topic 缺省用 SURF_TOPICS 首个。 */
+  startSurfSession: (
+    payload: { provider?: string; topic?: string; watchVideos?: boolean; videoUrls?: string[] } = {},
+  ) =>
+    request<{ session: SurfSessionView }>('/api/surf/session', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  surfPool: (topic = '', limit = 0) =>
+    request<SurfPoolView>(
+      `/api/surf/pool?topic=${encodeURIComponent(topic)}&limit=${limit}`,
+    ),
+  dropSurfCard: (cardId: string) =>
+    request<{ ok: boolean; id: string }>(`/api/surf/pool/${encodeURIComponent(cardId)}`, {
+      method: 'DELETE',
+    }),
+  /** 本租户的冲浪浏览历史（跨会话「读过哪些页」的记忆，最近读过→最早）。 */
+  surfHistory: (limit = 0) =>
+    request<SurfHistoryView>(`/api/surf/history?limit=${limit}`),
+  /** 清掉本租户的浏览记忆：让冲浪手「忘掉」读过的页，下一轮就当第一次刷这些站。 */
+  clearSurfHistory: () =>
+    request<{ ok: boolean; removed: number; tenant: string }>('/api/surf/history', {
+      method: 'DELETE',
+    }),
+  /** 把用户选选的灵感卡注入 Brief（不自动交付智能体，由用户挑选后触发）。 */
+  applySurf: (id: string, payload: { cardIds: string[] }) =>
+    request<{ ok: boolean; task_id: string; applied: string; injected: number; constraints: string[] }>(
+      `/api/tasks/${id}/surf/apply`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
   pets: (id: string) => request<PetGenView>(`/api/tasks/${id}/pets`),
   createPet: (
     id: string,
@@ -1266,6 +1687,55 @@ export const api = {
     request<{ ok: boolean; task_id: string; added: number; title: string }>(
       `/api/tasks/${id}/skills/apply`,
       { method: 'POST', body: JSON.stringify(payload) },
+    ),
+  dubbing: (id: string) => request<DubbingView>(`/api/tasks/${id}/dubbing`),
+  dubbingLanguages: () =>
+    request<{ languages: { code: string; name: string }[] }>(`/api/dubbing/languages`),
+  createDubbing: (
+    id: string,
+    payload: {
+      scriptText: string;
+      voices?: Record<string, string>;
+      provider?: string;
+      targetLang?: string;
+      sourceLang?: string;
+    },
+  ) =>
+    request<{ task_id: string; job: DubbingJobView }>(`/api/tasks/${id}/dubbing`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  /** 上传说话人参考音频（base64）到 assets/，返回相对引用 */
+  uploadDubbingVoice: (name: string, data: string) =>
+    request<{ name: string; ref: string; bytes: number }>('/api/dubbing/voices', {
+      method: 'POST',
+      body: JSON.stringify({ name, data }),
+    }),
+  /** 取一份参考音频供试听：走带鉴权头的路由，裸链接无法携带 token */
+  dubbingVoice: (id: string, ref: string) =>
+    fetchBinary(
+      `/api/tasks/${encodeURIComponent(id)}/dubbing/voices?ref=${encodeURIComponent(ref)}`,
+      '参考音频读取',
+    ),
+  /** 取一段已合成的配音音频供试听（引擎通道落盘的真 wav/mp3 或整轨 full.wav） */
+  dubbingAudio: (id: string, jobId: string, ref: string) =>
+    fetchBinary(
+      `/api/tasks/${encodeURIComponent(id)}/dubbing/${encodeURIComponent(jobId)}/audio?ref=${encodeURIComponent(ref)}`,
+      '配音音频读取',
+    ),
+  /** 下载整轨配音（后端拼接的 full.wav） */
+  dubbingAudioDownload: (id: string, jobId: string, ref: string, filename: string) =>
+    downloadBinary(
+      `/api/tasks/${encodeURIComponent(id)}/dubbing/${encodeURIComponent(jobId)}/audio?ref=${encodeURIComponent(ref)}`,
+      filename,
+      '配音音频下载',
+    ),
+  /** 下载时间轴汇总 txt（源文本 + 配音对照） */
+  dubbingTimeline: (id: string, jobId: string) =>
+    downloadBinary(
+      `/api/tasks/${encodeURIComponent(id)}/dubbing/${encodeURIComponent(jobId)}/timeline`,
+      `dubbing-${jobId}-timeline.txt`,
+      '时间轴汇总下载',
     ),
 };
 

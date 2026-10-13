@@ -36,3 +36,12 @@ mcp>=2.2,<3
 opentelemetry-api>=1.27.0
 opentelemetry-sdk>=1.27.0
 opentelemetry-exporter-otlp-proto-http>=1.27.0
+
+# ---- 灵感冲浪 browser 通道（可选真引擎，见 app/core/surf.py）----
+# 与上面几组不同：Playwright **默认不写进依赖**（连注释行都不激活），以保持
+# 「零外部依赖、离线可跑」的默认体验——冲浪默认走 sample 离线通道，doctor/CI 不受影响。
+# surf.py 对 Playwright 是**惰性 import**：只有显式选 browser 通道才 `from playwright.sync_api import`，
+# 未安装时受理即诚实失败并点名安装命令，绝不假装浏览过。要启用真无头浏览器冲浪时才手动装：
+#     pip install playwright
+#     playwright install chromium
+# 并配置 SURF_ALLOWED_DOMAINS（域名白名单）与 SURF_SEED_SITES（起点站）——只访问白名单内公开站点。

@@ -81,12 +81,58 @@ export function SettingsDrawer({
   const [videounderstandApiUrl, setVideounderstandApiUrl] = useState(config.videoUnderstand.apiUrl);
   const [videounderstandApiKey, setVideounderstandApiKey] = useState('');
   const [videounderstandTimeoutMs, setVideounderstandTimeoutMs] = useState(config.videoUnderstand.timeoutMs);
+  const [dubbingProvider, setDubbingProvider] = useState(config.dubbing.provider);
+  const [dubbingApiUrl, setDubbingApiUrl] = useState(config.dubbing.apiUrl);
+  const [dubbingApiKey, setDubbingApiKey] = useState('');
+  const [dubbingTimeoutMs, setDubbingTimeoutMs] = useState(config.dubbing.timeoutMs);
+  const [dubbingMaxLines, setDubbingMaxLines] = useState(config.dubbing.maxLines);
+  const [dubbingCharsPerSecond, setDubbingCharsPerSecond] = useState(config.dubbing.charsPerSecond);
+  const [dubbingSovitsBaseUrl, setDubbingSovitsBaseUrl] = useState(config.dubbing.sovitsBaseUrl);
+  const [dubbingSovitsLanguage, setDubbingSovitsLanguage] = useState(config.dubbing.sovitsLanguage);
+  const [dubbingElevenlabsBaseUrl, setDubbingElevenlabsBaseUrl] = useState(config.dubbing.elevenlabsBaseUrl);
+  const [dubbingElevenlabsApiKey, setDubbingElevenlabsApiKey] = useState('');
+  const [dubbingElevenlabsModel, setDubbingElevenlabsModel] = useState(config.dubbing.elevenlabsModel);
+  const [dubbingSapiVoices, setDubbingSapiVoices] = useState(config.dubbing.sapiVoices);
   const [petgenProvider, setPetgenProvider] = useState(config.petGen.provider);
   const [petgenFrameSize, setPetgenFrameSize] = useState(config.petGen.frameSize);
   const [petgenMaxFrames, setPetgenMaxFrames] = useState(config.petGen.maxFrames);
   const [petgenTimeoutMs, setPetgenTimeoutMs] = useState(config.petGen.timeoutMs);
   const [skillgenProvider, setSkillgenProvider] = useState(config.skillGen.provider);
   const [skillgenMaxWorks, setSkillgenMaxWorks] = useState(config.skillGen.maxWorks);
+  const [surfProvider, setSurfProvider] = useState(config.surf.provider);
+  const [surfHeadless, setSurfHeadless] = useState(config.surf.headless);
+  const [surfAutoEnabled, setSurfAutoEnabled] = useState(config.surf.autoEnabled);
+  const [surfTickSeconds, setSurfTickSeconds] = useState(config.surf.tickSeconds);
+  const [surfPoolMax, setSurfPoolMax] = useState(config.surf.poolMax);
+  const [surfCardsPerSession, setSurfCardsPerSession] = useState(config.surf.cardsPerSession);
+  const [surfAllowedDomainsText, setSurfAllowedDomainsText] = useState(config.surf.allowedDomains.join('\n'));
+  const [surfSeedSitesText, setSurfSeedSitesText] = useState(config.surf.seedSites.join('\n'));
+  const [surfTopicsText, setSurfTopicsText] = useState(config.surf.topics.join('\n'));
+  const [surfWatchVideos, setSurfWatchVideos] = useState(config.surf.watchVideos);
+  const [surfScrapeComments, setSurfScrapeComments] = useState(config.surf.scrapeComments);
+  const [surfVideoFrames, setSurfVideoFrames] = useState(config.surf.videoFrames);
+  const [surfVideoFrameIntervalMs, setSurfVideoFrameIntervalMs] = useState(config.surf.videoFrameIntervalMs);
+  const [surfVlmGroupFrames, setSurfVlmGroupFrames] = useState(config.surf.vlmGroupFrames);
+  const [surfMaxVideosPerSession, setSurfMaxVideosPerSession] = useState(config.surf.maxVideosPerSession);
+  const [surfMaxComments, setSurfMaxComments] = useState(config.surf.maxComments);
+  const [surfCropToVideo, setSurfCropToVideo] = useState(config.surf.cropToVideo);
+  const [surfClickIntoVideos, setSurfClickIntoVideos] = useState(config.surf.clickIntoVideos);
+  const [surfHumanPace, setSurfHumanPace] = useState(config.surf.humanPace);
+  const [surfSearchOnSeeds, setSurfSearchOnSeeds] = useState(config.surf.searchOnSeeds);
+  const [surfHopsPerPage, setSurfHopsPerPage] = useState(config.surf.hopsPerPage);
+  const [surfListPages, setSurfListPages] = useState(config.surf.listPages);
+  const [surfPageComments, setSurfPageComments] = useState(config.surf.pageComments);
+  const [surfPageGapMs, setSurfPageGapMs] = useState(config.surf.pageGapMs);
+  const [surfTopicFocus, setSurfTopicFocus] = useState(config.surf.topicFocus);
+  const [surfSearchRetries, setSurfSearchRetries] = useState(config.surf.searchRetries);
+  const [surfUseSuggestions, setSurfUseSuggestions] = useState(config.surf.useSuggestions);
+  const [surfSuggestionsMax, setSurfSuggestionsMax] = useState(config.surf.suggestionsMax);
+  const [surfAvoidWalls, setSurfAvoidWalls] = useState(config.surf.avoidWalls);
+  const [surfRememberRead, setSurfRememberRead] = useState(config.surf.rememberRead);
+  const [surfHistoryMax, setSurfHistoryMax] = useState(config.surf.historyMax);
+  const [surfMaxPages, setSurfMaxPages] = useState(config.surf.maxPages);
+  const [surfScrollRounds, setSurfScrollRounds] = useState(config.surf.scrollRounds);
+  const [surfSettleMs, setSurfSettleMs] = useState(config.surf.settleMs);
   const [searchProvider, setSearchProvider] = useState(config.search.provider);
   const [searchApiUrl, setSearchApiUrl] = useState(config.search.apiUrl);
   const [searchApiKey, setSearchApiKey] = useState('');
@@ -175,12 +221,65 @@ export function SettingsDrawer({
       videounderstandProvider,
       videounderstandApiUrl: videounderstandApiUrl.trim(),
       videounderstandTimeoutMs,
+      dubbingProvider,
+      dubbingApiUrl: dubbingApiUrl.trim(),
+      dubbingTimeoutMs,
+      dubbingMaxLines,
+      dubbingCharsPerSecond,
+      dubbingSovitsBaseUrl: dubbingSovitsBaseUrl.trim(),
+      dubbingSovitsLanguage: dubbingSovitsLanguage.trim() || 'zh',
+      dubbingElevenlabsBaseUrl: dubbingElevenlabsBaseUrl.trim(),
+      dubbingElevenlabsModel: dubbingElevenlabsModel.trim(),
+      dubbingSapiVoices: dubbingSapiVoices.trim(),
       petgenProvider,
       petgenFrameSize,
       petgenMaxFrames,
       petgenTimeoutMs,
       skillgenProvider,
       skillgenMaxWorks,
+      surfProvider,
+      surfHeadless,
+      surfAutoEnabled,
+      surfTickSeconds,
+      surfPoolMax,
+      surfCardsPerSession,
+      surfWatchVideos,
+      surfScrapeComments,
+      surfVideoFrames,
+      surfVideoFrameIntervalMs,
+      surfVlmGroupFrames,
+      surfMaxVideosPerSession,
+      surfMaxComments,
+      surfCropToVideo,
+      surfClickIntoVideos,
+      surfHumanPace,
+      surfSearchOnSeeds,
+      surfHopsPerPage,
+      surfListPages,
+      surfPageComments,
+      surfPageGapMs,
+      surfTopicFocus,
+      surfSearchRetries,
+      surfUseSuggestions,
+      surfSuggestionsMax,
+      surfAvoidWalls,
+      surfRememberRead,
+      surfHistoryMax,
+      surfMaxPages,
+      surfScrollRounds,
+      surfSettleMs,
+      surfAllowedDomains: surfAllowedDomainsText
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean),
+      surfSeedSites: surfSeedSitesText
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean),
+      surfTopics: surfTopicsText
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean),
       searchProvider,
       searchApiUrl: searchApiUrl.trim(),
       searchMaxResults,
@@ -215,6 +314,8 @@ export function SettingsDrawer({
     if (imagegenApiKey.trim()) patch.imagegenApiKey = imagegenApiKey.trim();
     if (videogenApiKey.trim()) patch.videogenApiKey = videogenApiKey.trim();
     if (videounderstandApiKey.trim()) patch.videounderstandApiKey = videounderstandApiKey.trim();
+    if (dubbingApiKey.trim()) patch.dubbingApiKey = dubbingApiKey.trim();
+    if (dubbingElevenlabsApiKey.trim()) patch.dubbingElevenlabsApiKey = dubbingElevenlabsApiKey.trim();
     if (searchApiKey.trim()) patch.searchApiKey = searchApiKey.trim();
     // OTLP 鉴权头仅输入非空时携带（缺失 = 保留已存值，防止误清）
     if (tracingOtlpHeaders.trim()) patch.tracingOtlpHeaders = tracingOtlpHeaders.trim();
@@ -904,6 +1005,135 @@ export function SettingsDrawer({
               按集预估成本纳入<strong>预算熔断</strong>。
             </div>
 
+            <div className="section-h">全自动配音（真实功能：引擎逐句合成真音频）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>
+                  配音引擎{' '}
+                  {config.dubbing.configured ? (
+                    <Chip tone="tone-ok" mono>
+                      当前通道可用
+                    </Chip>
+                  ) : (
+                    <Chip tone="tone-bad" mono>
+                      所选通道缺配置
+                    </Chip>
+                  )}
+                </label>
+                <select
+                  value={dubbingProvider}
+                  onChange={(e) => setDubbingProvider(e.target.value as typeof dubbingProvider)}
+                >
+                  <option value="auto">auto（按 elevenlabs→sovits→sapi→real 择优，都没配则 sample）</option>
+                  <option value="sapi">sapi（Windows 系统音色本机真合成，不克隆参考音频）</option>
+                  <option value="sovits">sovits（自建 GPT-SoVITS 类服务，参考音频零样本克隆）</option>
+                  <option value="elevenlabs">elevenlabs（云端克隆，按字符计费）</option>
+                  <option value="real">real（自定义配音网关，POST/GET 契约）</option>
+                  <option value="sample">sample（离线模拟，不出真音频，联调用）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>
+                  sovits 服务地址{' '}
+                  {config.dubbing.engines.sovits ? <Chip tone="tone-ok" mono>已配置</Chip> : null}
+                </label>
+                <input
+                  value={dubbingSovitsBaseUrl}
+                  placeholder="http://127.0.0.1:9880（GPT-SoVITS api_v2）"
+                  onChange={(e) => setDubbingSovitsBaseUrl(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>sovits 文本语种（text_lang）</label>
+                <input
+                  value={dubbingSovitsLanguage}
+                  placeholder="zh / en / ja"
+                  onChange={(e) => setDubbingSovitsLanguage(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>
+                  elevenlabs API 地址{' '}
+                  {config.dubbing.elevenlabsApiKeySet ? (
+                    <Chip tone="tone-ok" mono>克隆密钥已设置</Chip>
+                  ) : null}
+                </label>
+                <input
+                  value={dubbingElevenlabsBaseUrl}
+                  placeholder="https://api.elevenlabs.io/v1"
+                  onChange={(e) => setDubbingElevenlabsBaseUrl(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>elevenlabs API Key（xi-api-key）</label>
+                <input
+                  type="password"
+                  value={dubbingElevenlabsApiKey}
+                  placeholder="留空表示不修改"
+                  onChange={(e) => setDubbingElevenlabsApiKey(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>elevenlabs 合成模型</label>
+                <input
+                  value={dubbingElevenlabsModel}
+                  placeholder="eleven_multilingual_v2"
+                  onChange={(e) => setDubbingElevenlabsModel(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>sapi 限定音色（逗号分隔，空=全部）</label>
+                <input
+                  value={dubbingSapiVoices}
+                  placeholder="如 Microsoft Huihui Desktop,Microsoft Zira Desktop"
+                  onChange={(e) => setDubbingSapiVoices(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>
+                  配音网关 URL{' '}
+                  {config.dubbing.apiKeySet ? (
+                    <Chip tone="tone-ok" mono>
+                      网关密钥已设置 {config.dubbing.apiKeyMasked}
+                    </Chip>
+                  ) : null}
+                </label>
+                <input
+                  value={dubbingApiUrl}
+                  placeholder="https://your-dubbing-gateway/synthesize"
+                  onChange={(e) => setDubbingApiUrl(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>超时（ms）</label>
+                <input type="number" value={dubbingTimeoutMs} onChange={(e) => setDubbingTimeoutMs(Number(e.target.value))} />
+              </div>
+              <div className="field">
+                <label>网关 API Key</label>
+                <input
+                  type="password"
+                  value={dubbingApiKey}
+                  placeholder="留空表示不修改"
+                  onChange={(e) => setDubbingApiKey(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>单作业最多行数</label>
+                <input type="number" min={1} max={1000} value={dubbingMaxLines} onChange={(e) => setDubbingMaxLines(Number(e.target.value))} />
+              </div>
+              <div className="field">
+                <label>估算语速（字/秒）</label>
+                <input type="number" step={0.5} min={0.5} value={dubbingCharsPerSecond} onChange={(e) => setDubbingCharsPerSecond(Number(e.target.value))} />
+              </div>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              配音输入的剧情文本与参考音频都由用户提供；台词切分与说话人识别<strong>真做</strong>，
+              引擎通道（sapi/sovits/elevenlabs）由后台 worker <strong>逐句真合成并落盘</strong>，
+              完成后时间轴按音频实长重建、可逐句试听与下载整轨；服务重启后作业自动复活续跑。
+              sapi 用系统音色<strong>不克隆参考音频</strong>（汇总里如实标注）；sovits/elevenlabs/real
+              缺参考音频即<strong>显式失败、不假装克隆</strong>；云端引擎按计费口径纳入<strong>成本预算熔断</strong>。
+            </div>
+
             <div className="section-h">桌面宠物（开发样例）</div>
             <div className="form-grid">
               <div className="field">
@@ -987,6 +1217,388 @@ export function SettingsDrawer({
               但不含模型判断，故产物标注 <code>simulated=true</code>；<code>llm</code> 通道一次=一次调用，
               <strong>复用 </strong><code>LLM_*</code><strong> 端点与密钥、不新增配置</strong>，
               预估成本纳入<strong>预算熔断</strong>，未配真实网关时<strong>显式失败、不假装提炼</strong>。
+            </div>
+
+            <div className="section-h">灵感冲浪（像真人上网找灵感 → 沉淀 idea 库）</div>
+            <div className="form-grid">
+              <div className="field">
+                <label>
+                  冲浪通道{' '}
+                  {config.surf.configured ? (
+                    <Chip tone="tone-ok" mono>
+                      当前通道可用
+                    </Chip>
+                  ) : (
+                    <Chip tone="tone-bad" mono>
+                      当前通道缺配置
+                    </Chip>
+                  )}
+                </label>
+                <select
+                  value={surfProvider}
+                  onChange={(e) => setSurfProvider(e.target.value as 'sample' | 'auto' | 'browser' | 'http')}
+                >
+                  <option value="sample">sample（离线占位灵感，零依赖、不联网）</option>
+                  <option value="auto">auto（按 browser→http→sample 自动择优）</option>
+                  <option value="browser">browser（Playwright 真无头浏览器）</option>
+                  <option value="http">http（复用联网检索网关冲浪）</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>每轮产出灵感卡数</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={surfCardsPerSession}
+                  onChange={(e) => setSurfCardsPerSession(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>灵感池最多沉淀（张）</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={surfPoolMax}
+                  onChange={(e) => setSurfPoolMax(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>自主冲浪间隔（秒）</label>
+                <input
+                  type="number"
+                  min={30}
+                  value={surfTickSeconds}
+                  onChange={(e) => setSurfTickSeconds(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <label className="row small" style={{ marginTop: 12, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfHeadless}
+                onChange={(e) => setSurfHeadless(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              无头模式（browser 通道不弹出可见浏览器窗口）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfAutoEnabled}
+                onChange={(e) => setSurfAutoEnabled(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              开启后台定时自主冲浪（按下方主题列表定时囤灵感；默认关闭以保持进程零副作用、无外网连接）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfHumanPace}
+                onChange={(e) => setSurfHumanPace(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              真人节奏：每轮下滑幅度与停留随机浮动，偶尔原地停一下把这段读完再滚（关掉 = 等距滚 + 固定等的机器节奏）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfSearchOnSeeds}
+                onChange={(e) => setSurfSearchOnSeeds(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              站内搜索：像真人那样用起点站自己的搜索框逐字打字搜主题，再读结果页（找不到搜索框就如实不搜）；
+              结果页标题里一个主题词都认不出时，会<strong>清空搜索框换个更短的说法再搜</strong>（换几次见下面的数字，搜过的每版关键词都记在信号上）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfUseSuggestions}
+                onChange={(e) => setSurfUseSuggestions(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              也用站点给的搜索联想词：打字时弹出的下拉里，只点<strong>认得出本次主题词</strong>的那一条（点不动就把那个词打回框里再回车）；
+              一条都认不出就照原词回车，<strong>绝不为了点一条联想把主题改掉</strong>，也没联想层时绝不假装看到过（关掉 = 一律按原词回车）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfAvoidWalls}
+                onChange={(e) => setSurfAvoidWalls(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              读到门口就退出来：页面短到像一扇门且写着「请先登录 / 付费阅读 / 请输入验证码 / 页面不存在」时，
+              信号上标出<strong>被哪种墙挡住</strong>、摘录只留门口那几句话，<strong>不绕墙也不把墙话当正文</strong>喂给模型
+              （正常文章里顺口提一句「登录同步收藏」不会误判；关掉 = 墙上的话照旧当正文读）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfTopicFocus}
+                onChange={(e) => setSurfTopicFocus(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              扫标题挑条目与视频：信息流里先点标题认得出主题词的那几条（要在线看的视频也照样挑，信号上写明凭哪几个词点进去；关掉 = 按页面原顺序）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfPageComments}
+                onChange={(e) => setSurfPageComments(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              读全文与评论区：内容页先点开「展开全文」再读，并像真人那样翻到底逐条抓评论区（抓不到就留空，绝不编造）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfRememberRead}
+                onChange={(e) => setSurfRememberRead(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              记住读过哪些页（跨会话）：上几轮真读进去的条目这轮就<strong>跳过、改读没见过的</strong>，
+              整版都读过时照样重读并如实说明；关掉 = 每轮都当第一次刷这些站（灵感面板里可清掉这份记忆）
+            </label>
+            <div className="form-grid" style={{ marginTop: 8 }}>
+              <div className="field">
+                <label>每页点进几条内容页（多跳）</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={surfHopsPerPage}
+                  onChange={(e) => setSurfHopsPerPage(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>一个列表最多刷几页（1 = 不翻页）</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={surfListPages}
+                  onChange={(e) => setSurfListPages(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>搜不对题就换个说法再搜几次（0 = 整句搜一次就完）</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={3}
+                  value={surfSearchRetries}
+                  onChange={(e) => setSurfSearchRetries(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>一次最多读回几条搜索联想</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={surfSuggestionsMax}
+                  onChange={(e) => setSurfSuggestionsMax(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>最多记住几页读过的（超了先忘最旧的）</label>
+                <input
+                  type="number"
+                  min={20}
+                  max={5000}
+                  step={20}
+                  value={surfHistoryMax}
+                  onChange={(e) => setSurfHistoryMax(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>开新页前停顿（毫秒，真人节奏在此上下浮动）</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={30000}
+                  step={100}
+                  value={surfPageGapMs}
+                  onChange={(e) => setSurfPageGapMs(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>单次冲浪页数上限</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={surfMaxPages}
+                  onChange={(e) => setSurfMaxPages(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>每页下滑轮数</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={surfScrollRounds}
+                  onChange={(e) => setSurfScrollRounds(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>每轮停留（毫秒，真人节奏在此上下浮动）</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={10000}
+                  step={100}
+                  value={surfSettleMs}
+                  onChange={(e) => setSurfSettleMs(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              起点站首页、站内搜索结果页、<strong>点「下一页/加载更多」翻出的列表后续页</strong>、信息流点进的条目页、
+              在线看的视频页<strong>合计不超过页数上限</strong>；翻页只点站点自己的控件，没这个控件或点了页面没变就如实停下（不硬拼 URL），
+              多跳只点白名单内的同域条目（外站/内网/图片直链一律不收），挑条目时标题认不出主题词会如实写明是顺路读的。
+            </div>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfWatchVideos}
+                onChange={(e) => setSurfWatchVideos(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              看懂视频（仅 browser 生效）：像真人进视频页→关遮罩点播放→校验真的在播→播放中**分组截图**
+              抽帧→逐组交 VLM 看懂并汇总（不下载视频文件）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfScrapeComments}
+                onChange={(e) => setSurfScrapeComments(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              抓取视频页文字信息（标题 / 简介 / UP 主 / 播放量 / 逐条评论走 DOM 直抓；抓不到的靠截图 OCR）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfClickIntoVideos}
+                onChange={(e) => setSurfClickIntoVideos(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              像真人一样从信息流点进视频页（浏览起点站时收集页内视频链接，逐条进入在线看）
+            </label>
+            <label className="row small" style={{ marginTop: 8, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={surfCropToVideo}
+                onChange={(e) => setSurfCropToVideo(e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              抽帧只截播放器画面元素（含 iframe 内播放器）；关掉则整页截图（信息多、画面占比小）
+            </label>
+            <div className="form-grid" style={{ marginTop: 8 }}>
+              <div className="field">
+                <label>每视频抽帧数（交 VLM 的截图上限）</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={surfVideoFrames}
+                  onChange={(e) => setSurfVideoFrames(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>抽帧间隔（毫秒）</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={100}
+                  value={surfVideoFrameIntervalMs}
+                  onChange={(e) => setSurfVideoFrameIntervalMs(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>每组交 VLM 的截图张数</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={12}
+                  value={surfVlmGroupFrames}
+                  onChange={(e) => setSurfVlmGroupFrames(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>单会话最多看懂几个视频</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={surfMaxVideosPerSession}
+                  onChange={(e) => setSurfMaxVideosPerSession(Number(e.target.value))}
+                />
+              </div>
+              <div className="field">
+                <label>每页最多收集评论条数</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={surfMaxComments}
+                  onChange={(e) => setSurfMaxComments(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <div className="muted small" style={{ marginTop: 8 }}>
+              在线看视频的前置：Playwright {config.surf.browserAvailable ? '已安装' : '未安装（pip install playwright && playwright install chromium）'}
+              {' · '}域名白名单 {config.surf.allowedDomains.length ? `已配 ${config.surf.allowedDomains.length} 项` : '未配（browser 通道受理即诚实失败）'}
+              {' · '}图像输入 {config.surf.visionConfigured ? '已启用（LLM_VISION）' : '未启用：抽帧照做但**不交 VLM**，画面只如实标「未看懂」'}
+            </div>
+            <div className="field" style={{ marginTop: 8 }}>
+              <label>可浏览域名白名单（一行一个，browser 通道只访问这些站点；SSRF 私网/环回一律拒绝）</label>
+              <textarea
+                rows={3}
+                value={surfAllowedDomainsText}
+                placeholder={'example.com\nreddit.com'}
+                onChange={(e) => setSurfAllowedDomainsText(e.target.value)}
+              />
+            </div>
+            <div className="field" style={{ marginTop: 8 }}>
+              <label>起点站 URL（一行一个，browser 通道从这里出发navigate 浏览）</label>
+              <textarea
+                rows={3}
+                value={surfSeedSitesText}
+                placeholder={'https://www.example.com/trending'}
+                onChange={(e) => setSurfSeedSitesText(e.target.value)}
+              />
+            </div>
+            <div className="field" style={{ marginTop: 8 }}>
+              <label>自主冲浪主题（一行一个，开启后台冲浪时每个主题囤一轮）</label>
+              <textarea
+                rows={3}
+                value={surfTopicsText}
+                placeholder={'夏季露营装备测评\n城市咖啡探店'}
+                onChange={(e) => setSurfTopicsText(e.target.value)}
+              />
+            </div>
+            <div className="muted small" style={{ marginTop: 6 }}>
+              默认 <code>sample</code>、不开自动冲浪：开箱即离线可跑、零外网连接。<code>browser</code> 通道需自行安装
+              Playwright（<code>pip install playwright && playwright install chromium</code>，当前服务
+              {config.surf.browserAvailable ? (
+                <Chip tone="tone-ok">已检测到 Playwright</Chip>
+              ) : (
+                <Chip tone="tone-idle">未检测到 Playwright</Chip>
+              )}
+              ）并配置域名白名单与起点站；未装依赖 / 未配白名单时受理即<strong>如实失败并点名</strong>，绝不假装浏览过。
+              browser 通道<strong>像真人那样浏览</strong>：随机节奏下滑刷信息流、用起点站自己的搜索框搜主题、
+              点站点自己的「下一页/加载更多」接着刷、内容页点开「展开全文」并顺手翻评论区，
+              再从条目里<strong>扫标题挑同域内容页</strong>点进读一层、要在线看的视频也从贴主题的标题里挑，搜出来的结果不贴主题就
+              <strong>换个更短的说法再搜</strong>，这轮读过的条目还会<strong>记进跨会话浏览历史</strong>（下几轮跳过它们改读没见过的），
+              每条信号都标注入口（首页 / 站内搜索 / 信息流点进 / 指定链接）
+              与列表页码、翻页控件、页间停顿、点进理由（标题里认出的主题词）、站内搜索关键词等浏览证据。
+              开启「看懂视频」后，<code>browser</code> 会在线播放视频、按间隔<strong>截图抽帧</strong>交给多模态网关
+              （<code>LLM_*</code>）看懂，并把画面里的文字当 OCR 转写；<strong>不下载视频文件</strong>，也没配视觉网关/离线时
+              画面摘要会自报「占位看懂」、绝不假装看懂。未开启时视频只作<strong>信号</strong>记录。
+              灵感<strong>不自动交付智能体</strong>：入 idea 库后由你在冲浪面板勾选、调整再注入 Brief。
             </div>
 
             <div className="section-h">联网检索（可选，默认关闭）</div>

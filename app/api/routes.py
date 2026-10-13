@@ -32,6 +32,14 @@ from ..core.clock import now_iso
 from ..core.digital_human import drop_task as drop_digital_human_jobs
 from ..core.digital_human import list_jobs as list_digital_human_jobs
 from ..core.digital_human import create_job as create_digital_human_job
+from ..core.dubbing import DUBBING_LANGS
+from ..core.dubbing import create_job as create_dubbing_job
+from ..core.dubbing import drop_task as drop_dubbing_jobs
+from ..core.dubbing import get_job as get_dubbing_job
+from ..core.dubbing import list_jobs as list_dubbing_jobs
+from ..core.dubbing import resolve_audio_path as resolve_dubbing_audio
+from ..core.dubbing import resolve_voice_path as resolve_dubbing_voice
+from ..core.dubbing import save_voice as save_dubbing_voice
 from ..core.imagegen import create_job as create_imagegen_job
 from ..core.imagegen import drop_task as drop_imagegen_jobs
 from ..core.imagegen import list_jobs as list_imagegen_jobs
@@ -43,6 +51,15 @@ from ..core.videounderstand import drop_task as drop_videounderstand_jobs
 from ..core.videounderstand import get_job as get_videounderstand_job
 from ..core.videounderstand import has_video_asset
 from ..core.videounderstand import list_jobs as list_videounderstand_jobs
+from ..core.surf import clear_history as clear_surf_history
+from ..core.surf import create_session as create_surf_session
+from ..core.surf import drop_pool_card as drop_surf_pool_card
+from ..core.surf import drop_task as drop_surf_jobs
+from ..core.surf import get_pool_card as get_surf_pool_card
+from ..core.surf import list_history as list_surf_history
+from ..core.surf import list_pool as list_surf_pool
+from ..core.surf import list_sessions as list_surf_sessions
+from ..core.surf import render_inspiration as render_surf_inspiration
 from ..core.petgen import build_package as build_pet_package
 from ..core.petgen import create_job as create_petgen_job
 from ..core.petgen import drop_task as drop_petgen_jobs
@@ -542,12 +559,46 @@ _SETTINGS_NUM_KEYS = (
     "petgenMaxFrames",
     "petgenTimeoutMs",
     "skillgenMaxWorks",
+    "surfMaxPages",
+    "surfScrollRounds",
+    "surfSettleMs",
+    "surfTimeoutMs",
+    "surfQueriesPerTopic",
+    "surfCardsPerSession",
+    "surfPoolMax",
+    "surfTickSeconds",
+    "surfVideoFrames",
+    "surfVideoFrameIntervalMs",
+    "surfVlmGroupFrames",
+    "surfMaxVideosPerSession",
+    "surfMaxComments",
+    "surfHopsPerPage",
+    "surfListPages",
+    "surfPageGapMs",
+    "surfSearchRetries",
+    "surfSuggestionsMax",
+    "surfHistoryMax",
     "searchMaxResults",
     "searchTimeoutMs",
     "searchMaxPages",
     "tracingSampleRatio",
 )
-_SETTINGS_BOOL_KEYS = ("searchFetchPages",)
+_SETTINGS_BOOL_KEYS = (
+    "searchFetchPages",
+    "surfHeadless",
+    "surfAutoEnabled",
+    "surfWatchVideos",
+    "surfScrapeComments",
+    "surfCropToVideo",
+    "surfClickIntoVideos",
+    "surfHumanPace",
+    "surfSearchOnSeeds",
+    "surfPageComments",
+    "surfTopicFocus",
+    "surfUseSuggestions",
+    "surfAvoidWalls",
+    "surfRememberRead",
+)
 _SETTINGS_ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "embeddingProvider": ("local", "openai"),
     "dhProvider": ("sample", "http"),
@@ -556,6 +607,7 @@ _SETTINGS_ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "videounderstandProvider": ("sample", "real"),
     "petgenProvider": ("sample", "imagegen"),
     "skillgenProvider": ("rules", "llm"),
+    "surfProvider": ("sample", "auto", "browser", "http"),
     "searchProvider": ("none", "http"),
     "tracingSampler": (
         "parentbased_always_on",
@@ -643,6 +695,32 @@ def write_settings(payload: dict[str, Any] | None = Body(default=None)) -> dict[
             if len(cleaned) >= 20:
                 break
         patch["siteUrls"] = cleaned
+
+    # 灵感冲浪的三类字符串列表：域名白名单 / 起点站 URL / 囤灵感主题。
+    # 逐项 strip、去重、保序、上限 20（空数组 = 清空该列表）。
+    def _clean_str_list(key: str, *, url_prefix: bool) -> None:
+        raw = body.get(key)
+        if not isinstance(raw, list):
+            return
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            val = item.strip()
+            if not val or url_prefix and not val.lower().startswith(("http://", "https://")):
+                continue
+            if val in seen:
+                continue
+            seen.add(val)
+            out.append(val)
+            if len(out) >= 20:
+                break
+        patch[key] = out
+
+    _clean_str_list("surfAllowedDomains", url_prefix=False)
+    _clean_str_list("surfSeedSites", url_prefix=True)
+    _clean_str_list("surfTopics", url_prefix=False)
 
     # 每智能体模型覆盖：键大写归一并限定 A<数字> 形态；apiKey 缺失 = 保留已存值、
     # 显式 "" = 清除（继承全局），仅收字符串字段
@@ -753,6 +831,8 @@ def delete_task(task_id: str, request: Request) -> dict[str, Any]:
     purged_images = drop_imagegen_jobs(task_id)
     purged_videos = drop_videogen_jobs(task_id)
     purged_vu = drop_videounderstand_jobs(task_id)
+    purged_dubs = drop_dubbing_jobs(task_id)
+    purged_surf = drop_surf_jobs(task_id)
     purged_pets = drop_petgen_jobs(task_id)
     purged_skills = drop_skillgen_jobs(task_id)
     blackboard.flush()
@@ -764,6 +844,8 @@ def delete_task(task_id: str, request: Request) -> dict[str, Any]:
         "purged_imagegen_jobs": purged_images,
         "purged_videogen_jobs": purged_videos,
         "purged_videounderstand_jobs": purged_vu,
+        "purged_dubbing_jobs": purged_dubs,
+        "purged_surf_jobs": purged_surf,
         "purged_petgen_jobs": purged_pets,
         "purged_skillgen_jobs": purged_skills,
     }
@@ -1067,6 +1149,320 @@ def apply_video_understanding(
         applied = "added"
     task_store.set(task)
     return {"ok": True, "task_id": task.id, "applied": applied, "constraints": list(task.brief.constraints)}
+
+
+# ------------------------------------------------------------------ #
+# 灵感冲浪（像真人上网刷信息/看视频 → 消化成灵感卡 → 沉淀跨任务 idea 库）  #
+# ------------------------------------------------------------------ #
+
+
+def _surf_body(payload: dict[str, Any] | None) -> tuple[str, str, bool | None, list[str]]:
+    """解析冲浪请求体：通道 / 主题 / 是否在线看视频 / 指定要看的视频页链接。
+
+    ``videoUrls`` 只收 http(s) 字符串、去重、上限 10；**是否越界由 core/surf.py 的白名单闸门
+    判定**（这里不重复安全逻辑），越界链接如实记为 skipped 信号而不是静默丢弃。
+    """
+    body: dict[str, Any] = payload or {}
+    provider = body.get("provider") if isinstance(body.get("provider"), str) else ""
+    topic = body.get("topic") if isinstance(body.get("topic"), str) else ""
+    watch_raw = next(
+        (body[k] for k in ("watchVideos", "watch_videos", "includeVideo") if k in body), None
+    )
+    watch = bool(watch_raw) if isinstance(watch_raw, bool) else None
+    raw_urls = next(
+        (body[k] for k in ("videoUrls", "video_urls") if isinstance(body.get(k), list)), []
+    )
+    urls: list[str] = []
+    for item in raw_urls:
+        url = str(item or "").strip()
+        if not url.lower().startswith(("http://", "https://")) or url in urls:
+            continue
+        urls.append(url)
+        if len(urls) >= 10:
+            break
+    return provider or "", topic or "", watch, urls
+
+
+@router.post("/tasks/{task_id}/surf", status_code=201)
+def create_task_surf(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """为任务发起一次灵感冲浪（provider ∈ sample|auto|browser|http；topic 缺省用 Brief）。
+
+    会话完成后其灵感卡自动沉淀进跨任务灵感池。**诚实失败**：browser 未装 Playwright、
+    http 未配搜索网关时，受理即置 failed 并点名具体环境变量，绝不假装浏览过。
+    带 ``videoUrls`` 时像真人一样**在线看**这些视频页（点播放→分组抽帧→交 VLM，不下载文件）。
+    """
+    task = _require_task(task_id, request)
+    provider, topic, watch_videos, video_urls = _surf_body(payload)
+    try:
+        session = create_surf_session(
+            task,
+            provider=provider,
+            topic=topic,
+            watch_videos=watch_videos,
+            video_urls=video_urls,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"task_id": task.id, "session": session}
+
+
+@router.get("/tasks/{task_id}/surf")
+def list_task_surf(task_id: str, request: Request) -> dict[str, Any]:
+    """读取任务的冲浪会话列表（读取时惰性推进状态机）。"""
+    task = _require_task(task_id, request)
+    return {"task_id": task.id, "sessions": list_surf_sessions(task_id=task.id, tenant=task.tenant)}
+
+
+@router.post("/surf/session", status_code=201)
+def create_surf_session_endpoint(
+    request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """无任务归属的一次冲浪（供「灵感库」页主动囤灵感，或外部触发）；topic 缺省用 SURF_TOPICS 首个。"""
+    provider, topic, watch_videos, video_urls = _surf_body(payload)
+    try:
+        session = create_surf_session(
+            None,
+            provider=provider,
+            topic=topic,
+            watch_videos=watch_videos,
+            video_urls=video_urls,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"session": session}
+
+
+@router.get("/surf/pool")
+def surf_pool(
+    request: Request, topic: str = "", limit: int = 0
+) -> dict[str, Any]:
+    """列出灵感池（跨任务 idea 库，新→旧）；灵感由用户自行挑选后再创作，不自动交付智能体。"""
+    tenant = _tenant_of(request)
+    return {"cards": list_surf_pool(tenant=tenant, topic=topic, limit=limit)}
+
+
+@router.delete("/surf/pool/{card_id}")
+def surf_pool_drop(card_id: str, request: Request) -> dict[str, Any]:
+    """从灵感池删除一张卡（按租户隔离，跨租户与不存在同为 404）。"""
+    tenant = _tenant_of(request)
+    card = get_surf_pool_card(card_id, tenant=tenant)
+    if card is None:
+        raise HTTPException(status_code=404, detail="未找到该灵感卡")
+    return {"ok": drop_surf_pool_card(card_id), "id": card_id}
+
+
+@router.get("/surf/history")
+def surf_history(request: Request, limit: int = 0) -> dict[str, Any]:
+    """本租户的冲浪**浏览历史**（跨会话「读过哪些页」的记忆，最近读过→最早）。
+
+    下一轮真人式浏览就是从这份记忆里挑出「上几轮读过的条目」跳过的，故这里读到的每一条
+    都是**真读进去过**的条目页/看过的视频页（列表页与首页不算）。``remember=false`` 表示
+    ``SURF_REMEMBER_READ`` 已关——没记就是没记， items 恒空，不拿别处的数据凑。
+    """
+    tenant = _tenant_of(request)
+    cfg = get_config().surf
+    return {
+        "remember": bool(cfg.remember_read),
+        "max": int(cfg.history_max),
+        "items": list_surf_history(tenant, limit=limit),
+    }
+
+
+@router.delete("/surf/history")
+def surf_history_clear(request: Request) -> dict[str, Any]:
+    """清掉本租户的浏览记忆（别的租户不受影响）；清完后下一轮就当第一次刷这些站。"""
+    tenant = _tenant_of(request)
+    return {"ok": True, "removed": clear_surf_history(tenant), "tenant": tenant}
+
+
+@router.post("/tasks/{task_id}/surf/apply")
+def apply_surf(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """把**用户挑选**的灵感卡（``cardIds``）注入 Brief.constraints 供创作引用。
+
+    这是「灵感→创作」的显式接缝，由用户从灵感库选中后触发（不自动交付）。幂等：
+    覆盖既有的 ``【灵感冲浪】`` 块，不重复堆叠。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    raw_ids = body.get("cardIds") or body.get("cards") or body.get("card_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise HTTPException(status_code=409, detail="请至少选择一张灵感卡（cardIds）")
+    cards: list[dict[str, Any]] = []
+    for card_id in raw_ids:
+        card = get_surf_pool_card(str(card_id), tenant=task.tenant)
+        if card is None:
+            raise HTTPException(status_code=404, detail=f"灵感卡不存在或不属于当前租户：{card_id}")
+        cards.append(card)
+    text = render_surf_inspiration(cards)
+    marker = "【灵感冲浪】"
+    existing = next((c for c in task.brief.constraints if str(c).startswith(marker)), "")
+    if existing:
+        task.brief.constraints[task.brief.constraints.index(existing)] = text
+        applied = "updated"
+    else:
+        task.brief.constraints.append(text)
+        applied = "added"
+    task_store.set(task)
+    return {
+        "ok": True,
+        "task_id": task.id,
+        "applied": applied,
+        "injected": len(cards),
+        "constraints": list(task.brief.constraints),
+    }
+
+
+# ------------------------------------------------------------------ #
+# 全自动配音（真实功能：剧情文本 + 参考音频 → 引擎逐句真合成 → 时间轴汇总）  #
+# ------------------------------------------------------------------ #
+
+#: 配音参考音频的响应 MIME（按扩展名，认不出的落 octet-stream）
+_VOICE_MIME = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+}
+
+
+def _require_dubbing_job(task: TaskRecord, job_id: str) -> dict[str, Any]:
+    """按租户取该任务名下的配音作业；跨租户与不存在同为 404（不泄露他人作业 id）。"""
+    job = get_dubbing_job(job_id, tenant=task.tenant)
+    if job is None or str(job.get("task_id")) != task.id:
+        raise HTTPException(status_code=404, detail="未找到该配音作业")
+    return job
+
+
+@router.post("/tasks/{task_id}/dubbing", status_code=201)
+def create_dubbing(
+    task_id: str, request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """为任务创建一个全自动配音作业（**真实功能**：引擎通道逐句合成真音频）。
+
+    输入均由用户提供：``script_text`` 剧情文本（说话人标记与小说式句式均可识别，
+    无标记行归旁白并如实标注）与 ``voices`` 说话人→参考音频映射（``assets/`` 相对
+    路径或 http(s) 地址）。请求体可带 ``{"provider": "auto|sapi|sovits|elevenlabs|real|sample"}``：
+    引擎通道（sapi/sovits/elevenlabs）由后台 worker 逐句**真合成**并落盘，完成后
+    时间轴按音频实长重建；``sample`` 为离线联调通道（模拟音频）；``real`` 提交
+    ``DUBBING_API_URL`` 网关。缺 key/端点/参考音频、超预算时显式失败。
+
+    请求体可带 ``{"targetLang": "en|ja|ko|es|..."}``（可选 ``sourceLang``）启用**跨语言
+    译制配音**：先逐句译成目标语言再合成（复用 LLM_* 网关），原句留在每段 source_text；
+    离线引擎只能产出占位串并如实标注 translation_simulated，绝不冒充真实译文。
+    """
+    task = _require_task(task_id, request)
+    body: dict[str, Any] = payload or {}
+    script_text = body.get("scriptText") or body.get("script_text") or ""
+    if not isinstance(script_text, str) or not script_text.strip():
+        raise HTTPException(status_code=400, detail="缺少剧情文本 scriptText（逐行台词，可选「说话人：」前缀）")
+    provider = body.get("provider")
+    target_lang = body.get("targetLang") or body.get("target_lang") or ""
+    source_lang = body.get("sourceLang") or body.get("source_lang") or ""
+    try:
+        job = create_dubbing_job(
+            task,
+            script_text=script_text,
+            voices=body.get("voices"),
+            provider=provider if isinstance(provider, str) else "",
+            target_lang=target_lang if isinstance(target_lang, str) else "",
+            source_lang=source_lang if isinstance(source_lang, str) else "",
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"task_id": task.id, "job": job}
+
+
+@router.get("/tasks/{task_id}/dubbing")
+def list_dubbing(task_id: str, request: Request) -> dict[str, Any]:
+    """读取任务的配音作业列表（读取时推进 sample 通道、轮询 real 网关、复活引擎 worker）。"""
+    task = _require_task(task_id, request)
+    jobs = list_dubbing_jobs(task_id=task.id, tenant=task.tenant)
+    return {"task_id": task.id, "jobs": jobs}
+
+
+@router.get("/dubbing/languages")
+def dubbing_languages() -> dict[str, Any]:
+    """跨语言译制配音支持的目标语言（代码 → 名称），供配音面板下拉选择。"""
+    return {"languages": [{"code": code, "name": name} for code, name in DUBBING_LANGS.items()]}
+
+
+@router.post("/dubbing/voices", status_code=201)
+def upload_dubbing_voice(
+    request: Request, payload: dict[str, Any] | None = Body(default=None)
+) -> dict[str, Any]:
+    """上传说话人参考音频（base64）到 ``assets/``，返回相对引用供 ``voices`` 使用。
+
+    只收音频扩展名白名单与安全文件名；越界/非法一律 400，不存在「先存后筛」。
+    同名文件直接覆盖（同一说话人重传即替换，与素材目录语义一致）。
+    """
+    _tenant_of(request)  # 鉴权开启时验证租户（文件本身落在共享 assets/ 下）
+    body: dict[str, Any] = payload or {}
+    name = body.get("name")
+    data = body.get("data")
+    if not isinstance(name, str) or not isinstance(data, str):
+        raise HTTPException(status_code=400, detail="需要 {name, data}：音频文件名与 base64 内容")
+    try:
+        return save_dubbing_voice(name, data)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/tasks/{task_id}/dubbing/voices")
+def list_dubbing_voices(task_id: str, request: Request, ref: str = Query(default="")) -> Response:
+    """回传一份参考音频供试听：只认 ``assets/`` 内的合法音频文件，不放开任意路径。"""
+    _require_task(task_id, request)
+    path, issue = resolve_dubbing_voice(ref)
+    if path is None:
+        raise HTTPException(status_code=404, detail=issue)
+    suffix = path.suffix.lower()
+    mime = _VOICE_MIME.get(suffix, "application/octet-stream")
+    return FileResponse(path, media_type=mime, filename=path.name)
+
+
+@router.get("/tasks/{task_id}/dubbing/{job_id}/timeline")
+def dubbing_timeline(task_id: str, request: Request, job_id: str) -> FileResponse:
+    """下载配音时间轴汇总 txt（源文本 + 配音对照，含起止时间与所用参考音频）。
+
+    只信任作业里由导出环节写入的 ``timeline_path``，且解析后必须落在
+    ``EXPORTS_DIR`` 根目录下——与成品导出同一安全边界。
+    """
+    task = _require_task(task_id, request)
+    job = _require_dubbing_job(task, job_id)
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail="作业尚未完成，无时间轴汇总可导出")
+    relative = str(job.get("timeline_path") or "").strip()
+    if not relative:
+        raise HTTPException(status_code=404, detail="时间轴汇总文件不存在（导出失败，请刷新重试）")
+    path = (DATA_DIR / relative).resolve()
+    if path.parent != EXPORTS_DIR.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail="时间轴汇总文件不存在")
+    return FileResponse(path, media_type="text/plain; charset=utf-8", filename=path.name)
+
+
+@router.get("/tasks/{task_id}/dubbing/{job_id}/audio")
+def dubbing_audio(
+    task_id: str, request: Request, job_id: str, ref: str = Query(min_length=1)
+) -> FileResponse:
+    """回传一段已合成的配音音频（逐句试听或整轨 full.wav 下载）。
+
+    合成音频落在 ``data/dubbing/<job_id>/`` 下，不在静态目录里、也不放开任意路径：
+    只认 ``dubbing/<作业id>/<文件>`` 引用，作业先过租户校验，引用里的作业 id
+    必须与路由作业一致，后缀必须在音频白名单内。"""
+    task = _require_task(task_id, request)
+    _require_dubbing_job(task, job_id)
+    path, issue = resolve_dubbing_audio(ref, job_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=issue)
+    mime = _VOICE_MIME.get(path.suffix.lower())
+    if mime is None:
+        raise HTTPException(status_code=404, detail=f"不支持的音频格式：{path.suffix}")
+    return FileResponse(path, media_type=mime, filename=path.name)
 
 
 # ------------------------------------------------------------------ #

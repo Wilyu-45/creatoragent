@@ -43,9 +43,12 @@
 | 7 | `digital_human.json` | `app/core/digital_human.py`（`STORE_FILE`） | 数字人渲染作业 | `dh_jobs_pg.py` `PgJobBackend`（表 `digital_human_jobs`） |
 | 8 | `exports/<task_id>.txt` | `app/core/orchestrator.py`（`EXPORTS_DIR`） | 审批通过后的成品导出文本（final_delivery 渲染） | 不替换（导出面保留文件，与 traces 同口径；下载走 `GET /api/tasks/{id}/export`） |
 | 9 | （内存） | `app/llm/cache.py` `ResponseCache` | LLM 响应缓存（TTL + 容量，不落盘） | 不替换（纯内存；可选 Redis，miss 只影响成本不影响正确性） |
-| 10 | `imagegen_jobs.json` / `videogen_jobs.json` / `videounderstand_jobs.json` / `petgen_jobs.json` / `skillgen_jobs.json` | `app/core/gen_jobs.py` `FileJobBackend`（各工具 `STORE_FILE`） | 旁路生成作业（图片 / 视频 / 视频理解 / 桌面宠物 / 技能提炼），整行 job dict | `gen_jobs.py` `PgJobBackend`（表 `imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `pet_jobs` / `skill_jobs`，`payload jsonb` 存整行） |
+| 10 | `imagegen_jobs.json` / `videogen_jobs.json` / `videounderstand_jobs.json` / `dubbing_jobs.json` / `petgen_jobs.json` / `skillgen_jobs.json` / `surf_sessions.json` | `app/core/gen_jobs.py` `FileJobBackend`（各工具 `STORE_FILE`） | 旁路生成作业（图片 / 视频 / 视频理解 / 全自动配音 / 桌面宠物 / 技能提炼 / 灵感冲浪会话），整行 job dict | `gen_jobs.py` `PgJobBackend`（表 `imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `dubbing_jobs` / `pet_jobs` / `skill_jobs` / `surf_jobs`，`payload jsonb` 存整行） |
 | 11 | `data/pets/<job_id>/` | `app/core/petgen.py`（`PETS_DIR`） | 桌宠帧 PNG + `pet.json` + README（含包内 `runner/pet.py`） | 不替换（二进制帧与 traces/exports 同口径保留文件；库中只存引用与清单，读取走带鉴权的 pets 路由） |
 | 12 | `data/skills/<job_id>/` | `app/core/skillgen.py`（`SKILLS_DIR`） | 提炼产物 `SKILL.md` + `skill.json` + README，装配 `package.zip` 供扩展插件装载 | 不替换（作业行在库里，正文与包保留文件；读取走带鉴权的 skills 路由，`skill_dir_of()` 守住「只能落在 `skills/` 下」的不变量） |
+| 13 | `data/dubbing/<job_id>/` | `app/core/dubbing.py`（`_audio_dir()`） | 引擎逐句**真合成**的音频（`seg_####.wav/mp3`）与拼好的整轨 `full.wav`；作业行与清单在 #10 的库里 | 不替换（音频与桌宠帧同口径保留文件，库中只存 `dubbing/<job_id>/<文件>` 引用；读取走带鉴权的 dubbing audio 路由，`resolve_audio_path()` 守「三段相对引用 + 引用作业 id 必须等于路由作业 id」，`drop_task()` 回收前先比对父目录） |
+| 14 | `data/surf_pool.json` | `app/core/surf.py`（`_pool_backend()` / `FilePoolBackend`） | 灵感池（idea 库）：跨任务沉淀的灵感卡列表，按 `SURF_POOL_MAX` 裁剪最旧的 | 同构 `PgPoolBackend`（表 `surf_insights`，列 idea/simulated/created_at + tenant/topic 索引）；**不随任务删除**（`drop_task()` 只清 `surf_jobs`、不动灵感池），用户勾选后才由 `/surf/apply` 注入 Brief |
+| 15 | `data/surf_history.json` | `app/core/surf.py`（`_history_backend()`，复用 `FilePoolBackend`） | 冲浪**浏览历史**：跨会话「这个租户读过哪些页」的记忆，主键 `<tenant>\|<url>`，行带 `url/topic/title/via/first_seen/last_seen/reads`，按 `SURF_HISTORY_MAX` 先忘最旧的（`last_seen` 最小的） | 同构 `PgPoolBackend`（表 `surf_history`，`status` 固定 `seen` + tenant 索引）；**只由 browser 通道写入**（`remember_read_pages()` 只收 `kind` 为 item/video 的**真读进去**的信号，首页/列表页/搜索结果页/失败页与 sample·http 通道一律不记，不拿占位信号冒充读过）；同样**不随任务删除**，`SURF_REMEMBER_READ=false` 时既不记也不跳、`GET /api/surf/history` 如实返回空 items，查看与清空走 `GET` / `DELETE /api/surf/history`（按租户隔离） |
 
 ---
 
@@ -171,17 +174,37 @@ doctor 同样守护「必须是真的 postgres」。
 （配置 `OTLP_ENDPOINT` 后同时走 OTLP）。多副本下进程内轨迹天然分散，
 生产观测应直接接 collector + Jaeger/ClickHouse，落盘导出仅作本地排障。
 
-### 3.7 旁路生成作业（数字人 / 图片 / 视频 / 视频理解 / 桌面宠物 / 技能提炼）
+### 3.7 旁路生成作业（数字人 / 图片 / 视频 / 视频理解 / 全自动配音 / 桌面宠物 / 技能提炼 / 灵感冲浪）
 
 `_jobs() -> dict[str, dict]`（懒加载 + `_save_locked()` 原子落盘）。
 数字人后来长出了公共后端 `gen_jobs.py`：`snapshot()` 读全量、`write_back()` 只回写状态有变的行、
-`drop_task()` 按 task_id 回收；图片 / 视频 / 视频理解 / 桌面宠物 / 技能提炼五个通道共用它，换存储只换后端对象。
-桌宠的帧与宠物包落在 `data/pets/<job_id>/`、技能正文落在 `data/skills/<job_id>/`（见总表 #11、#12），
-删除任务时作业行与这些目录要一起回收。
-两个多副本注意点：
+`drop_task()` 按 task_id 回收；图片 / 视频 / 视频理解 / 全自动配音 / 桌面宠物 / 技能提炼 / 灵感冲浪**会话**共用它，换存储只换后端对象。
+桌宠的帧与宠物包落在 `data/pets/<job_id>/`、技能正文落在 `data/skills/<job_id>/`、配音的合成音频落在
+`data/dubbing/<job_id>/`（见总表 #11、#12、#13），删除任务时作业行与这些目录要一起回收。
+**灵感冲浪会话**走 `surf_jobs`（`data/surf_sessions.json`，同旁路作业结构，随任务删除回收）；
+会话开 `watch_videos` 时，browser 看视频产出的**画面摘要/屏上文字/评论洞察作为 `kind="video"` 信号写入会话 `signals`**
+（整行存 `surf_jobs.payload` jsonb），**抽帧的 `page.screenshot` 截图只在内存里交 VLM（一次 `SURF.videounderstand` 多模态调用）、
+不落库也不下载视频**（避开把大 base64 塞进作业行）；看懂走系统 `LLM_*` 网关，不另持端点与密钥。
+但其产物**灵感池（idea 库）是独立的跨任务存储**（`_pool_backend()`：file `data/surf_pool.json` / pg 表
+`surf_insights`），生命周期**不随任务删除**（`drop_task()` 只清会话、不动灵感池），
+按 `SURF_POOL_MAX` 裁剪最旧的卡；这也是它与其余六个旁路通道唯一不同的地方。
+同一条路上还有**第三份跨会话存储**：browser 通道每轮把「真读进去的页」记进**浏览历史**
+（`_history_backend()`：file `data/surf_history.json` / pg 表 `surf_history`，主键 `<tenant>|<url>`，见总表 #15），
+下一轮顺路发现的条目/视频先跟它对一遍、读过的跳过改读没见过的；它同样**不随任务删除**、
+按 `SURF_HISTORY_MAX` 先忘最旧的（`last_seen` 最小的），且**只由 browser 通道写入**——
+sample/http 不联网真读，就不写这份记忆（宁可不记，也不拿占位信号冒充「这页我读过」）。
+三个多副本注意点：
 - 作业存储需共享（PG 表或 Redis Hash）；
 - `sample` 内置引擎的「按流逝时间惰性推进」是**进程内**行为，多副本下要么
-  把查询转发到持有作业的副本，要么把样例引擎改为无状态幂等计算。
+  把查询转发到持有作业的副本，要么把样例引擎改为无状态幂等计算；
+- 配音的引擎通道（`sapi` / `sovits` / `elevenlabs`）相反：它由**后台 worker 线程**逐句推进，
+  续跑依据是 `seg["audio_ref"]` 非空（已合成的句子不重复合成、克隆 `voice_id` 持久化在作业行里），
+  所以**音频目录也必须与作业行同机/同卷**；否则引用在库里、文件不在盘上，
+  读取路由只会 404（`resolve_audio_path()` 宁缺不发假音频）；
+- 跨语言译制配音（`target_lang`）在**受理时同步翻译**，译文与原句（`seg["source_text"]`）、
+  `translated` / `translation_simulated` / `source_lang` / `target_lang` 都随整行 job 写进
+  #10 的库里（`payload jsonb` 存整行 → 新字段无需改表）；翻译是一次 `LLM_*` 网关调用，
+  与合成同口径计入成本熔断。
 
 ### 3.8 LLM 响应缓存 — `ResponseCache`
 
@@ -210,11 +233,13 @@ doctor 同样守护「必须是真的 postgres」。
 3. `python scripts/verify_contracts.py`：API 契约不变 —— 存储替换对接口层必须零感知；
 4. `python scripts/pg_migrate.py --dry-run` → 去掉 `--dry-run`：JSON → PostgreSQL
    一次性迁移，逐类实体输出「源数 / 插入 / 跳过」计数，可重复执行（幂等）；
-   **迁移范围含数字人作业表 `digital_human_jobs`，五个旁路生成作业表
-   （`imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `pet_jobs` / `skill_jobs`）不在迁移脚本内**：
+   **迁移范围含数字人作业表 `digital_human_jobs`，七个旁路生成作业表
+   （`imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `dubbing_jobs` / `pet_jobs` / `skill_jobs` / `surf_jobs`）不在迁移脚本内**：
    它们是短生命周期状态，切换存储模式时未跑完的作业不迁移、重新提交即可；
-   桌宠帧与宠物包、技能正文与技能包都是文件（`data/pets/<job_id>/`、`data/skills/<job_id>/`），
-   换机时须与 `data/assets`、`data/pets`、`data/skills` 一起搬迁；
+   冲浪的两个跨会话存储（灵感池 `surf_insights`、浏览历史 `surf_history`）**同样不在迁移脚本内**：
+   它们是「重新刷就有」的沉淀/记忆，切换后从新一轮攒起，旧 JSON 留在原地不影响正确性；
+   桌宠帧与宠物包、技能正文与技能包、配音合成音频都是文件（`data/pets/<job_id>/`、`data/skills/<job_id>/`、
+   `data/dubbing/<job_id>/`），换机时须与 `data/assets`、`data/pets`、`data/skills`、`data/dubbing` 一起搬迁；
 5. 双副本手动演练（部署方）：副本 A 创建任务、副本 B 能看到并续跑
    （共享 PG + Redis 后此语义成立）。
 

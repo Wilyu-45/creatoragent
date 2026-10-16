@@ -24,6 +24,7 @@ import { Topbar } from './components/Topbar.tsx';
 import { TracePanel } from './components/TracePanel.tsx';
 import { VideoStudio } from './components/VideoStudio.tsx';
 import { Chip, Empty, Spinner } from './components/ui.tsx';
+import { FactoryStudio } from './factory/FactoryStudio.tsx';
 import type {
   AgentsResponse,
   HealthView,
@@ -37,8 +38,8 @@ import { formatCost, formatDateTime, STATUS_LABEL, statusTone } from './lib/form
 
 type Tab = 'pipeline' | 'artifacts' | 'judge' | 'trace' | 'timeline' | 'metrics';
 
-/** 顶层视图：任务台 / 动效工场 / 视频工场（互斥替换 layout 区）。 */
-type View = 'tasks' | 'motion' | 'video';
+/** 顶层视图：任务台 / 动效工场 / 视频工场 / 影视制作工厂（互斥替换 layout 区）。 */
+type View = 'tasks' | 'motion' | 'video' | 'factory';
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'pipeline', label: '流水线看板' },
@@ -265,12 +266,15 @@ export function App() {
         onOpenSettings={() => setShowSettings(true)}
         onOpenStudio={() => setView('motion')}
         onOpenVideo={() => setView('video')}
+        onOpenFactory={() => setView('factory')}
       />
 
       {view === 'motion' ? (
         <MotionStudio onBack={() => setView('tasks')} />
       ) : view === 'video' ? (
         <VideoStudio onBack={() => setView('tasks')} />
+      ) : view === 'factory' ? (
+        <FactoryStudio onBack={() => setView('tasks')} onToast={showToast} />
       ) : (
       <div className="layout">
         <aside className="sidebar">

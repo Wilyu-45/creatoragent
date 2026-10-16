@@ -9,6 +9,7 @@ export function Topbar({
   onOpenSettings,
   onOpenStudio,
   onOpenVideo,
+  onOpenFactory,
 }: {
   health: HealthView | null;
   totalCount: number;
@@ -17,6 +18,7 @@ export function Topbar({
   onOpenSettings: () => void;
   onOpenStudio: () => void;
   onOpenVideo: () => void;
+  onOpenFactory: () => void;
 }) {
   const provider = health?.provider;
   const checkpointer = health?.checkpointer;
@@ -63,6 +65,9 @@ export function Topbar({
       </button>
       <button className="btn btn-ghost" onClick={onOpenVideo}>
         ▶ 视频工场
+      </button>
+      <button className="btn btn-ghost" onClick={onOpenFactory}>
+        ⛭ 制作工厂
       </button>
       <button className="btn btn-ghost" onClick={onOpenSettings}>
         设置

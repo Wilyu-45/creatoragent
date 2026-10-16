@@ -23,6 +23,7 @@ from .core import surf
 from .core.blackboard import blackboard
 from .core.orchestrator import orchestrator
 from .core.store import task_store
+from .factory.api import router as factory_router
 from .llm import resolve_provider
 from .logger import create_logger
 
@@ -183,6 +184,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Creator Agent Studio", version="0.1.0", lifespan=lifespan)
     _install_auth(app)
     app.include_router(create_api_router(), prefix="/api")
+    app.include_router(factory_router, prefix="/api/factory")
 
     dist = DIST_DIR
     assets = dist / "assets"

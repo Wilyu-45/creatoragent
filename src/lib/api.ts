@@ -1443,7 +1443,8 @@ function authHeaders(): Record<string, string> {
   return token ? { 'X-API-Token': token } : {};
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+/** 共享请求入口：工厂画布等模块复用它，鉴权头与错误文案保持同一套。 */
+export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
     headers: {

@@ -6,6 +6,10 @@
 缓存口径：节点指纹 = 岗位类型 + 参数 + 每条入线的（上游节点指纹, 端口）。
 所以改了分镜表的一个参数，只有依赖它的下游会被判定为过期，
 上游成果原样复用——这是 ComfyUI 用户真正需要的行为。
+
+取消口径：只在岗位边界生效——当前岗位收尾后停止，未开工岗位记 ``cancelled``，
+不硬杀线程（硬杀会留下半截产物）。每个岗位交付后立刻原子落盘缓存，
+所以取消或进程中断时，已完成岗位的成果不会在下一轮白跑。
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ log = create_logger("factory.engine")
 
 MAX_LOG_ROWS = 40
 _SAFE_NAME = re.compile(r"[^0-9A-Za-z._-]+")
+CANCELLED_REASON = "用户取消：本岗位未执行"
 
 NodeEvent = dict[str, Any]
 
@@ -241,6 +246,7 @@ class NodeRun:
     finished_at: str = ""
     elapsed_ms: int = 0
     cached: bool = False
+    forced: bool = False
     progress: float = 1.0
     outputs: dict[str, Any] = field(default_factory=dict)
     output_types: dict[str, str] = field(default_factory=dict)
@@ -267,17 +273,34 @@ def _output_brief(spec: Any, outputs: dict[str, Any]) -> str:
     return " ｜ ".join(rows[:6])
 
 
+def resolve_plan(
+    graph: graph_model.Graph,
+    targets: Iterable[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """运行与预检共用的计划口径：目标去重 + 反向闭包（无目标则整图拓扑序）。"""
+    target_list = [node_id for node_id in (targets or []) if graph.node(node_id)]
+    plan = graph_model.subgraph_for(graph, target_list) if target_list else graph_model.topo_order(graph)
+    return target_list, plan
+
+
 def run_graph(
     graph: graph_model.Graph,
     workspace: Workspace,
     *,
     targets: Iterable[str] | None = None,
     force: bool = False,
+    force_nodes: Iterable[str] | None = None,
     on_event: Callable[[NodeEvent], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """执行整图（或目标节点的反向闭包），返回本轮运行结果。"""
-    target_list = [node_id for node_id in (targets or []) if graph.node(node_id)]
-    plan = graph_model.subgraph_for(graph, target_list) if target_list else graph_model.topo_order(graph)
+    """执行整图（或目标节点的反向闭包），返回本轮运行结果。
+
+    ``force`` 推翻整轮缓存；``force_nodes`` 只推翻计划内指定岗位的缓存，其余岗位
+    仍按签名复用。``should_stop`` 在每个岗位开工前询问一次；一旦为真就停止调度，
+    计划里剩下的岗位统一记 ``cancelled``，不会硬杀正在收尾的那一个。
+    """
+    target_list, plan = resolve_plan(graph, targets)
+    forced = set(force_nodes or []) & set(plan)
     order_index = {node_id: index for index, node_id in enumerate(plan)}
     emit = on_event or (lambda event: None)
 
@@ -287,9 +310,27 @@ def run_graph(
     node_signatures: dict[str, str] = {}
     runs: dict[str, NodeRun] = {}
     started = time.time()
-    emit({"type": "run.start", "plan": plan, "targets": target_list, "ts": _now()})
+    cancelled = False
+    emit({"type": "run.start", "plan": plan, "targets": target_list, "force_nodes": [node_id for node_id in plan if node_id in forced], "ts": _now()})
 
-    for node_id in plan:
+    for index, node_id in enumerate(plan):
+        if should_stop and should_stop():
+            cancelled = True
+            for rest_id in plan[index:]:
+                rest = graph.node(rest_id)
+                if rest is None:
+                    continue
+                skipped = NodeRun(
+                    node_id=rest_id,
+                    type=rest.type,
+                    title=rest.label(),
+                    status="cancelled",
+                    error=CANCELLED_REASON,
+                    progress=0.0,
+                )
+                runs[rest_id] = skipped
+                emit({"type": "node.cancelled", "node_id": rest_id, "title": skipped.title, "message": CANCELLED_REASON})
+            break
         node = graph.node(node_id)
         if node is None:
             continue
@@ -337,12 +378,14 @@ def run_graph(
             continue
 
         previous = cache.get(node_id) or {}
-        if not force and previous.get("signature") == run.signature and previous.get("status") == "ok":
+        if not force and node_id not in forced and previous.get("signature") == run.signature and previous.get("status") == "ok":
             run.status, run.cached, run.outputs = "ok", True, previous.get("outputs") or {}
             run.summary = previous.get("summary") or "复用缓存"
             outputs[node_id] = run.outputs
             emit({"type": "node.cached", "node_id": node_id, "title": run.title})
             continue
+
+        run.forced = node_id in forced
 
         def make_progress(current_id: str, current: NodeRun) -> Callable[[str, dict[str, Any]], None]:
             def handler(message: str, payload: dict[str, Any]) -> None:
@@ -400,6 +443,11 @@ def run_graph(
                 "outputs": run.outputs,
                 "finished_at": run.finished_at,
             }
+            # 交付一个就落一次盘：取消/崩溃后已完成岗位仍能按签名复用，而不是整轮白跑
+            try:
+                workspace.save_cache(cache)
+            except OSError as error:
+                log.warn(f"节点缓存落盘失败（不影响本轮执行）：{error}")
             emit({"type": "node.finish", "node_id": node_id, "title": run.title, "summary": run.summary, "elapsed_ms": run.elapsed_ms})
         else:
             cache.pop(node_id, None)
@@ -411,20 +459,125 @@ def run_graph(
         "project": workspace.project_id,
         "started_at": _now(),
         "elapsed_ms": int((time.time() - started) * 1000),
-        "ok": all(run.status in {"ok", "skipped"} for run in runs.values()) if runs else False,
+        "ok": bool(runs) and not cancelled and all(run.status in {"ok", "skipped"} for run in runs.values()),
+        "cancelled": cancelled,
         "counts": {
             "ok": sum(1 for run in runs.values() if run.status == "ok" and not run.cached),
             "cached": sum(1 for run in runs.values() if run.cached),
             "error": sum(1 for run in runs.values() if run.status == "error"),
             "blocked": sum(1 for run in runs.values() if run.status == "blocked"),
             "skipped": sum(1 for run in runs.values() if run.status == "skipped"),
+            "cancelled": sum(1 for run in runs.values() if run.status == "cancelled"),
         },
         "runs": {node_id: _run_to_dict(run) for node_id, run in runs.items()},
         "stale_nodes": stale,
         "signatures": node_signatures,
     }
-    emit({"type": "run.finish", "ok": payload["ok"], "counts": payload["counts"], "elapsed_ms": payload["elapsed_ms"]})
+    emit({"type": "run.finish", "ok": payload["ok"], "cancelled": cancelled, "counts": payload["counts"], "elapsed_ms": payload["elapsed_ms"]})
     return payload
+
+
+def preview_graph(
+    graph: graph_model.Graph,
+    workspace: Workspace,
+    *,
+    targets: Iterable[str] | None = None,
+    force: bool = False,
+    force_nodes: Iterable[str] | None = None,
+    param_overrides: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """只读运行预检：用与 ``run_graph`` 相同的指纹口径，算清哪些岗位会复用、哪些会重跑。
+
+    ``force_nodes`` 与实跑同口径：只让计划内的指定岗位跳过缓存，其余仍按签名复用。
+    ``param_overrides`` 已在有效图里生效；这里只用参数名解释缓存判断，不改图、不执行。
+    预检不执行岗位、不写缓存、不改任何状态；它只回答「缓存会不会命中、为什么」。
+    运行时错误与上游受阻无法预知，实际结果仍以跑图为准。
+    """
+    target_list, plan = resolve_plan(graph, targets)
+    forced = set(force_nodes or []) & set(plan)
+    overrides = param_overrides or {}
+    order_index = {node_id: index for index, node_id in enumerate(plan)}
+    cache = workspace.load_cache()
+    node_signatures: dict[str, str] = {}
+    rows: list[dict[str, Any]] = []
+    counts = {"cached": 0, "run": 0, "muted": 0, "error": 0, "total": len(plan)}
+
+    for node_id in plan:
+        node = graph.node(node_id)
+        if node is None:
+            continue
+        override_keys = sorted((overrides.get(node_id) or {}).keys())
+        override_note = f"参数覆盖（{'、'.join(override_keys)}）" if override_keys else ""
+        row: dict[str, Any] = {
+            "node_id": node_id,
+            "type": node.type,
+            "title": node.label(),
+            "state": "run",
+            "reason": "",
+            "signature": "",
+            "cached_at": "",
+            "cached_summary": "",
+            "forced": node_id in forced,
+            "override_keys": override_keys,
+        }
+        if get_spec(node.type) is None:
+            row.update(state="error", reason=f"未知岗位类型：{node.type}")
+            counts["error"] += 1
+            rows.append(row)
+            continue
+        signature = _signature(node, graph, node_signatures, order_index)
+        node_signatures[node_id] = signature
+        row["signature"] = signature
+        previous = cache.get(node_id) or {}
+        cache_hit = bool(previous) and previous.get("signature") == signature and previous.get("status") == "ok"
+        if node.muted:
+            row.update(
+                state="muted",
+                reason="已静音：跳过执行，下游沿用上次缓存" + ("（强跑不适用于静音岗位）" if row["forced"] else ""),
+            )
+            counts["muted"] += 1
+        elif not force and node_id in forced:
+            row.update(state="run", reason="已指定强制重跑：跳过该岗位缓存")
+            counts["run"] += 1
+        elif not force and cache_hit:
+            row.update(
+                state="cached",
+                reason=(
+                    f"{override_note}与缓存签名一致，仍复用缓存"
+                    if override_note
+                    else "签名未变：复用上次交付"
+                ),
+                cached_at=str(previous.get("finished_at") or ""),
+                cached_summary=str(previous.get("summary") or ""),
+            )
+            counts["cached"] += 1
+        else:
+            if force:
+                reason = "已勾选忽略缓存：本轮强制作业"
+                if override_note:
+                    reason += f"（{override_note}已应用）"
+            elif override_note:
+                reason = f"{override_note}改变签名：按本轮参数重跑"
+            elif not previous:
+                reason = "没有可用缓存：首次执行"
+            elif previous.get("status") != "ok":
+                reason = "上次未成功交付：需要重跑"
+            else:
+                reason = "参数或上游已变更：缓存过期"
+            row.update(state="run", reason=reason)
+            counts["run"] += 1
+        rows.append(row)
+
+    return {
+        "project": workspace.project_id,
+        "targets": target_list,
+        "plan": plan,
+        "force": bool(force),
+        "force_nodes": [node_id for node_id in plan if node_id in forced],
+        "counts": counts,
+        "nodes": rows,
+        "generated_at": _now(),
+    }
 
 
 def _run_to_dict(run: NodeRun) -> dict[str, Any]:
@@ -441,6 +594,7 @@ def _run_to_dict(run: NodeRun) -> dict[str, Any]:
         "finished_at": run.finished_at,
         "elapsed_ms": run.elapsed_ms,
         "cached": run.cached,
+        "forced": run.forced,
         "progress": run.progress,
         "output_types": run.output_types,
         "outputs": {key: _shape(value) for key, value in run.outputs.items()},

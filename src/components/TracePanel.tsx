@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, type SpanView, type TraceView } from '../lib/api.ts';
 import { formatNumber } from '../lib/format.ts';
 import { Chip, Empty, Table } from './ui.tsx';
+import { IconChevronRight } from './icons.tsx';
 
 /** span 名前缀 → 视觉归类，便于在一屏里快速分辨「谁贵」。 */
 function spanTone(name: string): string {
@@ -201,7 +202,10 @@ export function TracePanel({ taskId }: { taskId: string }) {
                         onClick={() => toggle(span.span_id)}
                         title={collapsed.has(span.span_id) ? '展开' : '折叠'}
                       >
-                        {collapsed.has(span.span_id) ? '▸' : '▾'}
+                        <IconChevronRight
+                          size={13}
+                          className={`fc-fold${collapsed.has(span.span_id) ? '' : ' is-open'}`}
+                        />
                       </button>
                     ) : (
                       <span style={{ display: 'inline-block', width: 18 }} />

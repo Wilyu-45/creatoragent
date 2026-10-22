@@ -330,6 +330,26 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS surf_history_tenant_idx
       ON surf_history (tenant, created_at, id)
     """,
+    # 11e) 影视制作工厂运行作业（同上构，供 factory/store.py 使用；task_id 即项目 id，
+    #      工作流 project.json 与岗位产物 artifacts/ 保留文件，只有运行作业行进表）
+    """
+    CREATE TABLE IF NOT EXISTS factory_jobs (
+      id         text PRIMARY KEY,
+      task_id    text NOT NULL,
+      tenant     text NOT NULL DEFAULT 'default',
+      status     text NOT NULL DEFAULT 'queued',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      payload    jsonb NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS factory_jobs_task_idx ON factory_jobs (task_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS factory_jobs_tenant_idx
+      ON factory_jobs (tenant, created_at, id)
+    """,
     # 12) 租约审计镜像（可选观测位，默认不写；租约权威源在 Redis）
     """
     CREATE TABLE IF NOT EXISTS bb_intents_audit (

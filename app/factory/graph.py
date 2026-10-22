@@ -75,6 +75,14 @@ class Graph(BaseModel):
             "edges": [edge.model_dump() for edge in self.edges],
         }
 
+    def terminals(self) -> list[str]:
+        """终端岗位：没有任何出线的岗位（交付面看的就是这些岗位的产出）。"""
+        sources = {edge.src for edge in self.edges}
+        return [node.id for node in self.nodes if node.id not in sources]
+
+    def is_terminal(self, node_id: str) -> bool:
+        return not any(edge.src == node_id for edge in self.edges)
+
 
 class GraphIssue(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -94,8 +102,67 @@ def merged_params(node: GraphNode) -> dict[str, Any]:
     return base
 
 
+def with_param_overrides(graph: Graph, overrides: dict[str, dict[str, Any]]) -> Graph:
+    """返回叠加了本轮参数补丁的深拷贝；保存的图不受影响。"""
+    if not overrides:
+        return graph
+    clone = graph.model_copy(deep=True)
+    for node in clone.nodes:
+        patch = overrides.get(node.id)
+        if patch:
+            node.params = {**(node.params or {}), **patch}
+    return clone
+
+
+def id_issues(graph: Graph) -> list[GraphIssue]:
+    """结构身份体检：id 为空或重复会让缓存与连线错位，必须比环路更早报出来。"""
+    issues: list[GraphIssue] = []
+    seen: dict[str, int] = {}
+    for index, node in enumerate(graph.nodes):
+        node_id = str(node.id or "")
+        if not node_id:
+            issues.append(
+                GraphIssue(node_id=node_id, message=f"第 {index + 1} 个岗位缺少唯一标识（id 为空），连线与缓存都无法定位")
+            )
+            continue
+        if node_id in seen:
+            issues.append(
+                GraphIssue(
+                    node_id=node_id,
+                    message=f"岗位 id 重复：{node_id}（第 {seen[node_id] + 1} 与第 {index + 1} 个）——交付物会互相覆盖，请给其中一个换 id",
+                )
+            )
+        else:
+            seen[node_id] = index
+    return issues
+
+
+def _stable_order(ids: list[str], indeg: dict[str, int], adj: dict[str, list[str]], positions: dict[str, tuple[float, float]]) -> list[str]:
+    """Kahn 主体：就绪队列按坐标（列 → 行）稳定排序。"""
+    degree = dict(indeg)
+    ready = sorted([node_id for node_id in ids if degree[node_id] == 0], key=lambda node_id: positions[node_id])
+    order: list[str] = []
+    while ready:
+        current = ready.pop(0)
+        order.append(current)
+        unlocked: list[str] = []
+        for nxt in adj.get(current, []):
+            degree[nxt] -= 1
+            if degree[nxt] == 0:
+                unlocked.append(nxt)
+        if unlocked:
+            ready = sorted(ready + unlocked, key=lambda node_id: positions[node_id])
+    return order
+
+
 def topo_order(graph: Graph) -> list[str]:
-    """Kahn 拓扑排序；成环时给出可定位的错误。"""
+    """Kahn 拓扑排序；id 冲突与成环都抛可定位的错误（而不是误报成环路）。"""
+    if not graph.nodes:
+        return []
+    conflicts = id_issues(graph)
+    if conflicts:
+        stuck = sorted({str(issue.node_id) for issue in conflicts if issue.node_id})
+        raise NodeError(f"工作流岗位 id 冲突，无法执行（涉及节点：{', '.join(stuck) or '存在空 id'}）")
     indeg: dict[str, int] = {node.id: 0 for node in graph.nodes}
     adj: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
     for edge in graph.edges:
@@ -104,24 +171,7 @@ def topo_order(graph: Graph) -> list[str]:
             adj[edge.src].append(edge.dst)
     #: 稳定顺序：先按坐标（列 → 行），让自动布局的图按画面顺序执行
     positions = {node.id: (node.pos[0] if node.pos else 0.0, node.pos[1] if node.pos else 0.0) for node in graph.nodes}
-    ready = sorted(
-        [node_id for node_id, degree in indeg.items() if degree == 0],
-        key=lambda node_id: (positions[node_id][0], positions[node_id][1]),
-    )
-    order: list[str] = []
-    while ready:
-        current = ready.pop(0)
-        order.append(current)
-        unlocked: list[str] = []
-        for nxt in adj[current]:
-            indeg[nxt] -= 1
-            if indeg[nxt] == 0:
-                unlocked.append(nxt)
-        if unlocked:
-            ready = sorted(
-                ready + unlocked,
-                key=lambda node_id: (positions[node_id][0], positions[node_id][1]),
-            )
+    order = _stable_order([node.id for node in graph.nodes], indeg, adj, positions)
     if len(order) != len(graph.nodes):
         stuck = sorted(set(indeg) - set(order))
         raise NodeError(f"工作流存在环路，无法执行（涉及节点：{', '.join(stuck)}）")
@@ -148,19 +198,56 @@ def subgraph_for(graph: Graph, target_ids: list[str]) -> list[str]:
 
 def validate_graph(graph: Graph) -> list[GraphIssue]:
     """执行前的静态体检：返回逐条可定位的问题。"""
-    issues: list[GraphIssue] = []
+    issues: list[GraphIssue] = id_issues(graph)
     known: dict[str, str] = {}
+    present: set[str] = set()
+    labels: dict[str, str] = {}
     for node in graph.nodes:
+        present.add(node.id)
+        labels[node.id] = f"{node.label()}（{node.id}）"
         spec = get_spec(node.type)
         if spec is None:
             issues.append(GraphIssue(node_id=node.id, message=f"未知岗位类型：{node.type}"))
             continue
         known[node.id] = node.type
 
-    for edge in graph.edges:
+    #: 同一条数据流只该有一个箭头：重复连线会让多入端口收到两份一样的交付物
+    flows: dict[tuple[str, str, str, str], int] = {}
+    edge_ids: dict[str, int] = {}
+    for index, edge in enumerate(graph.edges):
+        if edge.id:
+            if edge.id in edge_ids:
+                issues.append(
+                    GraphIssue(level="warn", edge_id=edge.id, message=f"连线 id 重复：{edge.id}（第 {edge_ids[edge.id] + 1} 与第 {index + 1} 条）——删除时可能一次去掉两条")
+                )
+            else:
+                edge_ids[edge.id] = index
+        missing = [role for role in ("src", "dst") if getattr(edge, role) not in present]
+        if missing:
+            # 画布删岗位后残留的悬空线：端点根本没这个岗位，不能说成「岗位类型未知」
+            dangling = "、".join(f"{('起点 ' if role == 'src' else '终点 ')}{getattr(edge, role) or '（空）'}" for role in missing)
+            issues.append(GraphIssue(edge_id=edge.id, node_id=edge.dst if edge.dst in present else "", message=f"连线 {edge.id or f'第 {index + 1} 条'} 的{dangling}在画布上已不存在"))
+            continue
+        if edge.src == edge.dst:
+            issues.append(
+                GraphIssue(edge_id=edge.id, node_id=edge.src, port=edge.dst_port, message=f"{labels.get(edge.src, edge.src)} 连回了自己：自己不能是自己的上游")
+            )
+            continue
+        key = (edge.src, edge.src_port, edge.dst, edge.dst_port)
+        if key in flows:
+            issues.append(
+                GraphIssue(
+                    level="warn",
+                    edge_id=edge.id,
+                    node_id=edge.dst,
+                    port=edge.dst_port,
+                    message=f"重复连线：{labels.get(edge.src, edge.src)}·{edge.src_port} → {labels.get(edge.dst, edge.dst)}·{edge.dst_port} 已经连过一次",
+                )
+            )
+        else:
+            flows[key] = index
         src_spec, dst_spec = get_spec(known.get(edge.src, "")), get_spec(known.get(edge.dst, ""))
         if not src_spec or not dst_spec:
-            issues.append(GraphIssue(edge_id=edge.id, message="连线端点指向未知岗位"))
             continue
         out_port = src_spec.output(edge.src_port)
         in_port = dst_spec.input(edge.dst_port)

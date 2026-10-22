@@ -1,30 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentEvent, Brief } from './lib/types.ts';
-import { ApprovalPanel } from './components/ApprovalPanel.tsx';
-import { ArtifactViewer } from './components/ArtifactViewer.tsx';
+import type { AppView, TaskSectionKey } from './lib/workbenches.ts';
+import type { VideoDraft } from './lib/handoff.ts';
 import { BriefForm } from './components/BriefForm.tsx';
-import { DigitalHumanPanel } from './components/DigitalHumanPanel.tsx';
-import { DesktopPetPanel } from './components/DesktopPetPanel.tsx';
-import { DubbingPanel } from './components/DubbingPanel.tsx';
-import { ImageGenPanel } from './components/ImageGenPanel.tsx';
-import { VideoGenPanel } from './components/VideoGenPanel.tsx';
-import { VideoUnderstandPanel } from './components/VideoUnderstandPanel.tsx';
-import { JudgePanel } from './components/JudgePanel.tsx';
-import { MetricsPanel } from './components/MetricsPanel.tsx';
+import { HomePage } from './components/HomePage.tsx';
 import { MotionStudio } from './components/MotionStudio.tsx';
-import { Pipeline } from './components/Pipeline.tsx';
-import { PublishPanel } from './components/PublishPanel.tsx';
-import { Scorecard } from './components/Scorecard.tsx';
-import { SkillStudioPanel } from './components/SkillStudioPanel.tsx';
 import { SettingsDrawer } from './components/SettingsDrawer.tsx';
-import { SurfPanel } from './components/SurfPanel.tsx';
 import { TaskList } from './components/TaskList.tsx';
-import { Timeline } from './components/Timeline.tsx';
+import { TaskWorkspace } from './components/TaskWorkspace.tsx';
 import { Topbar } from './components/Topbar.tsx';
-import { TracePanel } from './components/TracePanel.tsx';
 import { VideoStudio } from './components/VideoStudio.tsx';
-import { Chip, Empty, Spinner } from './components/ui.tsx';
 import { FactoryStudio } from './factory/FactoryStudio.tsx';
+import { Empty, Spinner } from './components/ui.tsx';
+import { IconArrowRight, IconPlus } from './components/icons.tsx';
 import type {
   AgentsResponse,
   HealthView,
@@ -34,21 +22,12 @@ import type {
   TaskSummary,
 } from './lib/api.ts';
 import { api, subscribeTask } from './lib/api.ts';
-import { formatCost, formatDateTime, STATUS_LABEL, statusTone } from './lib/format.ts';
 
-type Tab = 'pipeline' | 'artifacts' | 'judge' | 'trace' | 'timeline' | 'metrics';
-
-/** 顶层视图：任务台 / 动效工场 / 视频工场 / 影视制作工厂（互斥替换 layout 区）。 */
-type View = 'tasks' | 'motion' | 'video' | 'factory';
-
-const TABS: { key: Tab; label: string }[] = [
-  { key: 'pipeline', label: '流水线看板' },
-  { key: 'artifacts', label: '共享黑板产物' },
-  { key: 'judge', label: '评估报告' },
-  { key: 'trace', label: '调用轨迹' },
-  { key: 'timeline', label: '事件时间线' },
-  { key: 'metrics', label: '运行指标' },
-];
+/** 工场来源上下文：只带任务身份，不自动搬运素材。 */
+interface TaskContext {
+  id: string;
+  label: string;
+}
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -58,22 +37,28 @@ export function App() {
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [agents, setAgents] = useState<AgentsResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsView | null>(null);
   const [knowledge, setKnowledge] = useState<KnowledgeView | null>(null);
   const [health, setHealth] = useState<HealthView | null>(null);
 
-  const [tab, setTab] = useState<Tab>('pipeline');
-  const [view, setView] = useState<View>('tasks');
+  const [view, setView] = useState<AppView>('home');
+  const [taskSection, setTaskSection] = useState<TaskSectionKey>('overview');
+  const [taskContext, setTaskContext] = useState<TaskContext | null>(null);
+  const [videoDraft, setVideoDraft] = useState<VideoDraft | null>(null);
   const [showBrief, setShowBrief] = useState(false);
+  const [briefSeed, setBriefSeed] = useState<Brief | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [taskListReset, setTaskListReset] = useState(0);
   const [deciding, setDeciding] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(null);
 
   const toastTimer = useRef<number | null>(null);
+  const activeIdRef = useRef<string | null>(null);
 
   const showToast = useCallback((text: string, error = false) => {
     setToast({ text, error });
@@ -116,7 +101,7 @@ export function App() {
     })();
   }, [loadTasks, loadMetrics, showToast]);
 
-  // 任务列表 + 指标轮询
+  // 任务列表 + 指标轮询（顶栏与首页都要用到计数）
   useEffect(() => {
     const timer = window.setInterval(() => {
       void loadTasks();
@@ -125,13 +110,24 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [loadTasks, loadMetrics]);
 
-  // 当前任务详情轮询 + SSE 实时事件
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
+  // 只有进入任务工作台才拉详情与 SSE；在工场/首页时不为后台任务空转
   useEffect(() => {
     if (!activeId) {
       setDetail(null);
+      setDetailError(null);
       setEvents([]);
       return;
     }
+    if (view !== 'tasks') return;
+
+    // 切换任务先清空旧快照：不能让上一个任务的详情/事件在下一次拉取前被继续操作
+    setDetail(null);
+    setDetailError(null);
+    setEvents([]);
 
     let cancelled = false;
 
@@ -140,9 +136,13 @@ export function App() {
         const data = await api.getTask(activeId);
         if (cancelled) return;
         setDetail(data);
-        setEvents(data.events);
-      } catch {
-        /* 轮询失败时保留上一次快照 */
+        setDetailError(null);
+        setEvents((prev) => {
+          const seqs = new Set(data.events.map((event) => event.seq));
+          return [...data.events, ...prev.filter((event) => !seqs.has(event.seq))].sort((a, b) => a.seq - b.seq);
+        });
+      } catch (error) {
+        if (!cancelled) setDetailError(errorText(error));
       }
     };
 
@@ -157,19 +157,94 @@ export function App() {
       window.clearInterval(timer);
       unsubscribe();
     };
-  }, [activeId]);
+  }, [activeId, view]);
+
+  /* ------------------------------ 导航 ------------------------------ */
+
+  const navigate = useCallback((next: AppView) => {
+    setView(next);
+    setTaskContext(null);
+    if (next !== 'video') setVideoDraft(null);
+  }, []);
+
+  const goHome = useCallback(() => {
+    setView('home');
+    setTaskContext(null);
+    setVideoDraft(null);
+  }, []);
+
+  const openTask = useCallback((id: string, section: TaskSectionKey = 'overview') => {
+    setActiveId(id);
+    setTaskSection(section);
+    setTaskContext(null);
+    setView('tasks');
+  }, []);
+
+  const selectTask = useCallback(
+    (id: string) => {
+      if (id !== activeId) setTaskSection('overview');
+      setActiveId(id);
+    },
+    [activeId],
+  );
+
+  const activeLabel = useMemo(() => {
+    if (detail?.task.id === activeId) return `${detail.task.brief.brand} · ${detail.task.brief.product}`;
+    const row = tasks.find((task) => task.id === activeId);
+    return row ? `${row.brief.brand} · ${row.brief.product}` : null;
+  }, [activeId, detail, tasks]);
+
+  const openStudioFromTask = useCallback(
+    (next: 'motion' | 'factory') => {
+      if (activeId && activeLabel) setTaskContext({ id: activeId, label: activeLabel });
+      setVideoDraft(null);
+      setView(next);
+    },
+    [activeId, activeLabel],
+  );
+
+  const openVideoFromTask = useCallback(
+    (draft: VideoDraft) => {
+      setTaskContext({ id: draft.taskId, label: draft.source.split('｜')[0] || activeLabel || '当前任务' });
+      setVideoDraft(draft);
+      setView('video');
+    },
+    [activeLabel],
+  );
+
+  const openContextTask = useCallback(() => {
+    if (!taskContext) return;
+    setActiveId(taskContext.id);
+    setTaskSection('overview');
+    setTaskContext(null);
+    setView('tasks');
+  }, [taskContext]);
 
   /* ------------------------------ 交互动作 ------------------------------ */
+
+  const openNewTask = useCallback(() => {
+    setBriefSeed(null);
+    setShowBrief(true);
+  }, []);
+
+  const openCloneTask = useCallback((brief: Brief) => {
+    setBriefSeed(brief);
+    setShowBrief(true);
+  }, []);
 
   const handleCreate = async (brief: Partial<Brief>, autoApprove: boolean): Promise<void> => {
     setCreating(true);
     try {
       const response = await api.createTask(brief, autoApprove);
       setShowBrief(false);
+      setBriefSeed(null);
       showToast('任务已创建，流水线启动');
       await loadTasks();
       setActiveId(response.task.id);
-      setTab('pipeline');
+      setTaskListReset((prev) => prev + 1);
+      setTaskSection('overview');
+      setTaskContext(null);
+      setView('tasks');
     } catch (error) {
       showToast(`创建失败：${errorText(error)}`, true);
     } finally {
@@ -177,18 +252,47 @@ export function App() {
     }
   };
 
+  const handleDeleteTask = useCallback(
+    async (id: string): Promise<void> => {
+      try {
+        await api.deleteTask(id);
+        const response = await api.listTasks();
+        setTasks(response.tasks);
+        if (id === activeId) {
+          setActiveId(response.tasks[0]?.id ?? null);
+          setDetail(null);
+          setEvents([]);
+          setTaskSection('overview');
+        }
+        setTaskListReset((prev) => prev + 1);
+        showToast('任务已删除');
+        void loadMetrics();
+      } catch (error) {
+        showToast(`删除失败：${errorText(error)}`, true);
+        throw error;
+      }
+    },
+    [activeId, loadMetrics, showToast],
+  );
+
   const handleDecide = async (
     decision: 'approve' | 'revise' | 'reject',
     comment: string,
   ): Promise<void> => {
     if (!activeId) return;
+    const taskId = activeId;
     setDeciding(true);
     try {
-      await api.decide(activeId, decision, comment);
+      await api.decide(taskId, decision, comment);
       showToast('人工裁决已提交');
-      const data = await api.getTask(activeId);
-      setDetail(data);
-      setEvents(data.events);
+      // 裁决期间切走任务时，不把旧任务的新快照写进当前工作面
+      if (activeIdRef.current === taskId) {
+        const data = await api.getTask(taskId);
+        if (activeIdRef.current === taskId) {
+          setDetail(data);
+          setEvents(data.events);
+        }
+      }
       await loadTasks();
       void loadMetrics();
     } catch (error) {
@@ -201,10 +305,13 @@ export function App() {
   /** 发布登记 / 效果回填后刷新当前任务与列表。 */
   const handlePublishChanged = useCallback(async (): Promise<void> => {
     if (!activeId) return;
+    const taskId = activeId;
     try {
-      const data = await api.getTask(activeId);
-      setDetail(data);
-      setEvents(data.events);
+      const data = await api.getTask(taskId);
+      if (activeIdRef.current === taskId) {
+        setDetail(data);
+        setEvents(data.events);
+      }
       await loadTasks();
       void loadMetrics();
     } catch {
@@ -227,233 +334,157 @@ export function App() {
 
   /* ------------------------------ 派生数据 ------------------------------ */
 
-  const agentNames = useMemo(() => {
-    const map: Record<string, { name: string; role: string }> = {};
-    for (const agent of agents?.implemented ?? []) {
-      map[agent.id] = { name: agent.name, role: agent.role };
-    }
-    return map;
-  }, [agents]);
-
   const runningCount = useMemo(
-    () => tasks.filter((task) => task.status === 'running' || task.status === 'awaiting_approval').length,
+    () => tasks.filter((task) => task.status === 'running').length,
+    [tasks],
+  );
+  const awaitingCount = useMemo(
+    () => tasks.filter((task) => task.status === 'awaiting_approval').length,
     [tasks],
   );
 
-  /** 最近一次评估结论（来自 SSE/轮询事件流），用于在任务头部直接暴露质量分。 */
-  const latestJudge = useMemo(() => {
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index];
-      if (event.type !== 'judge.scored') continue;
-      const payload = (event.payload ?? {}) as Record<string, unknown>;
-      const total = typeof payload.total === 'number' ? payload.total : null;
-      if (total === null) continue;
-      return { total, verdict: String(payload.verdict ?? 'review'), mode: String(payload.mode ?? '') };
-    }
-    return null;
-  }, [events]);
-
   const industries = knowledge?.industries ?? [];
   const config = health?.config ?? null;
+  // 详情必须与当前选中任务同 id 才可渲染，避免切换瞬间把上一个任务继续摆在主工作面
+  const currentDetail = detail && detail.task.id === activeId ? detail : null;
 
   return (
     <div className="app">
       <Topbar
+        view={view}
         health={health}
         totalCount={tasks.length}
         runningCount={runningCount}
-        onNewTask={() => setShowBrief(true)}
+        awaitingCount={awaitingCount}
+        onNavigate={navigate}
+        onNewTask={openNewTask}
         onOpenSettings={() => setShowSettings(true)}
-        onOpenStudio={() => setView('motion')}
-        onOpenVideo={() => setView('video')}
-        onOpenFactory={() => setView('factory')}
       />
 
-      {view === 'motion' ? (
-        <MotionStudio onBack={() => setView('tasks')} />
+      {view === 'home' ? (
+        <HomePage
+          tasks={tasks}
+          health={health}
+          onOpenView={navigate}
+          onOpenTask={openTask}
+          onNewTask={openNewTask}
+        />
+      ) : view === 'motion' ? (
+        <MotionStudio
+          onBack={goHome}
+          sourceTask={taskContext}
+          onOpenTask={taskContext ? openContextTask : undefined}
+        />
       ) : view === 'video' ? (
-        <VideoStudio onBack={() => setView('tasks')} />
+        <VideoStudio
+          onBack={goHome}
+          initialDraft={videoDraft}
+          sourceTask={taskContext}
+          onOpenTask={taskContext ? openContextTask : undefined}
+        />
       ) : view === 'factory' ? (
-        <FactoryStudio onBack={() => setView('tasks')} onToast={showToast} />
+        <FactoryStudio
+          onBack={goHome}
+          onToast={showToast}
+          sourceTask={taskContext}
+          onOpenTask={taskContext ? openContextTask : undefined}
+        />
       ) : (
-      <div className="layout">
-        <aside className="sidebar">
-          <div className="sidebar-head">
-            <button className="btn btn-sm btn-primary" style={{ flex: 1 }} onClick={() => setShowBrief(true)}>
-              ＋ 新建任务
-            </button>
-            <button
-              className="btn btn-sm btn-ghost"
-              onClick={() => {
-                void loadTasks();
-                void loadMetrics();
-              }}
-            >
-              刷新
-            </button>
-          </div>
-          <div className="task-list">
-            <TaskList tasks={tasks} activeId={activeId} onSelect={setActiveId} />
-          </div>
-        </aside>
+        <div className="layout">
+          <aside className="sidebar">
+            <div className="sidebar-head">
+              <button className="btn btn-sm btn-primary" style={{ flex: 1 }} onClick={openNewTask}>
+                <IconPlus size={14} strokeWidth={2.2} /> 新建任务
+              </button>
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={() => {
+                  void loadTasks();
+                  void loadMetrics();
+                }}
+              >
+                刷新
+              </button>
+            </div>
+            <div className="sidebar-caption">
+              <span>
+                创作任务 · {tasks.length} 个任务
+                {awaitingCount ? ` · ${awaitingCount} 待裁决` : ''}
+              </span>
+              <button type="button" onClick={goHome}>
+                首页总图 <IconArrowRight size={12} />
+              </button>
+            </div>
+            <TaskList tasks={tasks} activeId={activeId} resetKey={taskListReset} onSelect={selectTask} />
+          </aside>
 
-        <main className="main">
-          {!detail ? (
-            <Empty>
-              <div style={{ fontSize: 15, marginBottom: 6 }}>选择左侧任务查看流水线，或新建一个创作任务</div>
-              <div className="muted small">
-                系统会编排 A1 策略 → A2 创意 → A3 策划 → A4 文案，并由 A5 / A6 / A7 门禁审核，最后交由人工审批。
-              </div>
-            </Empty>
-          ) : (
-            <>
-              <div className="panel">
-                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <div>
-                    <div style={{ fontSize: 17, fontWeight: 700 }}>
-                      {detail.task.brief.brand}
-                      <span className="muted"> · {detail.task.brief.product}</span>
-                    </div>
-                    <div className="row small muted" style={{ marginTop: 6 }}>
-                      <span>渠道 {detail.task.brief.channel}</span>
-                      <span>目标 {detail.task.brief.objective}</span>
-                      <span>行业 {detail.task.brief.industry}</span>
-                      <span>受众 {detail.task.brief.audience}</span>
-                    </div>
-                    <div className="row" style={{ marginTop: 8 }}>
-                      <Chip tone={statusTone(detail.task.status)}>{STATUS_LABEL[detail.task.status]}</Chip>
-                      <Chip tone="tone-idle">{detail.task.phase}</Chip>
-                      <Chip tone="tone-idle">返工 {detail.task.revision_round} 轮</Chip>
-                      <Chip tone="tone-idle">Turn {detail.task.turn_used}</Chip>
-                      <Chip tone="tone-idle">{detail.task.artifacts.length} 产物</Chip>
-                      <Chip tone="tone-idle" mono>
-                        {formatCost(detail.task.tokens.cost_usd)}
-                      </Chip>
-                      {detail.task.tokens.cached > 0 ? (
-                        <Chip tone="tone-ok" title="命中 LLM 缓存的调用次数">
-                          缓存 {detail.task.tokens.cached}
-                        </Chip>
-                      ) : null}
-                      {detail.task.tokens.cut_off ? <Chip tone="tone-warn">成本熔断</Chip> : null}
-                      {detail.task.published_at ? (
-                        <Chip tone="tone-ok">已排期 {formatDateTime(detail.task.published_at)}</Chip>
-                      ) : null}
-                      {detail.task.intent_conflicts > 0 ? (
-                        <Chip tone="tone-warn" title="黑板意图租约冲突次数">
-                          租约冲突 {detail.task.intent_conflicts}
-                        </Chip>
-                      ) : null}
-                      {latestJudge ? (
-                        <Chip
-                          tone={latestJudge.verdict === 'pass' ? 'tone-ok' : latestJudge.verdict === 'reject' ? 'tone-bad' : 'tone-warn'}
-                          title={`LLM-as-a-Judge 评估（${latestJudge.mode}）`}
-                        >
-                          评估 {latestJudge.total.toFixed(1)}
-                        </Chip>
-                      ) : null}
-                    </div>
+          <main className="main">
+            {!currentDetail ? (
+              activeId ? (
+                <Empty>
+                  {detailError ? (
+                    <>
+                      <div style={{ fontSize: 15, marginBottom: 6 }}>任务详情加载失败</div>
+                      <div className="muted small" style={{ maxWidth: 520 }}>
+                        {detailError}
+                      </div>
+                      <div className="muted small" style={{ marginTop: 6 }}>
+                        正在每 2.5 秒自动重试；也可以切换任务后再回来。
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="row" style={{ justifyContent: 'center', gap: 8, fontSize: 15 }}>
+                        <Spinner /> 正在载入任务…
+                      </div>
+                      <div className="muted small" style={{ marginTop: 6 }}>
+                        同步任务详情、黑板与事件流
+                      </div>
+                    </>
+                  )}
+                </Empty>
+              ) : (
+                <Empty>
+                  <div style={{ fontSize: 15, marginBottom: 6 }}>
+                    {tasks.length ? '选择左侧任务查看工作面，或新建一个创作任务' : '还没有创作任务'}
                   </div>
-                </div>
-
-                <div style={{ marginTop: 14 }}>
-                  <Scorecard scorecard={detail.task.scorecard} />
-                </div>
-              </div>
-
-              <ApprovalPanel task={detail.task} busy={deciding} onDecide={handleDecide} />
-
-              <PublishPanel task={detail.task} onChanged={handlePublishChanged} onToast={showToast} />
-
-              <DigitalHumanPanel task={detail.task} onToast={showToast} />
-
-              <ImageGenPanel task={detail.task} onToast={showToast} />
-
-              <VideoGenPanel task={detail.task} onToast={showToast} />
-
-              <VideoUnderstandPanel task={detail.task} onToast={showToast} onChanged={handlePublishChanged} />
-
-              <DubbingPanel task={detail.task} onToast={showToast} />
-
-              <SurfPanel task={detail.task} onToast={showToast} onChanged={handlePublishChanged} />
-
-              <DesktopPetPanel task={detail.task} onToast={showToast} />
-
-              <SkillStudioPanel task={detail.task} onToast={showToast} onChanged={handlePublishChanged} />
-
-              <div className="tabs" style={{ marginTop: 16 }}>
-                {TABS.map((item) => (
-                  <button
-                    key={item.key}
-                    className={`tab${tab === item.key ? ' active' : ''}`}
-                    onClick={() => setTab(item.key)}
-                  >
-                    {item.label}
-                    {item.key === 'timeline' ? ` (${events.length})` : ''}
-                    {item.key === 'artifacts' ? ` (${detail.task.artifacts.length})` : ''}
+                  <div className="muted small">
+                    创作任务负责策划、审核、发布与复盘；成片生产可交给影视制作工厂或视频工场。
+                  </div>
+                  <button className="btn btn-sm btn-ghost" style={{ marginTop: 14 }} onClick={goHome}>
+                    回到首页总图
                   </button>
-                ))}
-              </div>
-
-              {tab === 'pipeline' ? (
-                <div className="panel">
-                  <div className="panel-title">
-                    流水线看板 <span className="count">· {detail.task.packets.length} 张任务卡</span>
-                  </div>
-                  <Pipeline task={detail.task} agentNames={agentNames} />
-                </div>
-              ) : null}
-
-              {tab === 'artifacts' ? (
-                <div className="panel">
-                  <div className="panel-title">共享黑板产物</div>
-                  <ArtifactViewer task={detail.task} />
-                </div>
-              ) : null}
-
-              {tab === 'trace' ? (
-                <div className="panel">
-                  <div className="panel-title">
-                    调用轨迹 <span className="count">· span 树与耗时分布</span>
-                  </div>
-                  <TracePanel taskId={detail.task.id} />
-                </div>
-              ) : null}
-
-              {tab === 'timeline' ? (
-                <div className="panel">
-                  <div className="panel-title">
-                    事件时间线
-                    <span className="count">
-                      · 事实 {detail.blackboard.stats.fact_count}（已验证 {detail.blackboard.stats.verified_fact_count}）
-                      · 评审 {detail.blackboard.stats.review_count}
-                    </span>
-                  </div>
-                  <div className="timeline">
-                    <Timeline events={events} />
-                  </div>
-                </div>
-              ) : null}
-
-              {tab === 'judge' ? (
-                <div className="panel">
-                  <div className="panel-title">
-                    评估报告 <span className="count">· 与门禁解耦的质量度量</span>
-                  </div>
-                  <JudgePanel taskId={detail.task.id} onToast={showToast} />
-                </div>
-              ) : null}
-
-              {tab === 'metrics' ? <MetricsPanel metrics={metrics} /> : null}
-            </>
-          )}
-        </main>
-      </div>
+                </Empty>
+              )
+            ) : (
+              <TaskWorkspace
+                detail={currentDetail}
+                events={events}
+                agents={agents}
+                metrics={metrics}
+                section={taskSection}
+                onSectionChange={setTaskSection}
+                deciding={deciding}
+                onDecide={handleDecide}
+                onPublishChanged={() => {
+                  void handlePublishChanged();
+                }}
+                onToast={showToast}
+                onOpenVideo={openVideoFromTask}
+                onOpenView={openStudioFromTask}
+                onCloneBrief={openCloneTask}
+                onDeleteTask={handleDeleteTask}
+              />
+            )}
+          </main>
+        </div>
       )}
 
       {showBrief ? (
         <BriefForm
           industries={industries}
           submitting={creating}
+          initial={briefSeed ?? undefined}
           onClose={() => setShowBrief(false)}
           onSubmit={handleCreate}
         />

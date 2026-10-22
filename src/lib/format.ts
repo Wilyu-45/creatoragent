@@ -1,7 +1,14 @@
-import type { AgentEvent, TaskRecord } from './types.ts';
+import type { AgentEvent, Priority, TaskRecord } from './types.ts';
 import { PHASE_LABEL } from './types.ts';
 
 export { PHASE_LABEL };
+
+export const PRIORITY_LABEL: Record<Priority, string> = {
+  low: '低',
+  normal: '普通',
+  high: '高',
+  urgent: '紧急',
+};
 
 export const STATUS_LABEL: Record<TaskRecord['status'], string> = {
   running: '执行中',
@@ -81,6 +88,24 @@ export function formatDateTime(iso: string | null | undefined): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '—';
   return `${date.getMonth() + 1}/${date.getDate()} ${date.toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5)}`;
+}
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** 日期型截止按当天 23:59 本地时间算，避免被 UTC 零点提前判过期。 */
+export function parseDeadline(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ms = DATE_ONLY.test(iso) ? new Date(`${iso}T23:59:59`).getTime() : Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+export function formatDeadline(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  if (DATE_ONLY.test(iso)) {
+    const [, month, day] = iso.split('-');
+    return `${Number(month)}/${Number(day)}`;
+  }
+  return formatDateTime(iso);
 }
 
 export function formatNumber(value: number | undefined | null, digits = 0): string {

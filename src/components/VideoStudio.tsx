@@ -22,6 +22,10 @@ import {
 import { parseSubtitles, type SubtitleFormat } from '../vg/subtitles.ts';
 import { VgStage } from '../vg/stage.tsx';
 import { exporterSupported, VideoExporter, type ExportProgress } from '../vg/exporter.ts';
+import type { VideoDraft } from '../lib/handoff.ts';
+import { workbenchMeta } from '../lib/workbenches.ts';
+import { WorkbenchHead } from './WorkbenchHead.tsx';
+import { IconDownload, IconHome, IconPause, IconPlay, IconRefresh, IconRewind } from './icons.tsx';
 
 /* ------------------------------ 示例字幕 ------------------------------ */
 
@@ -114,10 +118,11 @@ function ControlBar({ clock, total }: { clock: PlayerClock; total: number }) {
   return (
     <div className="motion-controls">
       <button className="btn btn-sm" onClick={clock.reset} title="回到起点并重置场景">
-        ⏮
+        <IconRewind size={14} />
       </button>
       <button className="btn btn-sm btn-primary" onClick={clock.toggle} style={{ minWidth: 92 }}>
-        {clock.playing ? '⏸ 暂停' : '▶ 播放'}
+        {clock.playing ? <IconPause size={14} /> : <IconPlay size={14} />}
+        {clock.playing ? '暂停' : '播放'}
       </button>
       <input
         type="range"
@@ -144,9 +149,20 @@ function ControlBar({ clock, total }: { clock: PlayerClock; total: number }) {
 
 /* ------------------------------ 面板 ------------------------------ */
 
-export function VideoStudio({ onBack }: { onBack: () => void }) {
-  const [subtitleText, setSubtitleText] = useState('');
-  const [subtitleName, setSubtitleName] = useState('');
+export function VideoStudio({
+  onBack,
+  initialDraft,
+  sourceTask,
+  onOpenTask,
+}: {
+  onBack: () => void;
+  initialDraft?: VideoDraft | null;
+  sourceTask?: { id: string; label: string } | null;
+  onOpenTask?: () => void;
+}) {
+  const [subtitleText, setSubtitleText] = useState(() => initialDraft?.text ?? '');
+  const [subtitleName, setSubtitleName] = useState(() => initialDraft?.name ?? '');
+  const [draftSource, setDraftSource] = useState<string | null>(initialDraft?.source ?? null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [seed, setSeed] = useState(() => Math.floor(Math.random() * 1e9));
   const [bgm, setBgm] = useState<File | null>(null);
@@ -260,17 +276,36 @@ export function VideoStudio({ onBack }: { onBack: () => void }) {
 
   return (
     <div className="vs-studio">
-      <div className="motion-head">
-        <button className="btn btn-sm btn-ghost" onClick={onBack}>
-          ← 返回任务台
-        </button>
-        <div>
-          <div style={{ fontSize: 17, fontWeight: 700 }}>视频工场</div>
-          <div className="muted small">
-            字幕 → 智能分幕 → 动效成片：卡点切镜 ±0.1s、18 项剪辑操作、去 AI 味随机化，导出真实视频文件
+      <WorkbenchHead
+        meta={workbenchMeta('video')}
+        subtitle="字幕 → 智能分幕 → 动效成片：卡点切镜 ±0.1s、18 项剪辑操作、去 AI 味随机化，导出真实视频文件"
+        chain={{ upstream: '创作任务 · 视频脚本 → SRT 字幕', downstream: '创作任务 · 发布与复盘（成片导出后）' }}
+        onHome={onBack}
+        sourceTask={sourceTask}
+        onOpenTask={onOpenTask}
+      />
+
+      {draftSource ? (
+        <div className="studio-handoff">
+          <div>
+            <b>已带入任务脚本</b>
+            <span>
+              {draftSource} · 已转为 {initialDraft?.cues ?? parsed.cues.length} 条 SRT 字幕，可直接分幕成片，也可继续增删。
+            </span>
           </div>
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            onClick={() => {
+              setSubtitleText('');
+              setSubtitleName('');
+              setDraftSource(null);
+            }}
+          >
+            清除草稿
+          </button>
         </div>
-      </div>
+      ) : null}
 
       <div className="vs-grid">
         {/* ---------------- 左侧：素材与设置 ---------------- */}
@@ -487,7 +522,7 @@ export function VideoStudio({ onBack }: { onBack: () => void }) {
                       完成 · {(result.size / 1024 / 1024).toFixed(1)} MB · 实时编码完成
                     </div>
                     <a className="btn btn-ok" style={{ width: '100%', textAlign: 'center' }} href={result.url} download={result.name}>
-                      ⬇ 下载 {result.name}
+                      <IconDownload size={14} /> 下载 {result.name}
                     </a>
                   </div>
                 ) : null}
@@ -515,8 +550,8 @@ export function VideoStudio({ onBack }: { onBack: () => void }) {
               <div className="motion-ended">
                 <div className="motion-ended-title">已播完</div>
                 <div className="motion-ended-btns">
-                  <button className="btn btn-sm btn-primary" onClick={clock.play}>↻ 重新播放</button>
-                  <button className="btn btn-sm btn-ghost" onClick={clock.reset}>⌂ 回到起点</button>
+                  <button className="btn btn-sm btn-primary" onClick={clock.play}><IconRefresh size={14} /> 重新播放</button>
+                  <button className="btn btn-sm btn-ghost" onClick={clock.reset}><IconHome size={14} /> 回到起点</button>
                 </div>
               </div>
             ) : null}

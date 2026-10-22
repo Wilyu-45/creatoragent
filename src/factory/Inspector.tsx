@@ -8,16 +8,11 @@
  * 交付物预览按端口类型分派：图像铺九宫格、音频给播放器、字幕列条目、时间轴给规模、
  * 报告给分数与问题清单——其余一律折叠成 JSON 文本，不猜结构。
  */
-import { useMemo, useState } from 'react';
-import type { EventRow, Graph, GraphIssue, GraphNode, NodeSpec, ParamSpec, RunNodeResult } from './api.ts';
+import { useState } from 'react';
+import type { EventRow, Graph, GraphIssue, GraphNode, NodeSpec, RunNodeResult } from './api.ts';
 import { mediaUrl, NODE_STATUS_LABEL } from './api.ts';
-
-function visible(param: ParamSpec, values: Record<string, unknown>, spec: NodeSpec): boolean {
-  if (!param.when) return true;
-  const [key, expected] = param.when.split('=');
-  const current = String(values[key] ?? spec.params.find((item) => item.name === key)?.default ?? '');
-  return current === (expected ?? '');
-}
+import { mergedValues, ParamFields } from './ParamFields.tsx';
+import { IconChevronRight } from '../components/icons.tsx';
 
 function briefValue(value: unknown): string {
   if (value && typeof value === 'object') {
@@ -39,6 +34,9 @@ export function Inspector({
   graph,
   onChange,
   onRunNode,
+  overridePatch,
+  onOverride,
+  onClearOverride,
 }: {
   node: GraphNode | null;
   spec: NodeSpec | null;
@@ -51,6 +49,10 @@ export function Inspector({
   graph: Graph;
   onChange: (next: Graph) => void;
   onRunNode: (id: string) => void;
+  /** 当前岗位的本轮改参补丁（只对下一次运行生效，不属于画布）。 */
+  overridePatch?: Record<string, unknown>;
+  onOverride?: (id: string) => void;
+  onClearOverride?: (id: string) => void;
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
@@ -64,13 +66,6 @@ export function Inspector({
     }
     onChange({ ...graph, nodes: graph.nodes.map((item) => (item.id === node.id ? { ...item, params: merged } : item)) });
   };
-
-  const rows = useMemo(() => {
-    if (!spec || !node) return [];
-    const merged: Record<string, unknown> = {};
-    for (const param of spec.params) merged[param.name] = node.params[param.name] ?? param.default;
-    return spec.params.filter((param) => visible(param, merged, spec)).map((param) => ({ param, value: merged[param.name] }));
-  }, [spec, node]);
 
   if (!node || !spec) {
     return (
@@ -93,7 +88,24 @@ export function Inspector({
         <button className="btn btn-sm btn-primary" onClick={() => onRunNode(node.id)} title="只跑这个岗位（含其全部上游）">
           单跑
         </button>
+        <button
+          className="btn btn-sm btn-ghost"
+          onClick={() => onOverride?.(node.id)}
+          disabled={node.muted}
+          title={node.muted ? '已静音的岗位不能改参运行' : '只改这一次运行，不写入画布'}
+        >
+          本轮改参
+        </button>
       </div>
+      {overridePatch && Object.keys(overridePatch).length ? (
+        <div className="fc-insp-override">
+          <span className="fc-chip warn">本轮改参 {Object.keys(overridePatch).length} 项</span>
+          <span className="muted small">{Object.keys(overridePatch).join('、')}</span>
+          <button className="btn btn-sm btn-ghost" onClick={() => onClearOverride?.(node.id)}>
+            清除
+          </button>
+        </div>
+      ) : null}
       <div className="fc-insp-role">{spec.role}</div>
       <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
         <span className="fc-chip">{spec.dept_label}</span>
@@ -118,62 +130,18 @@ export function Inspector({
       ) : null}
 
       <div className="fc-insp-section">参数</div>
-      {rows.length ? (
-        <div className="fc-params">
-          {rows.map(({ param, value }) => (
-            <label className="fc-param" key={param.name} title={param.hint || undefined}>
-              <span className="fc-param-label">
-                {param.label}
-                {param.unit ? <em>（{param.unit}）</em> : null}
-              </span>
-              {param.kind === 'toggle' ? (
-                <input type="checkbox" checked={Boolean(value)} onChange={(event) => patchParams({ [param.name]: event.target.checked })} />
-              ) : param.kind === 'select' ? (
-                <select value={String(value ?? '')} onChange={(event) => patchParams({ [param.name]: event.target.value })}>
-                  {param.options.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
-              ) : param.kind === 'range' ? (
-                <span className="fc-range">
-                  <input
-                    type="range"
-                    min={param.minimum ?? 0}
-                    max={param.maximum ?? 1}
-                    step={param.step ?? 0.01}
-                    value={Number(value ?? param.default ?? 0)}
-                    onChange={(event) => patchParams({ [param.name]: Number(event.target.value) })}
-                  />
-                  <b className="mono">{Number(value ?? 0).toFixed(param.step && param.step < 1 ? 2 : 0)}</b>
-                </span>
-              ) : param.kind === 'textarea' ? (
-                <textarea rows={3} value={String(value ?? '')} onChange={(event) => patchParams({ [param.name]: event.target.value })} />
-              ) : param.kind === 'number' ? (
-                <input
-                  type="number"
-                  min={param.minimum ?? undefined}
-                  max={param.maximum ?? undefined}
-                  step={param.step ?? undefined}
-                  value={String(value ?? '')}
-                  onChange={(event) => patchParams({ [param.name]: Number(event.target.value) })}
-                />
-              ) : (
-                <input type="text" value={String(value ?? '')} onChange={(event) => patchParams({ [param.name]: event.target.value })} />
-              )}
-              {param.hint ? <small className="muted">{param.hint}</small> : null}
-            </label>
-          ))}
-        </div>
-      ) : (
-        <div className="muted small">这个岗位没有可调参数。</div>
-      )}
+      <ParamFields
+        spec={spec}
+        values={mergedValues(spec, node.params)}
+        onPatch={(key, value) => patchParams({ [key]: value })}
+      />
 
       <div className="fc-insp-section">
         交付物{result ? <span className="muted small"> · {NODE_STATUS_LABEL[result.status] ?? result.status} · {result.elapsed_ms ?? 0}ms</span> : null}
       </div>
-      {result?.error ? <div className="fc-issue error">{result.error}</div> : null}
+      {result?.error ? (
+        <div className={result.status === 'cancelled' ? 'fc-summary' : 'fc-issue error'}>{result.error}</div>
+      ) : null}
       {result?.summary ? <div className="fc-summary">{result.summary}</div> : null}
       {!result ? <div className="muted small">还没有产物：跑一次（或单跑这个岗位）。</div> : null}
       {result && pending ? <div className="muted small">完整交付物读取中…</div> : null}
@@ -186,7 +154,7 @@ export function Inspector({
           return (
             <div className="fc-out" key={port.name}>
               <button className="fc-out-head" onClick={() => setOpen((prev) => ({ ...prev, [port.name]: !isOpen }))}>
-                {isOpen ? '▾' : '▸'} {port.label}
+                <IconChevronRight size={13} className={`fc-fold${isOpen ? ' is-open' : ''}`} /> {port.label}
                 <span className="muted small">{port.type}</span>
               </button>
               {isOpen ? <OutputBody value={value} /> : null}

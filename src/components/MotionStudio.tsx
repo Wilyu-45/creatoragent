@@ -10,6 +10,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { usePlayerClock, type PlayerClock } from '../motion/engine.tsx';
 import { PRESET_MAP, PRESET_META, type PresetGroup } from '../motion/presets.tsx';
+import { workbenchMeta } from '../lib/workbenches.ts';
+import { WorkbenchHead } from './WorkbenchHead.tsx';
+import { IconHome, IconPause, IconPlay, IconRefresh, IconRewind } from './icons.tsx';
 import {
   EXAMPLE_SCRIPT,
   MotionScriptStage,
@@ -52,10 +55,11 @@ function ControlBar({ clock, total, loop, onLoop }: { clock: PlayerClock; total:
   return (
     <div className="motion-controls">
       <button className="btn btn-sm" onClick={clock.reset} title="回到起点并重置场景">
-        ⏮ 重置
+        <IconRewind size={14} /> 重置
       </button>
       <button className="btn btn-sm btn-primary" onClick={clock.toggle} style={{ minWidth: 92 }}>
-        {clock.playing ? '⏸ 暂停' : '▶ 播放'}
+        {clock.playing ? <IconPause size={14} /> : <IconPlay size={14} />}
+        {clock.playing ? '暂停' : '播放'}
       </button>
       <input
         type="range"
@@ -91,10 +95,10 @@ function EndedOverlay({ onReplay, onReset }: { onReplay: () => void; onReset: ()
       <div className="motion-ended-title">已播完</div>
       <div className="motion-ended-btns">
         <button className="btn btn-sm btn-primary" onClick={onReplay}>
-          ↻ 重新播放
+          <IconRefresh size={14} /> 重新播放
         </button>
         <button className="btn btn-sm btn-ghost" onClick={onReset}>
-          ⌂ 回到起点
+          <IconHome size={14} /> 回到起点
         </button>
       </div>
     </div>
@@ -194,7 +198,15 @@ function ScriptTab({ loop, onLoop }: { loop: boolean; onLoop: (v: boolean) => vo
 
 const GROUPS: PresetGroup[] = ['入场', '强调', '出场', '转场'];
 
-export function MotionStudio({ onBack }: { onBack: () => void }) {
+export function MotionStudio({
+  onBack,
+  sourceTask,
+  onOpenTask,
+}: {
+  onBack: () => void;
+  sourceTask?: { id: string; label: string } | null;
+  onOpenTask?: () => void;
+}) {
   const [mode, setMode] = useState<'gallery' | 'script'>('gallery');
   const [preset, setPreset] = useState('FadeIn');
   const [loop, setLoop] = useState(false);
@@ -211,17 +223,14 @@ export function MotionStudio({ onBack }: { onBack: () => void }) {
 
   return (
     <div className="motion-studio">
-      <div className="motion-head">
-        <button className="btn btn-sm btn-ghost" onClick={onBack}>
-          ← 返回任务台
-        </button>
-        <div>
-          <div style={{ fontSize: 17, fontWeight: 700 }}>动效工场</div>
-          <div className="muted small">
-            视频动效组件库试演与时间轴编排 —— 纯时间驱动（Remotion-ready），时长单位为秒
-          </div>
-        </div>
-      </div>
+      <WorkbenchHead
+        meta={workbenchMeta('motion')}
+        subtitle="视频动效组件库试演与时间轴编排 —— 纯时间驱动（Remotion-ready），时长单位为秒"
+        chain={{ upstream: '创作任务 · 标题 / 关键词 / 分镜节奏', downstream: '视频工场 / 影视制作工厂 · 人工取用动效参考' }}
+        onHome={onBack}
+        sourceTask={sourceTask}
+        onOpenTask={onOpenTask}
+      />
 
       <div className="tabs">
         <button className={`tab${mode === 'gallery' ? ' active' : ''}`} onClick={() => setMode('gallery')}>

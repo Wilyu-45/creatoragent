@@ -1,29 +1,12 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
-import type { ArtifactType, TaskRecord } from '../lib/types.ts';
+import type { Artifact, ArtifactType, TaskRecord } from '../lib/types.ts';
 import { downloadExport } from '../lib/api.ts';
-import { diffLines, formatTime, gateTone, scoreTone, severityTone } from '../lib/format.ts';
+import { artifactLabel, artifactTypeLabel, TYPE_LABEL } from '../lib/artifactLabels.ts';
+import { diffLines, formatNumber, formatTime, gateTone, scoreTone, severityTone } from '../lib/format.ts';
 import { asNumber, asRecord, asRecordArray, asText, asTextArray } from '../lib/value.ts';
+import { IconClose, IconSearch } from './icons.tsx';
 import { Bullets, Card, Chip, Empty, Kv, Section, Table } from './ui.tsx';
-
-const TYPE_LABEL: Record<ArtifactType, string> = {
-  task_plan: '任务卡与流程编排',
-  strategy_brief: '策略洞察简报',
-  creative_concept: '创意概念',
-  content_plan: '内容策划案',
-  copy_draft: '文案草稿',
-  edited_copy: '编辑审校稿',
-  fact_check_report: '事实核查报告',
-  compliance_report: '品牌合规报告',
-  visual_brief: '视觉美术指导',
-  video_script: '视频脚本',
-  channel_adaptation: '渠道适配与发布策略',
-  publish_plan: '多平台发布排期',
-  effect_report: '效果预估报告',
-  knowledge_card: '知识沉淀卡片',
-  document_digest: '素材研读要点',
-  final_delivery: '最终交付物',
-};
 
 /** 知识卡片类型 → 展示标签与色调。 */
 const CARD_LABEL: Record<string, string> = {
@@ -113,7 +96,7 @@ function TaskPlanView({ content }: { content: Record<string, unknown> }) {
             ['目标', asText(content.goal)],
             ['受众', asText(content.audience)],
             ['渠道', asText(content.channel)],
-            ['Turn Budget', asText(content.turn_budget)],
+            ['轮次预算', asText(content.turn_budget)],
             ['最大返工', asText(content.max_revisions)],
           ]}
         />
@@ -663,7 +646,20 @@ function ComplianceView({ content }: { content: Record<string, unknown> }) {
   );
 }
 
+const EFFECT_METRIC_LABEL: Record<string, string> = {
+  ctr: '点击率（CTR）',
+  exposure: '曝光量',
+  engagement: '互动率',
+  conversion: '转化率',
+};
+
 function EffectView({ content }: { content: Record<string, unknown> }) {
+  // A10 有两种产物形态：发布前预估（predicted/alignment）与回填后复盘（actuals/predicted_comparison），
+  // 字段结构不同但共用 effect_report 类型，因此在这里按 mode 分流渲染。
+  const isReview = asText(content.mode) === 'post_publish_review';
+  const actuals = asRecord(content.actuals);
+  const comparison = asRecord(content.predicted_comparison);
+  const ab = asRecord(content.ab_conclusion);
   const predicted = asRecord(content.predicted);
   const alignment = asRecord(content.objective_alignment);
   const bands: [string, string][] = [
@@ -672,39 +668,132 @@ function EffectView({ content }: { content: Record<string, unknown> }) {
     ['互动率', 'engagement'],
     ['转化率', 'conversion'],
   ];
+  const num = (value: unknown): number | null => {
+    const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const fmt = (value: number | null, digits = 0): string => (value === null ? '—' : formatNumber(value, digits));
+  const actualCards: [string, string][] = [
+    ['曝光', fmt(num(actuals.exposure))],
+    ['点击', fmt(num(actuals.clicks))],
+    ['CTR', `${fmt(num(actuals.ctr), 2)}%`],
+    ['互动', fmt(num(actuals.interactions))],
+    ['转化', fmt(num(actuals.conversions))],
+  ];
+  const metricKey = asText(comparison.metric);
+  const rateUnit = metricKey && metricKey !== 'exposure' ? '%' : '';
+  const verdict = asText(comparison.verdict);
+  const delta = num(comparison.delta);
+  const confidence = num(ab.confidence);
+  const verdictTone =
+    verdict.includes('超') || verdict.includes('达标')
+      ? 'tone-ok'
+      : verdict.includes('低') || verdict.includes('未达')
+        ? 'tone-warn'
+        : 'tone-info';
+
   return (
     <>
-      <Section title="效果预估区间">
-        <div className="grid-3">
-          {bands.map(([label, key]) => {
-            const band = asRecord(predicted[key]);
-            return (
-              <div className="card" key={key}>
-                <div className="muted small">{label}</div>
-                <div style={{ fontSize: 20, fontWeight: 700 }}>
-                  {Math.round(asNumber(band.mid))}
-                  <span className="muted small">{asText(band.unit)}</span>
+      {isReview ? (
+        <>
+          <Section title="复盘范围">
+            <div className="row" style={{ flexWrap: 'wrap' }}>
+              <Chip tone="tone-info">{asText(content.channel) || '全渠道'}</Chip>
+              <Chip tone="tone-idle">{asText(content.window) || '观察窗口未记录'}</Chip>
+              {verdict ? <Chip tone={verdictTone}>{verdict}</Chip> : null}
+            </div>
+          </Section>
+          <Section title="回填实绩">
+            <div className="feedback-metrics" style={{ marginTop: 0 }}>
+              {actualCards.map(([label, value]) => (
+                <div className="feedback-metric" key={label}>
+                  <span>{label}</span>
+                  <b>{value}</b>
                 </div>
-                <div className="muted small">
-                  {Math.round(asNumber(band.low))} ~ {Math.round(asNumber(band.high))}
-                </div>
+              ))}
+            </div>
+            <div className="muted small" style={{ marginTop: 8 }}>
+              观察窗口：{asText(content.window) || '—'} · 互动率 {fmt(num(actuals.engagement), 2)}% · 转化率{' '}
+              {fmt(num(actuals.conversion), 2)}%
+            </div>
+          </Section>
+          <Section title="预估 vs 实际">
+            <Kv
+              pairs={[
+                ['对比指标', EFFECT_METRIC_LABEL[metricKey] ?? (metricKey || '点击率')],
+                [
+                  '预估区间',
+                  `${fmt(num(comparison.predicted_low), 1)}${rateUnit} ~ ${fmt(num(comparison.predicted_high), 1)}${rateUnit}（中位 ${fmt(num(comparison.predicted_mid), 1)}${rateUnit}）`,
+                ],
+                ['实际值', `${fmt(num(comparison.actual), 1)}${rateUnit}`],
+                ['偏差', delta === null ? '—' : `${delta > 0 ? '+' : ''}${formatNumber(delta, 2)}${rateUnit}`],
+              ]}
+            />
+            {asText(comparison.note) ? (
+              <div className="muted small" style={{ marginTop: 8 }}>
+                {asText(comparison.note)}
               </div>
-            );
-          })}
-        </div>
-        <div className="muted small" style={{ marginTop: 8 }}>
-          {asText(predicted.basis)}
-        </div>
-      </Section>
-      <Section title="目标匹配度">
-        <Kv
-          pairs={[
-            ['目标', asText(alignment.objective)],
-            ['匹配分', `${Math.round(asNumber(alignment.score))}/100`],
-            ['说明', asText(alignment.note)],
-          ]}
-        />
-      </Section>
+            ) : null}
+          </Section>
+          {asText(ab.hypothesis) || asText(ab.note) ? (
+            <Section title="A/B 结论">
+              <div className="row" style={{ flexWrap: 'wrap' }}>
+                <Chip tone={asText(ab.winner) ? 'tone-ok' : 'tone-idle'}>胜出 {asText(ab.winner) || '待定'}</Chip>
+                <Chip tone={confidence !== null && confidence >= 0.7 ? 'tone-ok' : 'tone-warn'}>
+                  置信度 {confidence === null ? '—' : `${Math.round(confidence * 100)}%`}
+                </Chip>
+                <Chip tone={ab.ready_to_scale ? 'tone-ok' : 'tone-warn'}>
+                  {ab.ready_to_scale ? '可放量' : '暂不放量'}
+                </Chip>
+              </div>
+              {asText(ab.hypothesis) ? (
+                <div className="small" style={{ marginTop: 8 }}>
+                  {asText(ab.hypothesis)}
+                </div>
+              ) : null}
+              {asText(ab.note) ? (
+                <div className="muted small" style={{ marginTop: 4 }}>
+                  {asText(ab.note)}
+                </div>
+              ) : null}
+            </Section>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <Section title="效果预估区间">
+            <div className="grid-3">
+              {bands.map(([label, key]) => {
+                const band = asRecord(predicted[key]);
+                return (
+                  <div className="card" key={key}>
+                    <div className="muted small">{label}</div>
+                    <div style={{ fontSize: 20, fontWeight: 700 }}>
+                      {Math.round(asNumber(band.mid))}
+                      <span className="muted small">{asText(band.unit)}</span>
+                    </div>
+                    <div className="muted small">
+                      {Math.round(asNumber(band.low))} ~ {Math.round(asNumber(band.high))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="muted small" style={{ marginTop: 8 }}>
+              {asText(predicted.basis)}
+            </div>
+          </Section>
+          <Section title="目标匹配度">
+            <Kv
+              pairs={[
+                ['目标', asText(alignment.objective)],
+                ['匹配分', `${Math.round(asNumber(alignment.score))}/100`],
+                ['说明', asText(alignment.note)],
+              ]}
+            />
+          </Section>
+        </>
+      )}
       <Section title="效果归因">
         <Table head={['因子', '影响', '说明']}>
           {asRecordArray(content.attribution).map((row, index) => (
@@ -732,23 +821,153 @@ function EffectView({ content }: { content: Record<string, unknown> }) {
           ))}
         </Table>
       </Section>
-      <Section title="A/B 测试建议">
-        <Table head={['假设', '版本 A', '版本 B', '指标']}>
-          {asRecordArray(content.ab_tests).map((row, index) => (
-            <tr key={index}>
-              <td>{asText(row.hypothesis)}</td>
-              <td>{asText(row.variant_a)}</td>
-              <td>{asText(row.variant_b)}</td>
-              <td>{asText(row.metric)}</td>
-            </tr>
-          ))}
-        </Table>
-      </Section>
+      {isReview ? null : (
+        <Section title="A/B 测试建议">
+          <Table head={['假设', '版本 A', '版本 B', '指标']}>
+            {asRecordArray(content.ab_tests).map((row, index) => (
+              <tr key={index}>
+                <td>{asText(row.hypothesis)}</td>
+                <td>{asText(row.variant_a)}</td>
+                <td>{asText(row.variant_b)}</td>
+                <td>{asText(row.metric)}</td>
+              </tr>
+            ))}
+          </Table>
+        </Section>
+      )}
       <Section title="下一条选题建议">
         <Bullets items={asTextArray(content.next_brief_suggestions)} />
       </Section>
       <Section title="注意事项">
         <Bullets items={asTextArray(content.cautions)} />
+      </Section>
+    </>
+  );
+}
+
+type ReviewSnapshot = {
+  window: string;
+  channel: string;
+  exposure: number | null;
+  clicks: number | null;
+  ctr: number | null;
+  interactions: number | null;
+  conversions: number | null;
+  verdict: string;
+  winner: string;
+  confidence: number | null;
+  readyToScale: boolean | null;
+};
+
+function reviewSnapshot(artifact: Artifact): ReviewSnapshot {
+  const content = asRecord(artifact.content);
+  const actuals = asRecord(content.actuals);
+  const comparison = asRecord(content.predicted_comparison);
+  const ab = asRecord(content.ab_conclusion);
+  const read = (value: unknown): number | null => {
+    const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return {
+    window: asText(content.window),
+    channel: asText(content.channel),
+    exposure: read(actuals.exposure),
+    clicks: read(actuals.clicks),
+    ctr: read(actuals.ctr),
+    interactions: read(actuals.interactions),
+    conversions: read(actuals.conversions),
+    verdict: asText(comparison.verdict),
+    winner: asText(ab.winner),
+    confidence: read(ab.confidence),
+    readyToScale: typeof ab.ready_to_scale === 'boolean' ? ab.ready_to_scale : null,
+  };
+}
+
+function countDelta(current: number | null, previous: number | null): string {
+  if (current === null || previous === null) return '—';
+  const diff = current - previous;
+  if (!diff) return '持平';
+  const pct = previous ? (diff / previous) * 100 : null;
+  const amount = `${diff > 0 ? '+' : ''}${formatNumber(diff)}`;
+  return pct === null ? amount : `${amount}（${pct > 0 ? '+' : ''}${formatNumber(pct, 1)}%）`;
+}
+
+function pointDelta(current: number | null, previous: number | null): string {
+  if (current === null || previous === null) return '—';
+  const diff = current - previous;
+  if (!diff) return '持平';
+  return `${diff > 0 ? '+' : ''}${formatNumber(diff, 2)}pp`;
+}
+
+/** 复盘版本之间比较实绩与结论；不同观察窗口的累计量不做「涨了就是更好」的暗示。 */
+function ReviewCompare({ current, previous }: { current: Artifact; previous: Artifact }) {
+  const next = reviewSnapshot(current);
+  const prior = reviewSnapshot(previous);
+  const fmt = (value: number | null): string => (value === null ? '—' : formatNumber(value));
+  const pct = (value: number | null): string => (value === null ? '—' : `${formatNumber(value, 2)}%`);
+  const metrics: [string, string, string, string][] = [
+    ['曝光', fmt(prior.exposure), fmt(next.exposure), countDelta(next.exposure, prior.exposure)],
+    ['点击', fmt(prior.clicks), fmt(next.clicks), countDelta(next.clicks, prior.clicks)],
+    ['CTR', pct(prior.ctr), pct(next.ctr), pointDelta(next.ctr, prior.ctr)],
+    ['互动', fmt(prior.interactions), fmt(next.interactions), countDelta(next.interactions, prior.interactions)],
+    ['转化', fmt(prior.conversions), fmt(next.conversions), countDelta(next.conversions, prior.conversions)],
+  ];
+  const conclusions: [string, string, string][] = [
+    ['回填判定', prior.verdict || '—', next.verdict || '—'],
+    ['A/B 胜出', prior.winner || '—', next.winner || '—'],
+    [
+      '置信度',
+      prior.confidence === null ? '—' : `${Math.round(prior.confidence * 100)}%`,
+      next.confidence === null ? '—' : `${Math.round(next.confidence * 100)}%`,
+    ],
+    [
+      '放量建议',
+      prior.readyToScale === null ? '—' : prior.readyToScale ? '可放量' : '暂不放量',
+      next.readyToScale === null ? '—' : next.readyToScale ? '可放量' : '暂不放量',
+    ],
+  ];
+
+  return (
+    <>
+      <div className="row" style={{ flexWrap: 'wrap', marginBottom: 10 }}>
+        <Chip tone="tone-info">复盘对比</Chip>
+        <Chip tone="tone-idle">{prior.channel || next.channel || '渠道未记录'}</Chip>
+        <Chip tone="tone-idle">
+          {prior.window || '—'} → {next.window || '—'}
+        </Chip>
+      </div>
+      <Section title="回填实绩对比">
+        <Table head={['指标', `v${previous.version}`, `v${current.version}`, '变化']}>
+          {metrics.map(([label, before, after, delta]) => (
+            <tr key={label}>
+              <td>
+                <strong>{label}</strong>
+              </td>
+              <td>{before}</td>
+              <td>{after}</td>
+              <td className={delta === '—' ? 'muted' : ''}>{delta}</td>
+            </tr>
+          ))}
+        </Table>
+        {prior.window !== next.window ? (
+          <div className="muted small" style={{ marginTop: 8 }}>
+            两版观察窗口不同：曝光、点击、互动、转化是累计值，会随窗口变长自然增长；横向判断优先看 CTR
+            与转化率，不要仅凭累计量的增幅下结论。
+          </div>
+        ) : null}
+      </Section>
+      <Section title="结论对比">
+        <Table head={['项目', `v${previous.version}`, `v${current.version}`]}>
+          {conclusions.map(([label, before, after]) => (
+            <tr key={label}>
+              <td>
+                <strong>{label}</strong>
+              </td>
+              <td>{before}</td>
+              <td>{after}</td>
+            </tr>
+          ))}
+        </Table>
       </Section>
     </>
   );
@@ -1383,71 +1602,219 @@ function VideoScriptView({ content }: { content: Record<string, unknown> }) {
 /* 主体                                                                */
 /* ------------------------------------------------------------------ */
 
-export function ArtifactViewer({ task }: { task: TaskRecord }) {
+export interface ArtifactFocus {
+  artifactId?: string;
+  agentId?: string;
+}
+
+export function ArtifactViewer({
+  task,
+  focus,
+  agentNames,
+}: {
+  task: TaskRecord;
+  focus?: ArtifactFocus | null;
+  agentNames?: Record<string, { name: string; role: string }>;
+}) {
   const artifacts = useMemo(
     () => task.artifacts.slice().sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
     [task.artifacts],
   );
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState<ArtifactType | ''>('');
+  const [agentFilter, setAgentFilter] = useState(focus?.agentId ?? '');
+  const [selectedId, setSelectedId] = useState<string | null>(focus?.artifactId ?? null);
   const [showDiff, setShowDiff] = useState(false);
   const [exportState, setExportState] = useState<'idle' | 'busy' | 'error'>('idle');
+  const listRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  // 窄屏下列表与详情改成上下堆叠，选中后若不滚动，用户会以为点击没有反应。
+  const revealDetailOnNarrow = () => {
+    if (!window.matchMedia('(max-width: 1080px)').matches) return;
+    window.requestAnimationFrame(() => {
+      bodyRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
+  };
+
+  useEffect(() => {
+    if (!focus) return;
+    if (focus.artifactId) {
+      setSelectedId(focus.artifactId);
+      setQuery('');
+      setTypeFilter('');
+      setAgentFilter('');
+      revealDetailOnNarrow();
+    } else if (focus.agentId) {
+      setAgentFilter(focus.agentId);
+      setQuery('');
+      setTypeFilter('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus]);
+
+  const typeOptions = useMemo(() => {
+    const counts = new Map<ArtifactType, number>();
+    for (const artifact of artifacts) counts.set(artifact.type, (counts.get(artifact.type) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => TYPE_LABEL[a[0]].localeCompare(TYPE_LABEL[b[0]], 'zh-CN'));
+  }, [artifacts]);
+
+  const agentOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const artifact of artifacts) counts.set(artifact.agent_id, (counts.get(artifact.agent_id) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+  }, [artifacts]);
+
+  const visible = useMemo(() => {
+    const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return artifacts.filter((artifact) => {
+      if (typeFilter && artifact.type !== typeFilter) return false;
+      if (agentFilter && artifact.agent_id !== agentFilter) return false;
+      if (!tokens.length) return true;
+      const haystack = `${artifact.title} ${artifact.agent_id} ${TYPE_LABEL[artifact.type] ?? artifact.type} ${artifact.tags.join(' ')}`.toLowerCase();
+      return tokens.every((token) => haystack.includes(token));
+    });
+  }, [agentFilter, artifacts, query, typeFilter]);
 
   const selected = useMemo(() => {
     if (selectedId) {
-      const hit = artifacts.find((a) => a.id === selectedId);
+      const hit = visible.find((a) => a.id === selectedId);
       if (hit) return hit;
     }
-    return artifacts.find((a) => a.type === 'final_delivery') ?? artifacts[0] ?? null;
-  }, [artifacts, selectedId]);
+    return visible.find((a) => a.type === 'final_delivery') ?? visible[0] ?? null;
+  }, [visible, selectedId]);
 
   const previous = useMemo(() => {
     if (!selected) return null;
+    // 复盘报告只与同为复盘模式的上一版比较；发布前预估已包含在复盘报告的「预估 vs 实际」里，
+    // 把它拉进来做文本 diff 只会制造结构差异噪音。
+    const sameShape = (candidate: Artifact) =>
+      selected.type !== 'effect_report' || asText(candidate.content.mode) === asText(selected.content.mode);
     const sameType = task.artifacts
-      .filter((a) => a.type === selected.type)
+      .filter((a) => a.type === selected.type && sameShape(a))
       .sort((a, b) => a.version - b.version);
     const index = sameType.findIndex((a) => a.id === selected.id);
     return index > 0 ? sameType[index - 1]! : null;
   }, [task.artifacts, selected]);
+
+  useEffect(() => {
+    const active = listRef.current?.querySelector('.art-item.active');
+    active?.scrollIntoView({ block: 'nearest' });
+  }, [selected?.id]);
 
   if (!artifacts.length) {
     return <Empty>暂无产物。流水线开始运行后，产物会实时写入共享黑板。</Empty>;
   }
 
   const Renderer = selected ? RENDERERS[selected.type] : undefined;
+  const hasFilter = Boolean(query.trim() || typeFilter || agentFilter);
+  const compareReview =
+    selected?.type === 'effect_report' &&
+    asText(selected.content.mode) === 'post_publish_review' &&
+    previous !== null &&
+    asText(previous.content.mode) === 'post_publish_review';
+  const clearFilters = () => {
+    setQuery('');
+    setTypeFilter('');
+    setAgentFilter('');
+  };
 
   return (
-    <div className="art-layout">
-      <div className="art-list">
-        {artifacts.map((artifact) => (
-          <button
-            key={artifact.id}
-            className={`art-item${artifact.id === selected?.id ? ' active' : ''}`}
-            onClick={() => {
-              setSelectedId(artifact.id);
-              setShowDiff(false);
-            }}
-          >
-            <span className="v">v{artifact.version}</span>
-            <div>
-              <span className="mono muted">{artifact.agent_id}</span> {TYPE_LABEL[artifact.type] ?? artifact.type}
-            </div>
-            <div className="muted" style={{ fontSize: 10.5, marginTop: 2 }}>
-              {formatTime(artifact.created_at)}
-              {artifact.revision > 0 ? ` · 返工 r${artifact.revision}` : ''}
-            </div>
+    <div className="artifact-viewer">
+      <div className="art-tools">
+        <div className="task-search art-search">
+          <IconSearch size={14} />
+          <input
+            value={query}
+            placeholder="搜索标题 / 类型 / 角色 / 标签"
+            aria-label="搜索产物"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          {query ? (
+            <button
+              type="button"
+              className="task-search-clear"
+              aria-label="清空搜索"
+              onClick={() => setQuery('')}
+            >
+              <IconClose size={13} />
+            </button>
+          ) : null}
+        </div>
+        <select
+          className="art-select"
+          value={typeFilter}
+          aria-label="按产物类型筛选"
+          onChange={(event) => setTypeFilter(event.target.value as ArtifactType | '')}
+        >
+          <option value="">全部类型（{artifacts.length}）</option>
+          {typeOptions.map(([type, count]) => (
+            <option key={type} value={type}>
+              {artifactTypeLabel(type)}（{count}）
+            </option>
+          ))}
+        </select>
+        <select
+          className="art-select"
+          value={agentFilter}
+          aria-label="按产出角色筛选"
+          onChange={(event) => setAgentFilter(event.target.value)}
+        >
+          <option value="">全部角色（{agentOptions.length}）</option>
+          {agentOptions.map(([id, count]) => (
+            <option key={id} value={id}>
+              {id}
+              {agentNames?.[id] ? ` ${agentNames[id]!.name}` : ''}（{count}）
+            </option>
+          ))}
+        </select>
+        {focus?.agentId && agentFilter === focus.agentId ? (
+          <Chip tone="tone-info">流水线节点 {focus.agentId}</Chip>
+        ) : null}
+        <span className="art-count">
+          显示 {visible.length} / {artifacts.length} 件
+        </span>
+        {hasFilter ? (
+          <button type="button" className="art-clear" onClick={clearFilters}>
+            清除筛选
           </button>
-        ))}
+        ) : null}
       </div>
 
-      <div className="art-body">
+      {visible.length ? (
+        <div className="art-layout">
+          <div className="art-list" ref={listRef}>
+            {visible.map((artifact) => (
+              <button
+                key={artifact.id}
+                className={`art-item${artifact.id === selected?.id ? ' active' : ''}`}
+                onClick={() => {
+                  setSelectedId(artifact.id);
+                  setShowDiff(false);
+                  revealDetailOnNarrow();
+                }}
+              >
+                <span className="v">v{artifact.version}</span>
+                <div>
+                  <span className="mono muted">{artifact.agent_id}</span> {artifactLabel(artifact)}
+                </div>
+                <div className="muted" style={{ fontSize: 10.5, marginTop: 2 }}>
+                  {formatTime(artifact.created_at)}
+                  {artifact.revision > 0 ? ` · 返工 r${artifact.revision}` : ''}
+                </div>
+              </button>
+            ))}
+          </div>
+
+      <div className="art-body" ref={bodyRef}>
         {selected ? (
           <div className="panel">
             <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
               <div>
                 <div style={{ fontWeight: 700, fontSize: 15 }}>
                   {selected.title}
-                  <span className="muted small"> · {TYPE_LABEL[selected.type] ?? selected.type}</span>
+                  <span className="muted small"> · {artifactLabel(selected)}</span>
                 </div>
                 <div className="row small muted" style={{ marginTop: 4 }}>
                   <span>{selected.agent_id}</span>
@@ -1492,17 +1859,21 @@ export function ArtifactViewer({ task }: { task: TaskRecord }) {
             ) : null}
 
             {showDiff && previous ? (
-              <div className="diff">
-                {diffLines(previous.text, selected.text).map((line, index) => (
-                  <div
-                    className={`diff-line${line.type === 'add' ? ' add' : line.type === 'del' ? ' del' : ''}`}
-                    key={index}
-                  >
-                    {line.type === 'add' ? '+ ' : line.type === 'del' ? '- ' : '  '}
-                    {line.text || ' '}
-                  </div>
-                ))}
-              </div>
+              compareReview ? (
+                <ReviewCompare current={selected} previous={previous} />
+              ) : (
+                <div className="diff">
+                  {diffLines(previous.text, selected.text).map((line, index) => (
+                    <div
+                      className={`diff-line${line.type === 'add' ? ' add' : line.type === 'del' ? ' del' : ''}`}
+                      key={index}
+                    >
+                      {line.type === 'add' ? '+ ' : line.type === 'del' ? '- ' : '  '}
+                      {line.text || ' '}
+                    </div>
+                  ))}
+                </div>
+              )
             ) : Renderer ? (
               <Renderer content={asRecord(selected.content)} />
             ) : (
@@ -1510,7 +1881,11 @@ export function ArtifactViewer({ task }: { task: TaskRecord }) {
             )}
           </div>
         ) : null}
+        </div>
       </div>
+    ) : (
+      <Empty>没有匹配的产物，试试清除筛选或换一个关键词。</Empty>
+    )}
     </div>
   );
 }

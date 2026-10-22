@@ -37,6 +37,13 @@
 19. 校验 **素材研读与长文分篇**：kind=document 素材的 map-reduce 研读
     （产物形状、要点取自原文、问题如实入档）、无文档时零调用（基线不受影响）、
     A4 字数区间检测与 ``A4.copy.version`` 单版本契约
+20. 校验 **影视制作工厂**：60 岗位注册表与部门归档、五种预设展图并过静态体检
+    （环路/端口不匹配/必需交付物可定位）、拓扑排序与增量缓存（二跑全命中）、
+    离线通道真落盘（PNG/WAV 等标准库产物）且生成岗位自报 ``simulated``、
+    异步作业生命周期（受理→后台线程→轮询）、未知目标点名拒绝、岗位边界取消
+    （cancelling→cancelled、剩余岗位标 cancelled）、增量缓存提前落盘、重启后遗留作业回收、
+    交付包 zip（manifest/README/sha256，重复打包覆盖同一份，无产物/跨租户/运行中拒绝）、
+    跨租户不可读写、产物路径越界拒绝与项目删除回收
 
 检查项的**计数会随合并/拆分变化**（第十轮新增「视频脚本」时是 17 项；第十二轮把
 传播/采样与数字人样例并入既有项后回到 16 项；随后新增「Brief 素材（多模态）」为 17 项，
@@ -4575,6 +4582,1212 @@ def check_digest_export() -> bool:
     return ok
 
 
+def check_factory() -> bool:
+    """校验影视制作工厂（旁路作业范式的新实例）：岗位注册表与部门归档、预设展开成图、
+    拓扑/端口/环路/必需交付物的静态体检、增量缓存、**离线通道真落盘**（PNG/WAV/SRT
+    等标准库产物）与生成岗位的 ``simulated`` 自报、异步作业生命周期（受理→后台线程推进→
+    轮询）、**未知目标点名拒绝**、**岗位边界取消**（剩余岗位标 cancelled、cancelling 状态机）、
+    **增量缓存提前落盘**（首岗交付即可在 cache.json 读到）、**进程重启遗留运行回收**
+    （含 cancelling，标中断但保留已完成岗位缓存）、租户隔离、产物路径边界与项目删除回收。
+
+    本轮补强两类口径：**结构身份体检**（岗位 id 为空/重复不得误报成环路，悬空端点、
+    自环、重复连线各自点名）与**交付验收**（打包前那道门：终端岗位未交付、缓存过期、
+    产物引用文件不在盘都阻断交付包，占位产物只告警——见 app/factory/acceptance.py）；
+    验收之外再加**交付台账**（append-only 留痕：每次打包的放行/拦下都落一条到项目目录
+    里的 deliveries.json，只读不建作业——固定名交付包只说「现在这版」，台账才回答「交过没、何时、当时量出什么」）；
+    台账之外再钉一条**回看闭环**（交付包内含最下游那条成片时间轴 timeline.json，它引用的素材必须逐个在包内——
+    拆包的人不只拿到散件，还能拼回那条片子）；闭环之上再做**回看对账**（成片区内容指纹存进台账与 manifest，
+    刚交付时屏幕这条与装箱那条一致、篡改缓存后应翻脸判不一致——不比旧包字节只比内容，诚实回答“改了没”）。
+
+    诚实口径与其余旁路通道一致：离线路径只用标准库把产物落到项目工作区并一律带
+    ``simulated=True``，绝不假装接了真机；缺素材/缺交付物如实落到节点状态而不是补一条假连线。
+    """
+    import shutil
+    import time
+
+    from app.factory import engine, presets
+    from app.factory import graph as graph_model
+    from app.factory import store as factory_store
+    from app.factory.nodes import source as source_module
+    from app.factory.spec import DEPARTMENTS, NodeError, all_specs
+
+    print("\n[影视制作工厂（岗位图引擎 + 异步作业）]")
+
+    # 1) 注册表：60 个岗位、每个岗位都归进已知部门（无孤儿）、按部门出面板
+    specs = all_specs()
+    dept_keys = {key for key, _, _ in DEPARTMENTS}
+    registry_ok = (
+        len(specs) == 60
+        and all(spec.run is not None for spec in specs)
+        and not [spec for spec in specs if spec.dept not in dept_keys]
+    )
+    panel = factory_store.store.palette()
+    panel_ok = bool(panel["departments"]) and not panel["orphan_nodes"] and panel["node_count"] == len(specs)
+    print(f"    岗位注册表：{len(specs)} 个岗位｜全部有执行器且归部={registry_ok}｜面板分组无孤儿={panel_ok}")
+
+    # 2) 预设展开成图 + 静态体检（都不许带 error 级问题）
+    preset_ok = True
+    row_counts: dict[str, int] = {}
+    for key in presets.PRESETS:
+        graph = graph_model.Graph.model_validate(presets.graph_dict(key))
+        issues = graph_model.validate_graph(graph)
+        errs = [issue for issue in issues if issue.level == "error"]
+        row_counts[key] = len(graph.nodes)
+        if not graph.nodes or not graph.edges or errs:
+            preset_ok = False
+            print(f"    预设 {key}: ✗ 节点 {len(graph.nodes)} 条 error {len(errs)}：{errs[:1]}")
+    print(f"    预设展开+体检无 error：{list(row_counts.items())}={preset_ok}")
+
+    # 3) 环路 + 端口类型不匹配：拓扑排序点名成环，体检对 text→timeline 只告警不判死
+    cycle_graph = graph_model.Graph.model_validate(
+        {
+            "nodes": [
+                {"id": "a", "type": "text_input", "pos": [0, 0], "params": {"text": "x"}},
+                {"id": "b", "type": "text_input", "pos": [1, 1], "params": {"text": "y"}},
+            ],
+            "edges": [
+                {"id": "e1", "src": "a", "src_port": "text", "dst": "b", "dst_port": "text"},
+                {"id": "e2", "src": "b", "src_port": "text", "dst": "a", "dst_port": "text"},
+            ],
+        }
+    )
+    try:
+        graph_model.topo_order(cycle_graph)
+        cycle_ok = False
+    except NodeError:
+        cycle_ok = True
+    mismatch_graph = graph_model.Graph.model_validate(
+        {
+            "nodes": [
+                {"id": "a", "type": "text_input", "pos": [0, 0], "params": {"text": "x"}},
+                {"id": "s", "type": "screening", "pos": [1, 1]},
+            ],
+            "edges": [{"id": "e1", "src": "a", "src_port": "text", "dst": "s", "dst_port": "timeline"}],
+        }
+    )
+    mismatch = [issue for issue in graph_model.validate_graph(mismatch_graph) if issue.level == "warn"]
+    mismatch_ok = bool(mismatch) and not [i for i in graph_model.validate_graph(mismatch_graph) if i.level == "error"]
+    print(f"    环路拒执行={cycle_ok}｜端口类型不匹配只告警不判死={mismatch_ok}")
+
+    # 3b) 结构身份体检：id 为空/重复不能被误报成环路；悬空端点、自环、重复连线各归各位
+    dup_graph = graph_model.Graph.model_validate(
+        {
+            "nodes": [
+                {"id": "n1", "type": "text_input", "pos": [0, 0], "params": {"text": "a"}},
+                {"id": "n1", "type": "text_input", "pos": [1, 1], "params": {"text": "b"}},
+            ],
+            "edges": [],
+        }
+    )
+    dup_issues = graph_model.validate_graph(dup_graph)
+    dup_msg_ok = any("岗位 id 重复" in i.message for i in dup_issues) and not any("环路" in i.message for i in dup_issues)
+    try:
+        graph_model.topo_order(dup_graph)
+        dup_topo_ok = False
+    except NodeError as error:
+        dup_topo_ok = "id 冲突" in str(error) and "环路" not in str(error)
+    emptyid_graph = graph_model.Graph.model_validate(
+        {"nodes": [{"id": "", "type": "text_input", "pos": [0, 0], "params": {"text": "a"}}], "edges": []}
+    )
+    emptyid_ok = any("id 为空" in i.message for i in graph_model.validate_graph(emptyid_graph))
+    dangling_graph = graph_model.Graph.model_validate(
+        {
+            "nodes": [{"id": "a", "type": "text_input", "pos": [0, 0], "params": {"text": "x"}}],
+            "edges": [{"id": "e1", "src": "a", "src_port": "text", "dst": "ghost", "dst_port": "text"}],
+        }
+    )
+    dangling = [i for i in graph_model.validate_graph(dangling_graph) if i.level == "error"]
+    dangling_ok = any("已不存在" in i.message for i in dangling) and not any("未知岗位" in i.message for i in dangling)
+    selfloop_graph = graph_model.Graph.model_validate(
+        {
+            "nodes": [{"id": "a", "type": "text_input", "pos": [0, 0], "params": {"text": "x"}}],
+            "edges": [{"id": "e1", "src": "a", "src_port": "text", "dst": "a", "dst_port": "text"}],
+        }
+    )
+    selfloop = [i for i in graph_model.validate_graph(selfloop_graph) if i.level == "error"]
+    selfloop_ok = any("连回了自己" in i.message for i in selfloop)
+    dupe_edge_graph = graph_model.Graph.model_validate(
+        {
+            "nodes": [
+                {"id": "a", "type": "text_input", "pos": [0, 0], "params": {"text": "x"}},
+                {"id": "b", "type": "text_input", "pos": [1, 1], "params": {"text": "y"}},
+            ],
+            "edges": [
+                {"id": "e1", "src": "a", "src_port": "text", "dst": "b", "dst_port": "text"},
+                {"id": "e2", "src": "a", "src_port": "text", "dst": "b", "dst_port": "text"},
+            ],
+        }
+    )
+    dup_edge_ok = any(
+        i.level == "warn" and "重复连线" in i.message for i in graph_model.validate_graph(dupe_edge_graph)
+    )
+    structure_ok = dup_msg_ok and dup_topo_ok and emptyid_ok and dangling_ok and selfloop_ok and dup_edge_ok
+    print(
+        f"    结构体检补强：id 重复点名不误报环路={dup_msg_ok and dup_topo_ok}｜空 id 定位={emptyid_ok}"
+        f"｜悬空端点说「已不存在」={dangling_ok}｜自环点名={selfloop_ok}｜重复连线告警={dup_edge_ok}={structure_ok}"
+    )
+
+    # 4) 引擎 + 增量缓存：编剧台整图跑通，再跑一次全部命中缓存（未重跑）
+    script_ws = engine.open_workspace("doctor-factory-script", "")
+    script_graph = graph_model.Graph.model_validate(presets.graph_dict("script"))
+    first = engine.run_graph(script_graph, script_ws)
+    second = engine.run_graph(script_graph, script_ws)
+    engine_ok = (
+        first["ok"]
+        and first["counts"]["ok"] == len(script_graph.nodes)
+        and first["counts"]["error"] == 0
+        and second["counts"]["cached"] == len(script_graph.nodes)
+        and second["counts"]["ok"] == 0
+    )
+    print(
+        f"    引擎整图+增量缓存：首跑 ok={first['ok']}（{first['counts']['ok']} 岗位）"
+        f"｜二跑全缓存={second['counts']['cached']}={engine_ok}"
+    )
+
+    # 4b) 运行预检：与 run_graph 同一套指纹口径，只读算出复用/重跑。
+    #     预检若和实跑口径不一致，就是善意的谎言——所以这里把三种关键结论都钉死。
+    preview_all = engine.preview_graph(script_graph, script_ws)
+    preview_all_ok = (
+        preview_all["counts"]["cached"] == len(script_graph.nodes)
+        and preview_all["counts"]["run"] == 0
+        and preview_all["counts"]["total"] == len(script_graph.nodes)
+    )
+    changed_dict = script_graph.model_dump()
+    for node in changed_dict["nodes"]:
+        if node["id"] == "n-sb":
+            node["params"] = {**node.get("params", {}), "__probe": 1}
+    changed_graph = graph_model.Graph.model_validate(changed_dict)
+    preview_changed = engine.preview_graph(changed_graph, script_ws)
+    preview_changed_ids = {row["node_id"] for row in preview_changed["nodes"] if row["state"] == "run"}
+    cache_before = script_ws.cache_file.stat().st_mtime_ns
+    engine.preview_graph(script_graph, script_ws)
+    preview_readonly_ok = script_ws.cache_file.stat().st_mtime_ns == cache_before
+    preview_force = engine.preview_graph(script_graph, script_ws, force=True)
+    preview_target = engine.preview_graph(script_graph, script_ws, targets=["n-sup"])
+    preview_node_force = engine.preview_graph(
+        script_graph, script_ws, targets=["n-sb"], force_nodes=["n-sb"]
+    )
+    preview_node_row = {row["node_id"]: row for row in preview_node_force["nodes"]}["n-sb"]
+    preview_ok = (
+        preview_all_ok
+        and preview_changed["counts"]["cached"] == len(script_graph.nodes) - 3
+        and preview_changed_ids == {"n-sb", "n-sup", "n-act"}
+        and any("上游" in row["reason"] for row in preview_changed["nodes"] if row["node_id"] == "n-act")
+        and preview_force["counts"]["cached"] == 0
+        and preview_force["counts"]["run"] == len(script_graph.nodes)
+        and set(preview_target["plan"]) < set(preview_all["plan"])
+        and "n-sup" in preview_target["plan"]
+        and preview_target["counts"]["run"] == 0
+        and preview_node_force["counts"]["total"] == len(preview_node_force["plan"])
+        and preview_node_force["counts"]["cached"] == len(preview_node_force["plan"]) - 1
+        and preview_node_force["counts"]["run"] == 1
+        and preview_node_force["force_nodes"] == ["n-sb"]
+        and preview_node_row.get("state") == "run"
+        and "强制重跑" in str(preview_node_row.get("reason") or "")
+        and preview_node_row.get("forced") is True
+        and preview_readonly_ok
+    )
+    print(
+        f"    运行预检：全缓存={preview_all['counts']['cached']}｜改分镜只波及"
+        f"{sorted(preview_changed_ids)}｜force 全重跑={preview_force['counts']['run']}"
+        f"｜岗位强跑={preview_node_force['counts']['run']}/{preview_node_force['counts']['total']}"
+        f"｜目标闭包全缓存且不写盘={preview_readonly_ok}={preview_ok}"
+    )
+
+    # 5) 诚实失败落到节点：空文本岗位报错、缺必需交付物点名端口、整轮判失败
+    empty_graph = graph_model.Graph.model_validate(
+        {"nodes": [{"id": "t", "type": "text_input", "pos": [0, 0], "params": {"text": ""}}], "edges": []}
+    )
+    empty_run = engine.run_graph(empty_graph, engine.open_workspace("doctor-factory-empty", ""))
+    empty_ok = (
+        empty_run["ok"] is False
+        and empty_run["runs"]["t"]["status"] == "error"
+        and "文本输入节点为空" in empty_run["runs"]["t"]["error"]
+    )
+    need_graph = graph_model.Graph.model_validate(
+        {"nodes": [{"id": "s", "type": "screening", "pos": [0, 0]}], "edges": []}
+    )
+    need_run = engine.run_graph(need_graph, engine.open_workspace("doctor-factory-need", ""))
+    need_ok = need_run["runs"]["s"]["status"] == "error" and "时间轴" in need_run["runs"]["s"]["error"]
+    print(f"    诚实失败：空文本拒跑={empty_ok}｜缺必需交付物点名端口={need_ok}")
+
+    # 6) 异步作业全生命周期（生成台：图像/视频/音频离线真落盘 + simulated 自报）
+    source_module.ensure_demo_asset()
+    rec = factory_store.store.create("自检工厂", "default", presets.graph_dict("gen"))
+    project_id = str(rec["id"])
+    # 指定了画布上不存在的岗位必须点名拒绝：静默丢掉目标会退化成「跑全图」
+    try:
+        factory_store.store.start_run(project_id, "default", targets=["n-ghost"])
+        missing_target_ok = False
+    except ValueError as error:
+        missing_target_ok = "n-ghost" in str(error)
+    print(f"    运行边界：未知目标点名拒绝（不退化成跑全图）={missing_target_ok}")
+    accepted = factory_store.store.start_run(project_id, "default")
+    deadline = time.time() + 180
+    job = factory_store.store.job(accepted["id"], "default") or {}
+    while job.get("status") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.3)
+        job = factory_store.store.job(accepted["id"], "default") or job
+    workspace = factory_store.workspace_for(project_id)
+    artifact_files = [p for p in workspace.artifacts_dir.rglob("*") if p.is_file()]
+    cached = workspace.load_cache()
+    key_images = (cached.get("n-key", {}).get("outputs", {}) or {}).get("images", {}) or {}
+    gen_clips = (cached.get("n-gen", {}).get("outputs", {}) or {}).get("clips", {}) or {}
+    model_cfg = (cached.get("n-model", {}).get("outputs", {}) or {}).get("model", {}) or {}
+    image_items = key_images.get("items") or []
+    clip_items = gen_clips.get("items") or []
+    job_ok = (
+        accepted["status"] == "queued"
+        and job.get("status") == "ok"
+        and job.get("counts", {}).get("error") == 0
+        and job.get("progress") == 1.0
+        and len(artifact_files) > 50  # 图像/音频/字幕/时间轴真落盘，不是内存清单
+        and any(p.suffix == ".png" for p in artifact_files)
+        and any(p.suffix == ".wav" for p in artifact_files)
+        and bool(image_items) and all(item.get("simulated") is True for item in image_items)
+        and bool(clip_items) and all(item.get("simulated") is True for item in clip_items)
+        and model_cfg.get("endpoint_ready") is False and model_cfg.get("provider") == "sample"
+    )
+    print(
+        f"    异步作业（生成台）：受理 queued={accepted['status'] == 'queued'}"
+        f"｜推进 ok={job.get('status') == 'ok'}｜落盘产物 {len(artifact_files)} 个（PNG+WAV）"
+        f"｜生成岗位自报 simulated={bool(image_items) and bool(clip_items)}={job_ok}"
+    )
+
+    # 6b) 存储层预检：跑完的生成台整图全缓存；预检不建作业、不跑岗位；
+    #     未知目标与实跑共用 _prepare_run，一样点名拒绝。
+    runs_before_preview = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    gen_preview = factory_store.store.preview(project_id, "default")
+    gen_preview_target = factory_store.store.preview(project_id, "default", targets=["n-cut"])
+    runs_after_preview = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    try:
+        factory_store.store.preview(project_id, "default", targets=["n-ghost"])
+        preview_unknown_ok = False
+    except ValueError as error:
+        preview_unknown_ok = "n-ghost" in str(error)
+    preview_store_ok = (
+        gen_preview["counts"]["total"] == len(gen_preview["plan"])
+        and gen_preview["counts"]["cached"] == gen_preview["counts"]["total"]
+        and gen_preview["counts"]["run"] == 0
+        and set(gen_preview_target["plan"]) < set(gen_preview["plan"])
+        and gen_preview_target["counts"]["run"] == 0
+        and runs_before_preview == runs_after_preview
+        and preview_unknown_ok
+    )
+    print(
+        f"    存储层预检：整图全缓存={gen_preview['counts']['cached']}/{gen_preview['counts']['total']}"
+        f"｜目标闭包收窄={len(gen_preview_target['plan'])}<{len(gen_preview['plan'])}"
+        f"｜未新建作业={runs_before_preview == runs_after_preview}"
+        f"｜未知目标点名拒绝={preview_unknown_ok}={preview_store_ok}"
+    )
+
+    # 6c) 运行历史摘要：列表页要能直接点名「续跑哪些岗位」，所以 retry_nodes 必须跟着摘要走；
+    #     成功运行没有待续跑岗位，失败/受阻/取消才进名单，且摘要不夹带事件与结果。
+    failed_summary = factory_store.store.public_job(
+        {
+            "id": "frun-doctor-history",
+            "nodes": {
+                "a": {"status": "ok"},
+                "b": {"status": "error"},
+                "c": {"status": "blocked"},
+                "d": {"status": "cancelled"},
+                "e": {"status": "running"},
+            },
+        },
+        detail=False,
+    )
+    gen_runs = factory_store.store.list_runs(project_id, "default", limit=10)
+    history_ok = (
+        failed_summary.get("retry_nodes") == ["b", "c", "d"]
+        and "events" not in failed_summary
+        and "result" not in failed_summary
+        and bool(gen_runs)
+        and gen_runs[0].get("retry_nodes") == []
+    )
+    print(
+        f"    运行历史摘要：未完成名单={failed_summary.get('retry_nodes')}"
+        f"｜摘要不带事件/结果={'events' not in failed_summary and 'result' not in failed_summary}"
+        f"｜成功运行无可续跑={bool(gen_runs) and gen_runs[0].get('retry_nodes') == []}={history_ok}"
+    )
+
+    # 6d) 运行统计：只读聚合最近已结束运行。同一生成台再跑一次（应全命中缓存），
+    #     断言成功率、复用率、岗位画像与部门汇总都能从作业回放；统计本身不新建作业。
+    runs_before_stats = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    restat = factory_store.store.start_run(project_id, "default")
+    restat_job = factory_store.store.job(restat["id"], "default") or {}
+    deadline = time.time() + 180
+    while restat_job.get("status") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.2)
+        restat_job = factory_store.store.job(restat["id"], "default") or restat_job
+    gen_stats = factory_store.store.run_stats(project_id, "default", limit=50)
+    gen_stats_window1 = factory_store.store.run_stats(project_id, "default", limit=1)
+    gen_stats_nodes = {row["node_id"]: row for row in gen_stats["nodes"]}
+    cut_stats = gen_stats_nodes.get("n-cut") or {}
+    try:
+        factory_store.store.run_stats(project_id, "acme")
+        stats_tenant_ok = False
+    except KeyError:
+        stats_tenant_ok = True
+    runs_after_stats = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    stats_ok = (
+        restat_job.get("status") == "ok"
+        and gen_stats.get("window") == 2
+        and gen_stats["runs"]["ok"] == 2
+        and gen_stats["runs"]["error"] == 0
+        and gen_stats["runs"]["success_rate"] == 1.0
+        and gen_stats["runs"]["cached"] == gen_stats["runs"]["delivered"] > 0
+        and gen_stats["runs"]["cache_rate"] == 0.5
+        and cut_stats.get("appearances") == 2
+        and cut_stats.get("ok") == 1
+        and cut_stats.get("cached") == 1
+        and cut_stats.get("cache_rate") == 0.5
+        and any(int(row.get("avg_ms") or 0) > 0 for row in gen_stats["nodes"])
+        and sum(row["appearances"] for row in gen_stats["departments"]) == 2 * len(gen_stats["nodes"])
+        and gen_stats_window1.get("window") == 1
+        and stats_tenant_ok
+        and runs_before_stats + 1 == runs_after_stats  # 多出来的只有二跑，统计本身不建作业
+    )
+    print(
+        f"    运行统计：窗口={gen_stats.get('window')}｜成功率={gen_stats['runs']['success_rate']}"
+        f"｜复用率={gen_stats['runs']['cache_rate']}（{gen_stats['runs']['cached']}/{gen_stats['runs']['delivered']}）"
+        f"｜岗位 n-cut 出现 {cut_stats.get('appearances')} 轮/复用率 {cut_stats.get('cache_rate')}"
+        f"｜窗口收窄={gen_stats_window1.get('window')}｜跨租户不可读={stats_tenant_ok}"
+        f"｜统计不新建作业={runs_before_stats + 1 == runs_after_stats}={stats_ok}"
+    )
+
+    # 6e) 运行对比：首跑（真交付）→ 二跑（全复用），逐岗应记「命中缓存」且产物结构不变；
+    #     对比是纯读派生，不新建作业；同一次运行/跨租户按口径拒绝。
+    runs_before_compare = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    gen_compare = factory_store.store.compare_runs(project_id, "default", accepted["id"], restat["id"])
+    gen_compare_nodes = {row["node_id"]: row for row in gen_compare["nodes"]}
+    compare_cut = gen_compare_nodes.get("n-cut") or {}
+    try:
+        factory_store.store.compare_runs(project_id, "default", accepted["id"], accepted["id"])
+        compare_same_ok = False
+    except ValueError as error:
+        compare_same_ok = "同一次运行" in str(error)
+    try:
+        factory_store.store.compare_runs(project_id, "acme", accepted["id"], restat["id"])
+        compare_tenant_ok = False
+    except KeyError:
+        compare_tenant_ok = True
+    runs_after_compare = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    compare_ok = (
+        gen_compare["base"]["status"] == "ok"
+        and gen_compare["target"]["status"] == "ok"
+        and gen_compare["base"]["delivered"] > 0
+        and gen_compare["target"]["cached"] > 0
+        and gen_compare["changes"]["cache_hit"] == len(gen_compare["nodes"])
+        and gen_compare["changes"]["regressed"] == 0
+        and gen_compare["changes"]["still_failed"] == 0
+        and gen_compare["changes"]["output_changed"] == 0  # 全缓存，产物结构应逐岗一致
+        and compare_cut.get("change") == "cache_hit"
+        and (compare_cut.get("target") or {}).get("cached") is True
+        and int(compare_cut.get("elapsed_delta_ms") or 0) <= 0
+        and compare_same_ok
+        and compare_tenant_ok
+        and runs_before_compare == runs_after_compare
+    )
+    print(
+        f"    运行对比：{gen_compare['base']['status']}→{gen_compare['target']['status']}"
+        f"｜命中缓存={gen_compare['changes']['cache_hit']}/{len(gen_compare['nodes'])}"
+        f"｜回退/仍失败={gen_compare['changes']['regressed']}/{gen_compare['changes']['still_failed']}"
+        f"｜产物结构变化={gen_compare['changes']['output_changed']}"
+        f"｜同一次拒绝={compare_same_ok}｜跨租户不可读={compare_tenant_ok}"
+        f"｜对比不新建作业={runs_before_compare == runs_after_compare}={compare_ok}"
+    )
+
+    # 6f) 未结束的运行不能拿来对比：结果还会变。用临时项目 + 一条假的 running 作业钉住口径，
+    #     最后删项目一并回收，不污染真实作业。
+    busy_rec = factory_store.store.create(
+        "自检对比运行中",
+        "default",
+        graph={"nodes": [{"id": "t", "type": "text_input", "pos": [0, 0], "params": {"text": "正文"}}], "edges": []},
+    )
+    busy_project = str(busy_rec["id"])
+    busy_accepted = factory_store.store.start_run(busy_project, "default")
+    busy_job = factory_store.store.job(busy_accepted["id"], "default") or {}
+    deadline = time.time() + 30
+    while busy_job.get("status") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.1)
+        busy_job = factory_store.store.job(busy_accepted["id"], "default") or busy_job
+    fake_running = {
+        "id": "frun-doctor-busy",
+        "task_id": busy_project,
+        "project_id": busy_project,
+        "tenant": "default",
+        "kind": "factory_run",
+        "status": "running",
+        "created_at": "2026-01-01 00:00:00",
+        "updated_at": "2026-01-01 00:00:00",
+        "targets": [],
+        "force": False,
+        "progress": 0.1,
+        "plan_size": 1,
+        "counts": {},
+        "elapsed_ms": 0,
+        "events": [],
+        "nodes": {},
+        "error": "",
+        "result": None,
+    }
+    factory_store.store._backend.create(fake_running)
+    try:
+        factory_store.store.compare_runs(busy_project, "default", busy_accepted["id"], "frun-doctor-busy")
+        compare_busy_ok = False
+    except factory_store.RunUnfinished:
+        compare_busy_ok = True
+    finally:
+        try:
+            factory_store.store.delete(busy_project, "default")
+        except factory_store.ProjectBusy:
+            compare_busy_ok = False
+    print(f"    对比运行中：未结束拒绝对比（409 口径）={compare_busy_ok}")
+
+    # 6g) 失败热点：跑一个空正文项目，统计必须点名失败岗位、最近错误与现场 job_id。
+    fail_rec = factory_store.store.create(
+        "自检统计失败",
+        "default",
+        graph={"nodes": [{"id": "t", "type": "text_input", "pos": [0, 0], "params": {"text": ""}}], "edges": []},
+    )
+    stats_fail_project = str(fail_rec["id"])
+    fail_accepted = factory_store.store.start_run(stats_fail_project, "default")
+    fail_job = factory_store.store.job(fail_accepted["id"], "default") or {}
+    deadline = time.time() + 60
+    while fail_job.get("status") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.1)
+        fail_job = factory_store.store.job(fail_accepted["id"], "default") or fail_job
+    fail_stats = factory_store.store.run_stats(stats_fail_project, "default")
+    failure_row = (fail_stats.get("failures") or [{}])[0]
+    fail_node = (fail_stats.get("nodes") or [{}])[0]
+    stats_fail_ok = (
+        fail_job.get("status") == "error"
+        and fail_stats["runs"]["total"] == 1
+        and fail_stats["runs"]["error"] == 1
+        and fail_stats["runs"]["success_rate"] == 0.0
+        and fail_node.get("node_id") == "t"
+        and fail_node.get("error") == 1
+        and "文本输入节点为空" in str(fail_node.get("last_error") or "")
+        and failure_row.get("job_id") == fail_accepted["id"]
+        and failure_row.get("status") == "error"
+        and bool(fail_stats["departments"])
+        and fail_stats["departments"][0]["nodes"] == 1
+    )
+    # 修好文本再跑一次：同一岗位从 error → ok，对比必须点名「恢复」；跨项目/未知作业不可比。
+    factory_store.store.save_graph(
+        stats_fail_project,
+        "default",
+        {
+            "nodes": [{"id": "t", "type": "text_input", "pos": [0, 0], "params": {"text": "现在有正文"}}],
+            "edges": [],
+        },
+    )
+    fix_accepted = factory_store.store.start_run(stats_fail_project, "default")
+    fix_job = factory_store.store.job(fix_accepted["id"], "default") or {}
+    deadline = time.time() + 60
+    while fix_job.get("status") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.1)
+        fix_job = factory_store.store.job(fix_accepted["id"], "default") or fix_job
+    recovered = factory_store.store.compare_runs(
+        stats_fail_project, "default", fail_accepted["id"], fix_accepted["id"]
+    )
+    recovered_row = (recovered.get("nodes") or [{}])[0]
+    try:
+        factory_store.store.compare_runs(project_id, "default", fail_accepted["id"], fix_accepted["id"])
+        compare_cross_ok = False
+    except KeyError:
+        compare_cross_ok = True
+    try:
+        factory_store.store.compare_runs(stats_fail_project, "default", "frun-doctor-missing", fix_accepted["id"])
+        compare_missing_ok = False
+    except KeyError:
+        compare_missing_ok = True
+    compare_recovered_ok = (
+        fix_job.get("status") == "ok"
+        and recovered["base"]["failed"] == 1
+        and recovered["target"]["failed"] == 0
+        and recovered["changes"]["recovered"] == 1
+        and recovered["changes"]["regressed"] == 0
+        and recovered_row.get("change") == "recovered"
+        and recovered_row.get("error_changed") is True
+        and (recovered_row.get("target") or {}).get("error") == ""
+        and compare_cross_ok
+        and compare_missing_ok
+    )
+    print(
+        f"    对比恢复：{recovered_row.get('change')}（error→ok）"
+        f"｜错误消失={recovered_row.get('error_changed')}"
+        f"｜跨项目/未知作业不可比={compare_cross_ok and compare_missing_ok}={compare_recovered_ok}"
+    )
+    try:
+        factory_store.store.delete(stats_fail_project, "default")
+    except factory_store.ProjectBusy:
+        stats_fail_ok = False
+    print(
+        f"    失败统计：失败运行={fail_stats['runs']['error']}/{fail_stats['runs']['total']}"
+        f"｜失败热点={failure_row.get('node_id')}（{failure_row.get('job_id')}）"
+        f"｜最近错误点名空文本={'文本输入节点为空' in str(fail_node.get('last_error') or '')}={stats_fail_ok}"
+    )
+
+    # 6h) 岗位级强制重跑：只跳过指定岗位的缓存，上游与其余岗位照常复用；
+    #     不存在的岗位点名拒绝，存在但不在本次计划闭包内的强跑如实报 ignored。
+    #     预检与实跑必须同口径，且统计能把局部强跑与整轮强制区分开。
+    runs_before_force = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    force_preview = factory_store.store.preview(
+        project_id, "default", targets=["n-cut"], force_nodes=["n-cut"]
+    )
+    force_preview_rows = {row["node_id"]: row for row in force_preview["nodes"]}
+    force_preview_cut = force_preview_rows.get("n-cut") or {}
+    force_preview_upstream = force_preview_rows.get("n-sb") or {}
+    ignored_preview = factory_store.store.preview(
+        project_id, "default", targets=["n-sb"], force_nodes=["n-cut"]
+    )
+    try:
+        factory_store.store.preview(project_id, "default", force_nodes=["n-ghost"])
+        force_unknown_ok = False
+    except ValueError as error:
+        force_unknown_ok = "n-ghost" in str(error)
+    runs_after_force_preview = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    force_accepted = factory_store.store.start_run(
+        project_id, "default", targets=["n-cut"], force_nodes=["n-cut"]
+    )
+    force_job = factory_store.store.job(force_accepted["id"], "default") or {}
+    deadline = time.time() + 180
+    while force_job.get("status") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.2)
+        force_job = factory_store.store.job(force_accepted["id"], "default") or force_job
+    force_counts = force_job.get("counts") or {}
+    force_result_nodes = (force_job.get("result") or {}).get("nodes") or {}
+    force_cut_result = force_result_nodes.get("n-cut") or {}
+    force_sb_result = force_result_nodes.get("n-sb") or {}
+    force_stats = factory_store.store.run_stats(project_id, "default", limit=10)
+    force_ok = (
+        force_preview["counts"]["total"] == len(force_preview["plan"])
+        and force_preview["counts"]["cached"] == len(force_preview["plan"]) - 1
+        and force_preview["counts"]["run"] == 1
+        and force_preview["force_nodes"] == ["n-cut"]
+        and force_preview_cut.get("state") == "run"
+        and "强制重跑" in str(force_preview_cut.get("reason") or "")
+        and force_preview_upstream.get("state") == "cached"
+        and ignored_preview.get("force_nodes") == []
+        and ignored_preview.get("ignored_force_nodes") == ["n-cut"]
+        and force_unknown_ok
+        and runs_after_force_preview == runs_before_force
+        and force_job.get("status") == "ok"
+        and force_job.get("force") is False
+        and force_job.get("force_nodes") == ["n-cut"]
+        and force_job.get("ignored_force_nodes") == []
+        and force_job.get("plan_size") == len(force_preview["plan"])
+        and force_counts.get("ok") == 1
+        and force_counts.get("cached") == len(force_preview["plan"]) - 1
+        and force_counts.get("error") == 0
+        and force_cut_result.get("cached") is False
+        and force_cut_result.get("forced") is True
+        and force_sb_result.get("cached") is True
+        and (force_stats["runs"].get("forced") or 0) == 0
+        and (force_stats["runs"].get("partial_forced") or 0) >= 1
+    )
+    print(
+        f"    岗位强跑：预检重跑={force_preview['counts']['run']}/{force_preview['counts']['total']}"
+        f"｜实跑 交付 {force_counts.get('ok')}/复用 {force_counts.get('cached')}"
+        f"｜强跑岗位={force_job.get('force_nodes')}｜上游仍复用={force_sb_result.get('cached') is True}"
+        f"｜计划外忽略={ignored_preview.get('ignored_force_nodes')}｜未知强跑拒绝={force_unknown_ok}"
+        f"｜统计区分局部强跑={(force_stats['runs'].get('partial_forced') or 0) >= 1}={force_ok}"
+    )
+
+    # 6i) 本轮参数覆盖：补丁只叠加到有效图，保存的画布逐字节不变；预检、实跑与
+    #     作业回显同口径。缓存仍按签名单槽命中：no-op 补丁照实复用（不假装重跑），
+    #     改签名则自然重跑，计划外补丁如实 ignored，静音岗位拒绝改参。
+    runs_before_override = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    noop_preview = factory_store.store.preview(
+        project_id,
+        "default",
+        targets=["n-cut"],
+        param_overrides={"n-cut": {"transition": "按分镜"}},
+    )
+    noop_row = {row["node_id"]: row for row in noop_preview["nodes"]}.get("n-cut") or {}
+    changed_preview = factory_store.store.preview(
+        project_id,
+        "default",
+        targets=["n-cut"],
+        param_overrides={"n-cut": {"transition": "硬切"}},
+    )
+    changed_rows = {row["node_id"]: row for row in changed_preview["nodes"]}
+    changed_cut = changed_rows.get("n-cut") or {}
+    changed_upstream = changed_rows.get("n-sb") or {}
+    ignored_preview = factory_store.store.preview(
+        project_id,
+        "default",
+        targets=["n-sb"],
+        param_overrides={"n-cut": {"transition": "硬切"}},
+    )
+    rejected: dict[str, bool] = {}
+    for label, kwargs in (
+        ("unknown", {"param_overrides": {"n-ghost": {"transition": "硬切"}}}),
+        ("shape", {"param_overrides": []}),
+        ("patch", {"param_overrides": {"n-cut": "硬切"}}),
+    ):
+        try:
+            factory_store.store.preview(project_id, "default", targets=["n-cut"], **kwargs)
+            rejected[label] = False
+        except ValueError:
+            rejected[label] = True
+    muted_rec = factory_store.store.create(
+        "自检静音改参",
+        "default",
+        {"nodes": [{"id": "t", "type": "text_input", "pos": [0, 0], "muted": True}], "edges": []},
+    )
+    muted_project = str(muted_rec["id"])
+    try:
+        factory_store.store.start_run(muted_project, "default", param_overrides={"t": {"text": "改"}})
+        rejected["muted"] = False
+    except ValueError as error:
+        rejected["muted"] = "已静音" in str(error)
+    finally:
+        try:
+            factory_store.store.delete(muted_project, "default")
+        except factory_store.ProjectBusy:
+            rejected["muted"] = False
+    runs_after_override_preview = len(factory_store.store.list_runs(project_id, "default", limit=100))
+    override_preview_ok = (
+        noop_preview.get("counts", {}).get("total") == len(noop_preview["plan"])
+        and noop_preview.get("counts", {}).get("cached") == len(noop_preview["plan"])
+        and noop_preview.get("param_overrides") == {"n-cut": {"transition": "按分镜"}}
+        and noop_row.get("state") == "cached"
+        and noop_row.get("override_keys") == ["transition"]
+        and "与缓存签名一致" in str(noop_row.get("reason") or "")
+        and changed_preview.get("counts", {}).get("run") == 1
+        and changed_preview.get("counts", {}).get("cached") == len(changed_preview["plan"]) - 1
+        and changed_cut.get("state") == "run"
+        and changed_cut.get("override_keys") == ["transition"]
+        and "改变签名" in str(changed_cut.get("reason") or "")
+        and changed_upstream.get("state") == "cached"
+        and ignored_preview.get("param_overrides") == {}
+        and ignored_preview.get("ignored_param_overrides") == ["n-cut"]
+        and all(rejected.values())
+        and runs_after_override_preview == runs_before_override
+    )
+    print(
+        f"    本轮改参预检：no-op 仍复用缓存={noop_row.get('state') == 'cached'}"
+        f"｜改签名重跑={changed_preview.get('counts', {}).get('run')}/{changed_preview.get('counts', {}).get('total')}"
+        f"｜上游仍复用={changed_upstream.get('state') == 'cached'}"
+        f"｜计划外如实忽略={ignored_preview.get('ignored_param_overrides')}"
+        f"｜拒绝未知/结构/补丁/静音={all(rejected.values())}={override_preview_ok}"
+    )
+
+    override_accepted = factory_store.store.start_run(
+        project_id,
+        "default",
+        targets=["n-cut"],
+        param_overrides={"n-cut": {"transition": "硬切"}},
+    )
+    override_job = factory_store.store.job(override_accepted["id"], "default") or {}
+    deadline = time.time() + 180
+    while override_job.get("status") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.2)
+        override_job = factory_store.store.job(override_accepted["id"], "default") or override_job
+    override_counts = override_job.get("counts") or {}
+    override_result_nodes = (override_job.get("result") or {}).get("nodes") or {}
+    override_cut_result = override_result_nodes.get("n-cut") or {}
+    override_sb_result = override_result_nodes.get("n-sb") or {}
+    override_stats = factory_store.store.run_stats(project_id, "default", limit=10)
+    saved_project = factory_store.store.get(project_id, "default") or {}
+    saved_cut = next(
+        (node for node in (saved_project.get("graph") or {}).get("nodes") or [] if node.get("id") == "n-cut"),
+        {},
+    )
+    saved_last = saved_project.get("last_run") or {}
+    # 缓存最新语义：改参跑完后缓存槽是「硬切」签名，普通预检会如实要求重跑，不暗中回滚
+    latest_preview = factory_store.store.preview(project_id, "default", targets=["n-cut"])
+    latest_row = {row["node_id"]: row for row in latest_preview["nodes"]}.get("n-cut") or {}
+    param_override_ok = (
+        override_preview_ok
+        and override_job.get("status") == "ok"
+        and override_job.get("param_overrides") == {"n-cut": {"transition": "硬切"}}
+        and override_job.get("ignored_param_overrides") == []
+        and any(
+            row.get("type") == "run.override" and row.get("node_ids") == ["n-cut"]
+            for row in (override_job.get("events") or [])
+        )
+        and override_counts.get("ok") == 1
+        and override_counts.get("cached") == len(changed_preview["plan"]) - 1
+        and override_counts.get("error") == 0
+        and override_cut_result.get("cached") is False
+        and override_cut_result.get("overridden") is True
+        and override_cut_result.get("forced") is False
+        and override_sb_result.get("cached") is True
+        and (override_stats.get("runs", {}).get("overridden") or 0) >= 1
+        and saved_last.get("override_nodes") == ["n-cut"]
+        and saved_last.get("ignored_override_nodes") == []
+        and "transition" not in (saved_cut.get("params") or {})
+        and latest_row.get("state") == "run"
+    )
+    print(
+        f"    本轮改参实跑：交付 {override_counts.get('ok')}/复用 {override_counts.get('cached')}"
+        f"｜改参执行={override_cut_result.get('overridden')}｜上游仍复用={override_sb_result.get('cached') is True}"
+        f"｜统计含改参 {(override_stats.get('runs', {}).get('overridden') or 0)} 轮"
+        f"｜画布未被改写={'transition' not in (saved_cut.get('params') or {})}"
+        f"｜缓存已换新签名（普通预检重跑）={latest_row.get('state') == 'run'}={param_override_ok}"
+    )
+
+    # 7) 完整产物回读（作业只给摘要，node_outputs 才带时间轴全量）
+    try:
+        node_out = factory_store.store.node_outputs(project_id, "default", "n-cut")
+        readback_ok = "timeline" in node_out["outputs"] and isinstance(node_out["outputs"]["timeline"], dict)
+    except KeyError:
+        readback_ok = False
+    try:
+        factory_store.store.node_outputs(project_id, "default", "no-such-node")
+        missing_node_ok = False
+    except KeyError:
+        missing_node_ok = True
+    print(f"    产物回读：剪辑时间轴可取={readback_ok}｜未知岗位回 404（不返回空产物）={missing_node_ok}")
+
+    # 8) 交付包：工作流 + 全部产物 + manifest 打进一个 zip；重复打包覆盖同一份；
+    #    无产物 / 跨租户 / 运行中一律拒绝，而不是打出半成品让人误以为交付完成。
+    import json
+    import zipfile
+
+    archive, bundle_name = factory_store.store.build_bundle(project_id, "default")
+    with zipfile.ZipFile(archive) as bundle:
+        entries = set(bundle.namelist())
+        manifest = json.loads(bundle.read("manifest.json"))
+        packed_project = json.loads(bundle.read("project.json"))
+        readme = bundle.read("README.txt").decode("utf-8")
+        has_film = "timeline.json" in entries
+        film_json = json.loads(bundle.read("timeline.json")) if has_film else {}
+    manifest_film = manifest.get("film") or {}
+    packed_artifacts = sorted(name for name in entries if name.startswith("artifacts/"))
+    bundle_simulated = set(manifest.get("simulated_nodes") or [])
+    project_nodes = len((factory_store.store.get(project_id, "default") or {}).get("graph", {}).get("nodes") or [])
+    manifest_files = manifest.get("files") or []
+    bundle_ok = (
+        bundle_name.endswith("-delivery.zip")
+        and {"README.txt", "manifest.json", "project.json"} <= entries
+        and bool(packed_artifacts)
+        and manifest.get("format") == "creatoragent.factory.delivery"
+        and (manifest.get("project") or {}).get("id") == project_id
+        and manifest.get("artifact_count") == len(packed_artifacts) == len(manifest_files)
+        and manifest.get("total_bytes") == sum(int(row.get("bytes") or 0) for row in manifest_files)
+        and all(len(str(row.get("sha256") or "")) == 64 for row in manifest_files)
+        and len((packed_project.get("graph") or {}).get("nodes") or []) == project_nodes
+        and {"n-key", "n-gen"} <= bundle_simulated
+        and "诚实边界" in readme
+        and "本轮改参：n-cut" in readme
+    )
+    # 8a) 回看闭环：成片时间轴与它引用的素材一起装箱，拆包就能拼回那条片子
+    project_node_ids = {str(row.get("id")) for row in (packed_project.get("graph") or {}).get("nodes") or []}
+    film_refs = [str(row) for row in (manifest_film.get("refs") or [])]
+    film_ok = (
+        has_film
+        and bool(manifest_film)
+        and str(manifest_film.get("node_id") or "") in project_node_ids
+        and len(film_json.get("shots") or []) > 0
+        and float(film_json.get("duration_s") or 0) > 0
+        and int(manifest_film.get("shots") or 0) == len(film_json.get("shots") or [])
+        and bool(film_refs)
+        and all(f"artifacts/{ref}" in entries for ref in film_refs)
+        and "timeline.json" in readme
+    )
+    # 8a-2) 回看口径单一真相：放映室用的 film 端点与包内 timeline.json 必须是同一条片子
+    jobs_before_film = len(factory_store.store._project_jobs(project_id, "default"))
+    live = factory_store.store.film(project_id, "default")
+    live_film = live.get("film") or {}
+    live_timeline = live.get("timeline") or {}
+    film_live_ok = (
+        live_film.get("node_id") == manifest_film.get("node_id")
+        and live_film.get("port") == manifest_film.get("port")
+        and int(live_film.get("shots") or 0) == int(manifest_film.get("shots") or 0)
+        and float(live_film.get("duration_s") or 0) == float(manifest_film.get("duration_s") or 0)
+        and live_timeline == film_json
+    )
+    try:
+        factory_store.store.film(project_id, "acme")
+        film_tenant_ok = False
+    except KeyError:
+        film_tenant_ok = True
+    film_readonly_ok = len(factory_store.store._project_jobs(project_id, "default")) == jobs_before_film
+    # 8a-3) 回看对账：刚交付完屏幕这条==刚装箱那条（matches True）；改过内容后须翻脸判 False
+    #     交付包固定名覆盖、旧版字节盘上不存在——对账不比旧包字节，只比成片内容指纹，诚实回答“改了没”
+    film_fp = str(manifest_film.get("fingerprint") or "")
+    recon_delivered = next(
+        (row for row in factory_store.store.delivery_log(project_id, "default")["entries"]
+         if row.get("event") == "delivered"),
+        {},
+    )
+    live_delivery = live.get("delivery") or {}
+    film_reconcile_ok = (
+        len(film_fp) == 64
+        and str(recon_delivered.get("film_fingerprint") or "") == film_fp
+        and str(live_delivery.get("film_fingerprint") or "") == film_fp
+        and len(str(live_delivery.get("live_fingerprint") or "")) == 64
+        and live_delivery.get("matches") is True
+    )
+    # 篡改缓存（把这条成片时长改一下）→ 对账应立刻判“不一致”；随后原样还回，不污染后续 bundle/台账断言
+    ws_film = factory_store.workspace_for(project_id)
+    cache_orig = ws_film.load_cache()
+    cache_drift = json.loads(json.dumps(cache_orig))
+    _fnode, _fport = str(live_film.get("node_id")), str(live_film.get("port"))
+    cache_drift[_fnode]["outputs"][_fport]["duration_s"] = float(
+        (cache_drift[_fnode]["outputs"][_fport] or {}).get("duration_s") or 0) + 0.5
+    ws_film.save_cache(cache_drift)
+    drift_matches = (factory_store.store.film(project_id, "default").get("delivery") or {}).get("matches")
+    ws_film.save_cache(cache_orig)
+    film_drift_ok = drift_matches is False
+    film_ok = (
+        film_ok and film_live_ok and film_tenant_ok and film_readonly_ok
+        and film_reconcile_ok and film_drift_ok
+    )
+    # 再打一次：固定文件名覆盖，exports 里只留一份 delivery.zip，不留 .tmp
+    archive_again, _ = factory_store.store.build_bundle(project_id, "default")
+    exports = sorted(path.name for path in archive.parent.iterdir())
+    bundle_stable_ok = archive_again == archive and exports == [factory_store.BUNDLE_NAME]
+
+    empty_rec = factory_store.store.create("自检未跑项目", "default", presets.graph_dict("script"))
+    # 从没跑过的工作流：图本身没错，但终端岗位未交付——验收门必须拦下，不许打出半成品 zip
+    try:
+        factory_store.store.build_bundle(str(empty_rec["id"]), "default")
+        bundle_empty_ok = False
+    except factory_store.AcceptanceBlocked as error:
+        bundle_empty_ok = "验收未通过" in str(error) and "终端岗位" in str(error)
+    finally:
+        factory_store.store.delete(str(empty_rec["id"]), "default")
+    try:
+        factory_store.store.build_bundle(project_id, "acme")
+        bundle_tenant_ok = False
+    except KeyError:
+        bundle_tenant_ok = True
+    # 运行中拒打包：在活作业表里挂一个 running 行，稳定命中守卫（不真排队跑一轮）
+    with factory_store.store._lock:
+        factory_store.store._live["frun-doctor-busy"] = {"id": "frun-doctor-busy", "task_id": project_id, "status": "running"}
+    try:
+        factory_store.store.build_bundle(project_id, "default")
+        bundle_busy_ok = False
+    except factory_store.ProjectBusy:
+        bundle_busy_ok = True
+    finally:
+        with factory_store.store._lock:
+            factory_store.store._live.pop("frun-doctor-busy", None)
+    print(
+        f"    交付包：zip 条目 {len(entries)}（产物 {len(packed_artifacts)}）｜manifest/README 校验={bundle_ok}"
+        f"｜成片回看闭环（timeline.json {len(film_json.get('shots') or [])} 镜·引用全在包内·与 film 端点同一条"
+        f"·回看对账（刚交付一致={film_reconcile_ok}/改过翻脸={film_drift_ok}））={film_ok}"
+        f"｜重复打包覆盖同一份={bundle_stable_ok}｜未跑拒打包={bundle_empty_ok}"
+        f"｜跨租户拒绝={bundle_tenant_ok}｜运行中拒打包={bundle_busy_ok}"
+    )
+
+    # 8b) 交付验收（打包前那道门）：跑完的生成台可交付（带 simulated 警告不阻断）；
+    #     从没跑过的项目终端未交付即阻断；删掉一个被引用的产物文件后验收改判阻断且拒打包。
+    acc_report = factory_store.store.acceptance(project_id, "default")
+    victim = ""
+    for row in acc_report["deliverables"]:
+        if row.get("refs"):
+            victim = row["refs"][0]
+            break
+    victim_ok = False
+    if victim:
+        victim_path = workspace.artifacts_dir / victim
+        backup = victim_path.read_bytes()
+        try:
+            victim_path.unlink()
+            acc_missing = factory_store.store.acceptance(project_id, "default")
+            try:
+                factory_store.store.build_bundle(project_id, "default")
+                gate_ok = False
+            except factory_store.AcceptanceBlocked:
+                gate_ok = True
+            victim_ok = (
+                acc_missing["verdict"] == "blocked"
+                and acc_missing["stats"]["refs_missing"] >= 1
+                and any(r["code"] == "artifact_missing" for r in acc_missing["issues"])
+                and gate_ok
+            )
+        finally:
+            victim_path.write_bytes(backup)
+    notrun_rec = factory_store.store.create("自检未跑验收", "default", presets.graph_dict("gen"))
+    notrun_project = str(notrun_rec["id"])
+    acc_blocked = factory_store.store.acceptance(notrun_project, "default")
+    factory_store.store.delete(notrun_project, "default")
+    st = acc_report["stats"]
+    acceptance_ok = (
+        acc_report["ok"] is True
+        and acc_report["verdict"] == "warn"
+        and st["refs_missing"] == 0
+        and st["simulated_nodes"] > 0
+        and st["terminals_ready"] == st["terminals"]
+        and acc_blocked["verdict"] == "blocked"
+        and acc_blocked["counts"]["error"] >= 1
+        and any(r["code"] == "terminal_not_delivered" for r in acc_blocked["issues"])
+        and victim_ok
+    )
+    # 8c) 交付台账（append-only 留痕）：前面在 project_id 上打过包——两次放行（首次 +
+    #     重复覆盖）各一条 delivered，删产物那次一条 blocked；只读且跨租户不可读。
+    jobs_before = len(factory_store.store._project_jobs(project_id, "default"))
+    ledger = factory_store.store.delivery_log(project_id, "default")
+    led_entries = ledger["entries"]
+    led_delivered = [row for row in led_entries if row["event"] == "delivered"]
+    led_blocked = [row for row in led_entries if row["event"] == "blocked"]
+    # 新在前：最后一次打包是删产物那轮的 blocked（victim 还原后未再打包）
+    ledger_new_first_ok = bool(led_entries) and led_entries[0]["event"] == "blocked"
+    ledger_delivered_ok = (
+        len(led_delivered) >= 2
+        and all(len(str(row.get("archive_sha256") or "")) == 64 for row in led_delivered)
+        and all(int(row.get("archive_bytes") or 0) > 0 for row in led_delivered)
+        and all(row.get("ok") is True and row.get("verdict") in ("pass", "warn") for row in led_delivered)
+    )
+    ledger_blocked_ok = (
+        len(led_blocked) >= 1
+        and all(row.get("ok") is False and row.get("verdict") == "blocked" for row in led_blocked)
+        and any(row.get("blockers") and int(row.get("refs_missing") or 0) >= 1 for row in led_blocked)
+    )
+    ledger_summary_ok = (
+        ledger["summary"]["delivered"] == len(led_delivered)
+        and ledger["summary"]["blocked"] == len(led_blocked)
+        and ledger["summary"]["total"] == len(led_entries)
+        and ledger["summary"]["capped"] == factory_store.MAX_DELIVERIES
+        and ledger["summary"]["last_archive_sha256"]
+    )
+    try:
+        factory_store.store.delivery_log(project_id, "acme")
+        ledger_tenant_ok = False
+    except KeyError:
+        ledger_tenant_ok = True
+    ledger_readonly_ok = len(factory_store.store._project_jobs(project_id, "default")) == jobs_before
+    ledger_ok = (
+        ledger_new_first_ok
+        and ledger_delivered_ok
+        and ledger_blocked_ok
+        and ledger_summary_ok
+        and ledger_tenant_ok
+        and ledger_readonly_ok
+    )
+    print(
+        f"    交付验收：跑完生成台={acc_report['verdict']}（终端 {st['terminals_ready']}/{st['terminals']}"
+        f"·引用核对 {st['refs_checked']} 缺 {st['refs_missing']}·占位 {st['simulated_nodes']}）"
+        f"｜未跑项目阻断={acc_blocked['verdict'] == 'blocked'}｜删产物后阻断且拒打包={victim_ok}={acceptance_ok}"
+    )
+    print(
+        f"    交付台账：共 {ledger['summary']['total']} 条（放行 {ledger['summary']['delivered']}·拦下 {ledger['summary']['blocked']}）"
+        f"｜新在前={ledger_new_first_ok}·放行带 sha/大小={ledger_delivered_ok}·拦下带 blockers={ledger_blocked_ok}"
+        f"｜汇总={ledger_summary_ok}·跨租户拒读={ledger_tenant_ok}·只读不建作业={ledger_readonly_ok}={ledger_ok}"
+    )
+
+    # 9) 租户隔离 + 产物路径边界 + 删除回收（目录与作业一起清）
+    cross_get = factory_store.store.get(project_id, "acme") is None
+    cross_run = False
+    try:
+        factory_store.store.start_run(project_id, "acme")
+    except KeyError:
+        cross_run = True
+    escape_ok = False
+    try:
+        factory_store.store.artifact_path(project_id, "../../etc/passwd")
+    except ValueError:
+        escape_ok = True
+    root_dir = factory_store.FACTORY_DIR / project_id
+    deleted = factory_store.store.delete(project_id, "default")
+    reclaim_ok = deleted.get("deleted") == project_id and not root_dir.exists()
+    tenant_path_ok = cross_get and cross_run and escape_ok
+    print(f"    租户隔离+路径边界：跨租户不可读/不可跑/越界拒绝={tenant_path_ok}｜删除回收目录={reclaim_ok}")
+
+    # 10) 旁路作业 pg 表登记完整性（静态守卫，防「新通道忘了建表」这一类 bug）：
+    #    扫 app/ 源码收集所有 make_backend(...) / _TABLE = "<name>" 引用的 *_jobs 表名，
+    #    逐个断言已在 pg_schema.SCHEMA_STATEMENTS 建表。工厂曾漏登记即由此拦截。
+    import re as _re
+    from pathlib import Path as _Path
+
+    from app.core import pg_schema as _pg_schema
+
+    app_root = _Path(__file__).resolve().parent.parent / "app"
+    job_tables: set[str] = set()
+    for py in app_root.rglob("*.py"):
+        text = py.read_text(encoding="utf-8", errors="ignore")
+        job_tables.update(_re.findall(r'_TABLE\s*=\s*"(\w+_jobs)"', text))
+        job_tables.update(_re.findall(r'make_backend\([^)]*"(\w+_jobs)"', text))
+    ddl_blob = "\n".join(_pg_schema.SCHEMA_STATEMENTS)
+    unregistered = sorted(
+        table for table in job_tables
+        if f"CREATE TABLE IF NOT EXISTS {table}" not in ddl_blob
+    )
+    pg_tables_ok = bool(job_tables) and not unregistered
+    print(
+        f"    旁路作业 pg 表登记：{len(job_tables)} 张 *_jobs 表全部建表={pg_tables_ok}"
+        + (f"｜漏登记={unregistered}" if unregistered else "")
+    )
+
+    # 11) 重启回收：进程一退后台线程就没了，落盘里还挂在 queued/running 的作业必须如实
+    #     标成中断（写 run.interrupted），已完成岗位的行与产物原样保留、重跑可复用缓存。
+    class _StaleJobs:
+        def __init__(self, rows: list[dict]) -> None:
+            self.rows, self.wrote = rows, []
+
+        def snapshot(self) -> list[dict]:
+            return [dict(row) for row in self.rows]
+
+        def write_back(self, rows: list[dict]) -> None:
+            self.wrote = rows
+
+    stale = _StaleJobs([
+        {
+            "id": "frun-doctor-stale",
+            "status": "running",
+            "error": "",
+            "events": [],
+            "nodes": {"a": {"status": "running"}, "b": {"status": "ok"}},
+        },
+        {
+            "id": "frun-doctor-cancelling",
+            "status": "cancelling",
+            "error": "",
+            "events": [],
+            "nodes": {"c": {"status": "cancelling"}},
+        },
+        {"id": "frun-doctor-done", "status": "ok", "events": []},
+    ])
+    moved = factory_store.recover_interrupted(stale)
+    row = stale.wrote[0] if stale.wrote else {}
+    recover_ok = (
+        moved == 2
+        and len(stale.wrote) == 2
+        and row.get("status") == "error"
+        and "进程重启" in str(row.get("error") or "")
+        and (row.get("events") or [])[-1].get("type") == "run.interrupted"
+        and (row.get("nodes") or {}).get("a", {}).get("status") == "error"
+        and (row.get("nodes") or {}).get("b", {}).get("status") == "ok"
+        and (stale.wrote[1].get("nodes") or {}).get("c", {}).get("status") == "error"
+    )
+    print(f"    重启回收：遗留运行（含 cancelling）标中断={moved == 2}｜写 run.interrupted 事件={recover_ok}")
+
+    # 12) 取消只在岗位边界生效 + 增量缓存：首岗交付时 cache.json 已落盘；停止后剩余岗位
+    #     如实标 cancelled。存储层用闸门卡住引擎，确定性验证 cancelling → cancelled 状态机。
+    import threading
+
+    cancel_ws = engine.open_workspace("doctor-factory-cancel", "")
+    shutil.rmtree(cancel_ws.root, ignore_errors=True)
+    cancel_ws = engine.open_workspace("doctor-factory-cancel", "")
+    cancel_graph = graph_model.Graph.model_validate(presets.graph_dict("script"))
+    stop_after_first: dict[str, bool] = {"stop": False, "cache_saved": False}
+
+    def _watch_first(event: dict) -> None:
+        if event.get("type") == "node.finish" and not stop_after_first["stop"]:
+            # node.finish 在增量落盘之后才发出：此刻 cache.json 必须已经包含首个岗位
+            stop_after_first["cache_saved"] = str(event.get("node_id")) in cancel_ws.load_cache()
+            stop_after_first["stop"] = True
+
+    stop_run = engine.run_graph(
+        cancel_graph,
+        cancel_ws,
+        on_event=_watch_first,
+        should_stop=lambda: stop_after_first["stop"],
+    )
+    stop_counts = stop_run.get("counts") or {}
+    stop_cache_ok = (
+        stop_run.get("cancelled") is True
+        and stop_counts.get("ok") == 1
+        and stop_counts.get("cancelled") == len(cancel_graph.nodes) - 1
+        and stop_after_first["cache_saved"]
+        and sum(1 for row in stop_run["runs"].values() if row["status"] == "cancelled") == len(cancel_graph.nodes) - 1
+    )
+
+    gate = {"entered": threading.Event(), "release": threading.Event()}
+    real_run_graph = engine.run_graph
+
+    def _gated_run(graph, workspace, **kwargs):
+        gate["entered"].set()
+        gate["release"].wait(10)
+        return real_run_graph(graph, workspace, **kwargs)
+
+    cancel_rec = factory_store.store.create("自检取消", "default", presets.graph_dict("script"))
+    cancel_project = str(cancel_rec["id"])
+    engine.run_graph = _gated_run
+    try:
+        cancel_accepted = factory_store.store.start_run(cancel_project, "default")
+        gate_entered = gate["entered"].wait(10)
+        requested = factory_store.store.cancel(cancel_accepted["id"], "default")
+        cancelling_now = requested.get("status") == "cancelling"
+        gate["release"].set()
+        deadline = time.time() + 30
+        final_cancel = factory_store.store.job(cancel_accepted["id"], "default") or {}
+        while (
+            final_cancel.get("status") in ("queued", "running", "cancelling")
+            or cancel_accepted["id"] in factory_store.store._threads
+        ) and time.time() < deadline:
+            time.sleep(0.05)
+            final_cancel = factory_store.store.job(cancel_accepted["id"], "default") or final_cancel
+        cancel_counts = final_cancel.get("counts") or {}
+        cancel_retry = factory_store.store.public_job(final_cancel, detail=False).get("retry_nodes") or []
+        cancel_job_ok = (
+            gate_entered
+            and cancelling_now
+            and final_cancel.get("status") == "cancelled"
+            and cancel_counts.get("ok") == 0
+            and cancel_counts.get("cancelled") == len(cancel_graph.nodes)
+            and final_cancel.get("plan_size") == len(cancel_graph.nodes)
+            and final_cancel.get("progress") == 1.0
+            and any(row.get("type") == "run.cancel_requested" for row in (final_cancel.get("events") or []))
+            and set(cancel_retry) == {node.id for node in cancel_graph.nodes}
+        )
+    finally:
+        gate["release"].set()
+        engine.run_graph = real_run_graph
+        try:
+            factory_store.store.delete(cancel_project, "default")
+        except factory_store.ProjectBusy:
+            pass
+
+    print(
+        f"    取消边界+增量缓存：首岗交付即落盘={stop_after_first['cache_saved']}"
+        f"｜剩余岗位标 cancelled={stop_counts.get('cancelled')}/{len(cancel_graph.nodes) - 1}={stop_cache_ok}"
+        f"｜cancelling→cancelled 状态机={cancel_job_ok}｜进度按计划岗位数={final_cancel.get('plan_size')}"
+        f"｜续跑目标={len(cancel_retry)}"
+    )
+
+    # 兜底清掉自检临时工作区，不污染后续运行
+    for extra in ("doctor-factory-script", "doctor-factory-empty", "doctor-factory-need", "doctor-factory-cancel"):
+        shutil.rmtree(engine.open_workspace(extra, "").root, ignore_errors=True)
+
+    ok = bool(
+        registry_ok
+        and panel_ok
+        and preset_ok
+        and cycle_ok
+        and mismatch_ok
+        and structure_ok
+        and engine_ok
+        and empty_ok
+        and need_ok
+        and missing_target_ok
+        and job_ok
+        and history_ok
+        and stats_ok
+        and stats_fail_ok
+        and compare_ok
+        and compare_busy_ok
+        and compare_recovered_ok
+        and force_ok
+        and param_override_ok
+        and readback_ok
+        and missing_node_ok
+        and bundle_ok
+        and film_ok
+        and bundle_stable_ok
+        and bundle_empty_ok
+        and bundle_tenant_ok
+        and bundle_busy_ok
+        and acceptance_ok
+        and ledger_ok
+        and tenant_path_ok
+        and reclaim_ok
+        and pg_tables_ok
+        and recover_ok
+        and stop_cache_ok
+        and cancel_job_ok
+    )
+    if not ok:
+        print("    ! 影视制作工厂异常：请检查 app/factory 的注册表、图校验（含岗位 id 冲突/悬空端点/自环）、引擎缓存、取消状态机、异步作业、运行预检/历史/统计/对比/岗位强跑/本轮改参、交付验收与交付台账/交付包、存储回收。")
+    return ok
+
+
 def main() -> int:
     storage_mode = (os.environ.get("CREATOR_STORAGE") or "file").strip().lower()
     if storage_mode == "pg" and (os.environ.get("CREATOR_DOCTOR_PG") or "") != "1":
@@ -4617,6 +5830,7 @@ def main() -> int:
         dubbing = check_dubbing()
         petgen = check_petgen()
         skillgen = check_skillgen()
+        factory = check_factory()
         copyright_check = check_copyright()
         multimodal = check_multimodal()
         computed = check_compute()
@@ -4652,6 +5866,7 @@ def main() -> int:
         "全自动配音（真实引擎）": dubbing,
         "桌面宠物样例": petgen,
         "创作技能提炼样例": skillgen,
+        "影视制作工厂（岗位图引擎）": factory,
         "二创版权清单": copyright_check,
         "Brief 素材（多模态）": multimodal,
         "确定性计算沙箱": computed,
@@ -4679,6 +5894,12 @@ def main() -> int:
             "（未配图片端点 / 成本熔断 / 无视觉指导）均符合预期；"
             "创作技能提炼样例的作品采集口径、SKILL.md 真落盘与诚实失败"
             "（行内时间戳不误判为字幕 / 未配模型网关 / 成本熔断 / 无作品）均符合预期；"
+            "影视制作工厂的 60 岗位注册表与部门归档、预设展图与静态体检（环路拒执行、端口不匹配只告警）、"
+            "增量缓存（二跑全命中不重跑）、离线通道真落盘（PNG/WAV）与生成岗位 simulated 自报、"
+            "异步作业生命周期、未知目标点名拒绝、岗位边界取消（首岗交付即落盘缓存、剩余岗位标 cancelled、"
+            "cancelling→cancelled、进度按实际计划岗位数）、重启遗留作业回收（保留已完成岗位缓存）、"
+            "交付包（manifest/sha256 与无产物/运行中拒绝）、"
+            "跨租户不可读写、产物路径越界拒绝与项目删除回收均符合预期；"
             "灵感冲浪的会话生命周期与诚实失败（未装 Playwright / 未配白名单 / 未配检索网关均点名）、"
             "在线看视频的**分组截图逐组交 VLM 再一次汇总**与「没配读图网关就只截帧不交模型」（vision_skipped）、"
             "真人式浏览（随机节奏与机器节奏分野、站内搜索成功与「没搜索框就不搜」、点站点自己的「下一页」接着刷列表、"
@@ -4747,6 +5968,8 @@ def main() -> int:
         print("  · 桌面宠物样例异常，请检查 app/core/petgen.py 的状态机、帧落盘与诚实失败。")
     if not skillgen:
         print("  · 创作技能提炼样例异常，请检查 app/core/skillgen.py 的采集口径、落盘与诚实失败。")
+    if not factory:
+        print("  · 影视制作工厂异常，请检查 app/factory 的注册表、图校验、引擎缓存、异步作业、运行预检/历史/统计与存储回收。")
     if not copyright_check:
         print("  · 二创版权清单异常，请检查 app/knowledge/copyright.py 与 A7 的接线。")
     return 1

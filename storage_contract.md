@@ -43,12 +43,13 @@
 | 7 | `digital_human.json` | `app/core/digital_human.py`（`STORE_FILE`） | 数字人渲染作业 | `dh_jobs_pg.py` `PgJobBackend`（表 `digital_human_jobs`） |
 | 8 | `exports/<task_id>.txt` | `app/core/orchestrator.py`（`EXPORTS_DIR`） | 审批通过后的成品导出文本（final_delivery 渲染） | 不替换（导出面保留文件，与 traces 同口径；下载走 `GET /api/tasks/{id}/export`） |
 | 9 | （内存） | `app/llm/cache.py` `ResponseCache` | LLM 响应缓存（TTL + 容量，不落盘） | 不替换（纯内存；可选 Redis，miss 只影响成本不影响正确性） |
-| 10 | `imagegen_jobs.json` / `videogen_jobs.json` / `videounderstand_jobs.json` / `dubbing_jobs.json` / `petgen_jobs.json` / `skillgen_jobs.json` / `surf_sessions.json` | `app/core/gen_jobs.py` `FileJobBackend`（各工具 `STORE_FILE`） | 旁路生成作业（图片 / 视频 / 视频理解 / 全自动配音 / 桌面宠物 / 技能提炼 / 灵感冲浪会话），整行 job dict | `gen_jobs.py` `PgJobBackend`（表 `imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `dubbing_jobs` / `pet_jobs` / `skill_jobs` / `surf_jobs`，`payload jsonb` 存整行） |
+| 10 | `imagegen_jobs.json` / `videogen_jobs.json` / `videounderstand_jobs.json` / `dubbing_jobs.json` / `petgen_jobs.json` / `skillgen_jobs.json` / `surf_sessions.json` / `factory_jobs.json` | `app/core/gen_jobs.py` `FileJobBackend`（各工具 `STORE_FILE`） | 旁路生成作业（图片 / 视频 / 视频理解 / 全自动配音 / 桌面宠物 / 技能提炼 / 灵感冲浪会话 / 影视制作工厂运行），整行 job dict | `gen_jobs.py` `PgJobBackend`（表 `imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `dubbing_jobs` / `pet_jobs` / `skill_jobs` / `surf_jobs` / `factory_jobs`，`payload jsonb` 存整行） |
 | 11 | `data/pets/<job_id>/` | `app/core/petgen.py`（`PETS_DIR`） | 桌宠帧 PNG + `pet.json` + README（含包内 `runner/pet.py`） | 不替换（二进制帧与 traces/exports 同口径保留文件；库中只存引用与清单，读取走带鉴权的 pets 路由） |
 | 12 | `data/skills/<job_id>/` | `app/core/skillgen.py`（`SKILLS_DIR`） | 提炼产物 `SKILL.md` + `skill.json` + README，装配 `package.zip` 供扩展插件装载 | 不替换（作业行在库里，正文与包保留文件；读取走带鉴权的 skills 路由，`skill_dir_of()` 守住「只能落在 `skills/` 下」的不变量） |
 | 13 | `data/dubbing/<job_id>/` | `app/core/dubbing.py`（`_audio_dir()`） | 引擎逐句**真合成**的音频（`seg_####.wav/mp3`）与拼好的整轨 `full.wav`；作业行与清单在 #10 的库里 | 不替换（音频与桌宠帧同口径保留文件，库中只存 `dubbing/<job_id>/<文件>` 引用；读取走带鉴权的 dubbing audio 路由，`resolve_audio_path()` 守「三段相对引用 + 引用作业 id 必须等于路由作业 id」，`drop_task()` 回收前先比对父目录） |
 | 14 | `data/surf_pool.json` | `app/core/surf.py`（`_pool_backend()` / `FilePoolBackend`） | 灵感池（idea 库）：跨任务沉淀的灵感卡列表，按 `SURF_POOL_MAX` 裁剪最旧的 | 同构 `PgPoolBackend`（表 `surf_insights`，列 idea/simulated/created_at + tenant/topic 索引）；**不随任务删除**（`drop_task()` 只清 `surf_jobs`、不动灵感池），用户勾选后才由 `/surf/apply` 注入 Brief |
 | 15 | `data/surf_history.json` | `app/core/surf.py`（`_history_backend()`，复用 `FilePoolBackend`） | 冲浪**浏览历史**：跨会话「这个租户读过哪些页」的记忆，主键 `<tenant>\|<url>`，行带 `url/topic/title/via/first_seen/last_seen/reads`，按 `SURF_HISTORY_MAX` 先忘最旧的（`last_seen` 最小的） | 同构 `PgPoolBackend`（表 `surf_history`，`status` 固定 `seen` + tenant 索引）；**只由 browser 通道写入**（`remember_read_pages()` 只收 `kind` 为 item/video 的**真读进去**的信号，首页/列表页/搜索结果页/失败页与 sample·http 通道一律不记，不拿占位信号冒充读过）；同样**不随任务删除**，`SURF_REMEMBER_READ=false` 时既不记也不跳、`GET /api/surf/history` 如实返回空 items，查看与清空走 `GET` / `DELETE /api/surf/history`（按租户隔离） |
+| 16 | `data/factory/<project_id>/` | `app/factory/store.py`（`FACTORY_DIR`） | 影视制作工厂项目：`project.json`（画布工作流图，含岗位/连线/租户/名称）、`artifacts/`（岗位真落盘产物 PNG/WAV/SRT/剪辑片段等）、`cache.json`（岗位签名缓存，每交付一个岗位即原子写一次）、`exports/delivery.zip`（交付包：工作流 + 产物 + manifest/README，按需重生成）与 `deliveries.json`（交付台账：每次打包放行/拦下的 append-only 留痕，只留最近 50 条），运行进度缓存在 `factory_jobs.json`（#10）的整行 job 里 | **不替换**（工作流、产物、交付包与台账与桌宠帧/技能正文/配音音频同口径保留文件，库中只存运行作业行 `factory_jobs`；`artifact_path()` 守住「产物只能落在项目工作区内」的越界不变量，`build_bundle()` 在无产物、跨租户或仍有运行写产物时拒绝打包并只写固定 `exports/delivery.zip`（`.tmp` 原子替换）、无论放行还是拦下都向 `deliveries.json` 追加一条（写台账失败只告警不影响交付），`delivery_log()` 只读不建作业，`delete()` 删项目时先拒 `ProjectBusy`（有未终态运行）再连同 `drop_task()` 回收作业行与整个目录（台账随目录一并回收）；多副本须共享 `data/factory` 卷，与音频/宠物包同一约束） |
 
 ---
 
@@ -174,7 +175,7 @@ doctor 同样守护「必须是真的 postgres」。
 （配置 `OTLP_ENDPOINT` 后同时走 OTLP）。多副本下进程内轨迹天然分散，
 生产观测应直接接 collector + Jaeger/ClickHouse，落盘导出仅作本地排障。
 
-### 3.7 旁路生成作业（数字人 / 图片 / 视频 / 视频理解 / 全自动配音 / 桌面宠物 / 技能提炼 / 灵感冲浪）
+### 3.7 旁路生成作业（数字人 / 图片 / 视频 / 视频理解 / 全自动配音 / 桌面宠物 / 技能提炼 / 灵感冲浪 / 影视制作工厂）
 
 `_jobs() -> dict[str, dict]`（懒加载 + `_save_locked()` 原子落盘）。
 数字人后来长出了公共后端 `gen_jobs.py`：`snapshot()` 读全量、`write_back()` 只回写状态有变的行、
@@ -187,12 +188,60 @@ doctor 同样守护「必须是真的 postgres」。
 不落库也不下载视频**（避开把大 base64 塞进作业行）；看懂走系统 `LLM_*` 网关，不另持端点与密钥。
 但其产物**灵感池（idea 库）是独立的跨任务存储**（`_pool_backend()`：file `data/surf_pool.json` / pg 表
 `surf_insights`），生命周期**不随任务删除**（`drop_task()` 只清会话、不动灵感池），
-按 `SURF_POOL_MAX` 裁剪最旧的卡；这也是它与其余六个旁路通道唯一不同的地方。
+按 `SURF_POOL_MAX` 裁剪最旧的卡；这也是它与其余旁路通道的一处关键不同。
 同一条路上还有**第三份跨会话存储**：browser 通道每轮把「真读进去的页」记进**浏览历史**
 （`_history_backend()`：file `data/surf_history.json` / pg 表 `surf_history`，主键 `<tenant>|<url>`，见总表 #15），
 下一轮顺路发现的条目/视频先跟它对一遍、读过的跳过改读没见过的；它同样**不随任务删除**、
 按 `SURF_HISTORY_MAX` 先忘最旧的（`last_seen` 最小的），且**只由 browser 通道写入**——
 sample/http 不联网真读，就不写这份记忆（宁可不记，也不拿占位信号冒充「这页我读过」）。
+**影视制作工厂的运行**走 `factory_jobs`（file `data/factory_jobs.json` / pg 同构表，整行 `payload jsonb`），
+但项目工作流 `project.json` 与岗位产物 `artifacts/` 保留文件（见总表 #16）。它与其余通道有一处关键差别：
+跑图由**后台线程**推进，进程一退线程就没了。因此 `FactoryStore` 启动时会把落盘里仍停在 `queued`/`running`/`cancelling`
+的作业统一标为中断（`status=error` + `run.interrupted` 事件），**已完成岗位的 `cache.json` 与产物原样保留**，
+重跑按签名复用；不把「没跑完」说成「跑完了」。缓存不是整轮结束才写：引擎每交付一个岗位就原子写一次 `cache.json`，
+所以取消或崩溃最多丢掉正在收尾的那一个岗位。取消本身也是协作式的——先落 `cancelling`，引擎在当前岗位收尾后
+停下并把剩余岗位标 `cancelled`，后台线程真正退出后才写 `cancelled`；不硬杀线程，避免半截产物。
+取消请求若没赶上最后一步（整轮已跑完），作业按真实结果收尾并补一条 `run.cancel_missed` 事件，不假装取消成功。
+运行预检（`POST .../preview`）是纯读路径：与实跑共用 `_prepare_run` 的目标/体检收口和同一套签名计算，
+但不写 `factory_jobs`、不跑岗位、不改 `cache.json`；未知目标与实跑同口径拒绝（400）。
+运行历史也不新增存储：`GET .../runs` 的摘要由既有作业行派生，额外给出 `retry_nodes`
+（`error` / `blocked` / `cancelled` 节点），供前端把续跑目标交回同一个 `run` 接口；查看历史不改写原作业。
+运行统计（`GET .../stats`）同样是纯读派生：从既有作业行聚合最近 N 次**已结束**运行，不新增表、不写项目文件；
+成功率按作业、复用率按节点（复用 ÷（交付 + 复用）），失败/受阻不稀释复用率，失败条目保留 `job_id` 以便回放现场。
+运行对比（`GET .../runs/compare?base=&target=`）同样是纯读派生：只接受同项目、同租户、**已结束**且不同的两次作业，
+逐岗归一后比较状态迁移、缓存命中、耗时与产物结构指纹（端口/规模/预览的摘要哈希），不读取完整产物、不新增表、
+不写项目文件；未结束返回 409，同一次运行 400，跨项目/未知作业按不存在处理（404）。对比结果不落盘，可随时重算。
+岗位级强跑也**不新增存储**：生效名单与计划外名单随作业行落成 `force_nodes` / `ignored_force_nodes`，逐岗结果额外带
+`forced`（仅真因强跑执行时为真），预检只回显不落盘；强跑只改变本轮取缓存的判定，`cache.json` 的结构与签名口径不变。
+本轮参数覆盖（`param_overrides`）同样**不新增存储**：作业行落实际生效的 `param_overrides`（`{node_id: patch}`）与计划外
+`ignored_param_overrides`（`string[]`），逐岗结果带 `overridden`（仅在补丁下真正执行时为真，缓存命中/静音/被挡住不算）；
+`last_run` 摘要额外记 `force` / `force_nodes` / `override_nodes` / `ignored_override_nodes`（只记岗位名，不存大段参数值），
+运行统计按 `param_overrides` 非空计 `runs.overridden`，运行对比 meta 带 `override_nodes`。补丁只叠加到本轮有效图，
+接口不写 `project.json`；但缓存仍是**每岗位单槽、按签名命中**、产物按岗位同名覆盖——改参成功后该岗位的缓存与同名产物
+被本轮结果覆盖，改参导致文件名变化时旧文件残留为普通产物，失败按既有行为清掉该岗位旧缓存；**不提供缓存/产物的版本化或
+回滚**，改参本身也不进历史续跑的默认请求。
+四个工作台的前端信息架构也**不新增存储**：首页计数来自既有任务与工厂项目/注册表接口，创作任务分区与「来源任务」上下文只是浏览器内存状态；
+创作任务 → 视频工场的唯一一键带入（最新 `video_script` → SRT）只发生在客户端，不写任务产物、不落任何新文件；
+其余跨工作台跳转仅共享任务标题上下文，刷新或顶栏切换即清空。
+同一项目的串行锁是**进程内**的，
+多副本即使共享 `data/factory` 卷也不具备跨进程互斥，故工厂沿用单副本语义（见下文副本注意点）。
+交付包由 `build_bundle()` 按需装配到 `data/factory/<project_id>/exports/delivery.zip`（固定名，重复下载覆盖，
+`.tmp` 写完后原子替换；Windows 上刚写完的多产物 zip 常被杀毒/索引短暂占用，替换遇 `PermissionError` 会退避重试，
+重试仍不过才抛真实错误，绝不留半截 `.tmp` 冒充交付完成；是派生物，可随时删掉重生成）。zip 内含 `project.json`、`artifacts/**`、
+逐文件 sha256 的 `manifest.json`（`version: 2`，附 `acceptance` 验收摘要与 `film` 成片摘要（带 `fingerprint` 内容指纹））与 `README.txt`；
+**若项目有剪辑成片**（拓扑序最下游那条 `kind=="timeline"` 的交付物，由 `app/factory/acceptance.py` 选出，与放映室同口径），
+还会写一份顶层 `timeline.json`（逐镜引用 `artifacts/` 里的素材）——**把那条片子的剪辑决定与素材一起装箱**，拆包即能拼回；
+无成片轴（静帧/音频类工作流）则不附，manifest `film` 置 null（`timeline.json` 不进 `artifact_count`，因它不是产物目录文件）。**写包前先过交付验收**
+（`app/factory/acceptance.py`）：工作流体检有错、终端岗位没跑或缓存过期、产物引用文件不在盘或 0 字节、时间轴为空，
+都抛 `AcceptanceBlocked`（继承 `ValueError`，接口仍按 409 口径转译）拒打包；占位产物（`simulated`）、终端静音、孤儿产物
+只进警告不拦。项目没有产物、仍有运行在写产物或跨租户访问时同样一律拒绝，
+**不把半成品或只有工作流的空包说成交付完成**。
+交付台账 `data/factory/<project_id>/deliveries.json` 与 `project.json`/`artifacts/` 同口径**保留文件不迁 pg**（总表 #16）：
+`build_bundle` 每到一个终端决策点（放行 / 被验收拦下 / 无产物）就往台账**追加**一条留痕（时间、验收 verdict/counts、
+终端就绪、产物数与字节、放行时附交付包 sha256 与大小（带成片时另记成片内容指纹 `film_fingerprint`）、拦下时附阻断项），只留最近 50 条、原子重写；
+写台账失败只告警不抛（不能把一个已写好的 zip 说成失败）。`GET .../deliveries` 只读派生、不建 `factory_jobs` 行，
+跨租户按不存在处理；删项目随目录一并回收。固定名 `delivery.zip` 只说明「现在这版包里有什么」，台账才回答「交过没、何时、当时量出什么结论」。
+**成片轴的唯一口径是 `acceptance.select_film`**（拓扑序最靠后、`kind=="timeline"`、镜数>0 且时长>0）：验收报告的 `film`、包内 `timeline.json` 与只读端点 `GET .../film`（`{film, timeline}`）都读它，放映室不再自己逐岗位选轴（live==delivered）；同样只读不建作业、跨租户按不存在处理。**回看对账**：`_film_fingerprint` 对成片内容算规范化 JSON 的 sha256（与 zip 字节无关，只看逐镜引用/时长/顺序），`_assemble_bundle` 写入 `manifest.film.fingerprint` 与台账 `delivered` 条的 `film_fingerprint`；`GET .../film` 额外回 `delivery = {delivered_at, archive_sha256, download_name, film_fingerprint, live_fingerprint, matches}`，`matches` 把实时内容指纹与最新一条已交付留痕的指纹对比——一致 `true`、之后又改过 `false`、无成片或从未交付过带成片的版 `null`（不比旧包字节、只比内容，因固定名覆盖旧版字节已不存在，不装作能回放）。
 三个多副本注意点：
 - 作业存储需共享（PG 表或 Redis Hash）；
 - `sample` 内置引擎的「按流逝时间惰性推进」是**进程内**行为，多副本下要么
@@ -233,8 +282,8 @@ sample/http 不联网真读，就不写这份记忆（宁可不记，也不拿�
 3. `python scripts/verify_contracts.py`：API 契约不变 —— 存储替换对接口层必须零感知；
 4. `python scripts/pg_migrate.py --dry-run` → 去掉 `--dry-run`：JSON → PostgreSQL
    一次性迁移，逐类实体输出「源数 / 插入 / 跳过」计数，可重复执行（幂等）；
-   **迁移范围含数字人作业表 `digital_human_jobs`，七个旁路生成作业表
-   （`imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `dubbing_jobs` / `pet_jobs` / `skill_jobs` / `surf_jobs`）不在迁移脚本内**：
+   **迁移范围含数字人作业表 `digital_human_jobs`，八个旁路生成作业表
+   （`imagegen_jobs` / `videogen_jobs` / `videounderstand_jobs` / `dubbing_jobs` / `pet_jobs` / `skill_jobs` / `surf_jobs` / `factory_jobs`）不在迁移脚本内**：
    它们是短生命周期状态，切换存储模式时未跑完的作业不迁移、重新提交即可；
    冲浪的两个跨会话存储（灵感池 `surf_insights`、浏览历史 `surf_history`）**同样不在迁移脚本内**：
    它们是「重新刷就有」的沉淀/记忆，切换后从新一轮攒起，旧 JSON 留在原地不影响正确性；

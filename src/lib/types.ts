@@ -128,6 +128,8 @@ export interface Brief {
   tone: string;
   /** 行业（影响合规规则强度） */
   industry: string;
+  /** 内容语种（zh / en / ja …，影响合规词库与文案输出） */
+  language: string;
   /** 需要布局的关键词 */
   keywords: string[];
   /** 硬性约束 */
@@ -151,6 +153,7 @@ export function createEmptyBrief(): Brief {
     channel: '小红书',
     tone: '轻松、真实、有种草感',
     industry: '消费品',
+    language: 'zh',
     keywords: [],
     constraints: [],
     deliverables: ['图文笔记 1 篇', '标题备选 5 条'],

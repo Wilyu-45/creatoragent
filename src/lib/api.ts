@@ -1546,6 +1546,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ decision, comment }),
     }),
+  deleteTask: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   publishSchedule: (id: string) => request<PublishScheduleView>(`/api/tasks/${id}/publish`),
   markPublished: (id: string, channel = '', url = '') =>
     request<MarkPublishedView>(`/api/tasks/${id}/publish`, {

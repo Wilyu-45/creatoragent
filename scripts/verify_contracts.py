@@ -8,7 +8,8 @@
 **调用轨迹的 span 树层级与 OTel 形状导出**、**入站 traceparent 的跨进程延续**、
 **数字人 / 桌宠 / 视频理解样例的创建 → 惰性推进 → 完成闭环**、
 **创作技能提炼的量化落盘 → SKILL.md 预览 → 技能包下载 → 沉淀记忆库**、
-**灵感冲浪的占位灵感 → 灵感池沉淀 → 选卡注入 Brief → 跨会话浏览历史（没真读就不记）**.
+**灵感冲浪的占位灵感 → 灵感池沉淀 → 选卡注入 Brief → 跨会话浏览历史（没真读就不记）**、
+**影视制作工厂的岗位目录 → 建项目 → 异步跑图 → 产物越界/未知节点 404 → 交付包 zip（manifest/sha256）→ 二跑全缓存 → 删除回收**.
 
 用途：改完评估/租户/追踪相关代码后先跑它，比直接上 smoke 更快拿到「哪里断了」。
 
@@ -551,6 +552,390 @@ try:
               client.post(f"/api/tasks/{tid}/surf/apply", json={"cardIds": []}).status_code, 409)
         check("池里没有的卡 → 404",
               client.post(f"/api/tasks/{tid}/surf/apply", json={"cardIds": ["si_missing"]}).status_code, 404)
+
+        print("[影视制作工厂：岗位目录 → 建项目 → 异步跑图 → 产物 → 缓存 → 删除]")
+        palette = client.get("/api/factory/palette").json()
+        check("岗位目录 60 个岗位", palette["node_count"], 60)
+        check("部门分组非空", bool(palette["departments"]), True)
+        check("岗位无孤儿", palette["orphan_nodes"], [])
+        presets = client.get("/api/factory/presets").json()["presets"]
+        check("预设五套", sorted(row["key"] for row in presets), ["full", "gen", "script", "short", "voice"])
+        check("预设都带岗位数", all(row["node_count"] > 0 and row["edge_count"] > 0 for row in presets), True)
+
+        made = client.post("/api/factory/projects", json={"title": "契约核验工厂", "preset": "script"})
+        check("建项目 200", made.status_code, 200)
+        made_body = made.json()
+        project = made_body["project"]
+        factory_id = str(project["id"])
+        check("预设落图 12 岗位", len(project["graph"]["nodes"]), 12)
+        check("建项目体检无 error", [issue for issue in made_body["issues"] if issue["level"] == "error"], [])
+        check("项目列表可见",
+              factory_id in [row["id"] for row in client.get("/api/factory/projects").json()["projects"]], True)
+        check("未知项目 404", client.get("/api/factory/projects/no-such-project").status_code, 404)
+
+        draft = {"nodes": [{"id": "s", "type": "screening", "pos": [0, 0], "params": {}}], "edges": []}
+        draft_issues = client.post(f"/api/factory/projects/{factory_id}/validate", json={"graph": draft}).json()["issues"]
+        check("草稿体检点名缺失的必需交付物",
+              any(issue["level"] == "warn" and "时间轴" in issue["message"] for issue in draft_issues), True)
+        check("坏图 400",
+              client.post(f"/api/factory/projects/{factory_id}/validate",
+                          json={"graph": {"nodes": "nope", "edges": []}}).status_code, 400)
+        check("未知 target 400（不退化成跑全图）",
+              client.post(f"/api/factory/projects/{factory_id}/run",
+                          json={"targets": ["n-ghost"]}).status_code, 400)
+
+        first_run = client.post(f"/api/factory/projects/{factory_id}/run", json={}).json()["job"]
+        check("跑图受理为 queued", first_run["status"], "queued")
+        deadline = time.time() + 90
+        finished = first_run
+        while finished.get("status") in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.4)
+            finished = client.get(f"/api/factory/jobs/{first_run['id']}").json()["job"]
+        check("首跑 ok", finished["status"], "ok")
+        check("作业计划岗位数=12（进度分母）", finished.get("plan_size"), 12)
+        check("12 岗位全部交付",
+              (finished["counts"].get("ok", 0) + finished["counts"].get("cached", 0)), 12)
+        check("事件流带 run.finish", any(row.get("type") == "run.finish" for row in finished["events"]), True)
+        check("未知作业 404", client.get("/api/factory/jobs/frun-missing").status_code, 404)
+
+        runs_before_preview = client.get(f"/api/factory/projects/{factory_id}/runs").json()["runs"]
+        preview = client.post(f"/api/factory/projects/{factory_id}/preview", json={}).json()["preview"]
+        preview_target = client.post(f"/api/factory/projects/{factory_id}/preview",
+                                     json={"targets": ["n-sup"]}).json()["preview"]
+        preview_force = client.post(f"/api/factory/projects/{factory_id}/preview",
+                                    json={"force": True}).json()["preview"]
+        runs_after_preview = client.get(f"/api/factory/projects/{factory_id}/runs").json()["runs"]
+        graph_node_ids = {node["id"] for node in project["graph"]["nodes"]}
+        check("预检整图全缓存",
+              (preview["counts"].get("cached"), preview["counts"].get("total")), (12, 12))
+        check("预检计划覆盖全图", set(preview["plan"]), graph_node_ids)
+        check("预检目标闭包收窄且全缓存",
+              "n-sup" in preview_target["plan"]
+              and set(preview_target["plan"]) < graph_node_ids
+              and preview_target["counts"].get("cached") == len(preview_target["plan"])
+              and preview_target["counts"].get("run", 0) == 0, True)
+        check("预检 force 全部重跑",
+              (preview_force["counts"].get("cached"), preview_force["counts"].get("run")), (0, 12))
+        check("预检只读不建作业", len(runs_after_preview), len(runs_before_preview))
+        check("预检未知目标 400",
+              client.post(f"/api/factory/projects/{factory_id}/preview",
+                          json={"targets": ["n-ghost"]}).status_code, 400)
+        check("预检未知项目 404",
+              client.post("/api/factory/projects/no-such-project/preview", json={}).status_code, 404)
+        check("运行历史摘要带续跑目标",
+              all("retry_nodes" in row for row in runs_after_preview), True)
+        check("运行历史摘要不带事件",
+              all("events" not in row for row in runs_after_preview), True)
+        check("成功运行没有待续跑岗位", runs_after_preview[0]["retry_nodes"], [])
+
+        artifacts = client.get(f"/api/factory/projects/{factory_id}/artifacts").json()
+        check("产物清单非空", artifacts["count"] > 0, True)
+        check("产物带分组计数", bool(artifacts["groups"]), True)
+        first_file = artifacts["artifacts"][0]
+        check("产物可直接读取", client.get(first_file["url"]).status_code, 200)
+        check("产物越界 404",
+              client.get(f"/api/factory/projects/{factory_id}/artifacts/%2e%2e%2f%2e%2e%2fetc%2fpasswd").status_code, 404)
+        check("岗位完整产物可回读",
+              bool(client.get(f"/api/factory/projects/{factory_id}/outputs/n-sb").json()["outputs"]), True)
+        check("未知岗位产物 404",
+              client.get(f"/api/factory/projects/{factory_id}/outputs/no-such-node").status_code, 404)
+
+        bundle = client.get(f"/api/factory/projects/{factory_id}/bundle")
+        check("交付包 200", bundle.status_code, 200)
+        check("交付包是 zip", bundle.headers.get("content-type", "").startswith("application/zip"), True)
+        with zipfile.ZipFile(io.BytesIO(bundle.content)) as zipped:
+            bundle_names = set(zipped.namelist())
+            bundle_manifest = json.loads(zipped.read("manifest.json"))
+            bundle_readme = zipped.read("README.txt").decode("utf-8")
+        packed_artifacts = [name for name in bundle_names if name.startswith("artifacts/")]
+        check("交付包含工作流/产物/清单/说明",
+              {"project.json", "manifest.json", "README.txt"} <= bundle_names and bool(packed_artifacts), True)
+        check("manifest 记录项目与文件数",
+              bundle_manifest.get("format") == "creatoragent.factory.delivery"
+              and (bundle_manifest.get("project") or {}).get("id") == factory_id
+              and bundle_manifest.get("artifact_count") == len(packed_artifacts) == len(bundle_manifest.get("files") or []),
+              True)
+        check("manifest 逐文件带 sha256 与总字节",
+              all(len(str(row.get("sha256") or "")) == 64 for row in bundle_manifest.get("files") or [])
+              and bundle_manifest.get("total_bytes") == sum(int(row.get("bytes") or 0) for row in bundle_manifest.get("files") or []),
+              True)
+        check("manifest 点名模拟岗位", bool(bundle_manifest.get("simulated_nodes")), True)
+        check("README 写明诚实边界", "诚实边界" in bundle_readme, True)
+        film_meta = bundle_manifest.get("film") or {}
+        check("交付包成片自洽（有片才附 timeline.json，它引用的素材全在包内）",
+              (("timeline.json" in bundle_names) == bool(film_meta))
+              and all(f"artifacts/{row}" in bundle_names for row in (film_meta.get("refs") or [])),
+              True)
+
+        accept_report = client.get(f"/api/factory/projects/{factory_id}/acceptance").json()["acceptance"]
+        check("验收 HTTP 契约：全交付无阻断",
+              (accept_report["ok"], accept_report["verdict"] in ("pass", "warn"),
+               accept_report["counts"]["error"] == 0,
+               accept_report["stats"]["terminals_ready"] == accept_report["stats"]["terminals"] >= 1),
+              (True, True, True, True))
+        check("验收 HTTP 契约：口径字段自洽",
+              accept_report["counts"]["error"] == sum(1 for row in accept_report["issues"] if row["level"] == "error")
+              and accept_report["counts"]["warn"] == sum(1 for row in accept_report["issues"] if row["level"] == "warn")
+              and accept_report["stats"]["refs_missing"] == 0
+              and {row["node_id"] for row in accept_report["deliverables"]} <= graph_node_ids,
+              True)
+        check("验收未知项目 404",
+              client.get("/api/factory/projects/no-such-project/acceptance").status_code, 404)
+
+        film_res = client.get(f"/api/factory/projects/{factory_id}/film")
+        check("成片端点 200", film_res.status_code, 200)
+        film_body = film_res.json()
+        film_meta_http = film_body.get("film") or {}
+        check("成片契约：film 与 timeline 同生同灭、镜数时长>0、岗位在图内",
+              (bool(film_meta_http) == bool(film_body.get("timeline")))
+              and (not film_meta_http
+                   or (int(film_meta_http.get("shots") or 0) > 0
+                       and float(film_meta_http.get("duration_s") or 0) > 0
+                       and film_meta_http.get("node_id") in graph_node_ids)),
+              True)
+        check("成片端点与验收报告同口径（都读 select_film）",
+              (film_meta_http.get("node_id"), film_meta_http.get("shots")),
+              ((accept_report.get("film") or {}).get("node_id"), (accept_report.get("film") or {}).get("shots")))
+        film_delivery = film_body.get("delivery") or {}
+        check("成片回看对账契约：字段齐、无成片时 matches 为 null 且 live_fingerprint 空",
+              {"delivered_at", "archive_sha256", "film_fingerprint", "live_fingerprint", "matches"} <= set(film_delivery)
+              and (bool(film_meta_http)
+                   or (film_delivery.get("matches") is None and not film_delivery.get("live_fingerprint"))),
+              True)
+        check("成片未知项目 404",
+              client.get("/api/factory/projects/no-such-project/film").status_code, 404)
+
+        ledger_runs_before = len(client.get(f"/api/factory/projects/{factory_id}/runs?limit=100").json()["runs"])
+        deliveries = client.get(f"/api/factory/projects/{factory_id}/deliveries").json()["deliveries"]
+        check("台账 HTTP 契约：项目对得上", deliveries["project"]["id"], factory_id)
+        led_delivered = [row for row in deliveries["entries"] if row["event"] == "delivered"]
+        check("台账 HTTP 契约：打包成功留痕放行且带存档指纹",
+              deliveries["summary"]["delivered"] >= 1 and bool(led_delivered)
+              and len(str(led_delivered[0].get("archive_sha256") or "")) == 64
+              and int(led_delivered[0].get("archive_bytes") or 0) > 0 and led_delivered[0]["ok"], True)
+        at_seq = [row["at"] for row in deliveries["entries"]]
+        check("台账 HTTP 契约：新条目在前", at_seq, sorted(at_seq, reverse=True))
+        ledger_runs_after = len(client.get(f"/api/factory/projects/{factory_id}/runs?limit=100").json()["runs"])
+        check("台账 HTTP 契约：只读不建作业", ledger_runs_after, ledger_runs_before)
+        check("台账未知项目 404",
+              client.get("/api/factory/projects/no-such-project/deliveries").status_code, 404)
+
+        empty_project = client.post("/api/factory/projects", json={"title": "契约核验空项目"}).json()["project"]
+        check("无产物项目打包 409",
+              client.get(f"/api/factory/projects/{empty_project['id']}/bundle").status_code, 409)
+        empty_ledger = client.get(
+            f"/api/factory/projects/{empty_project['id']}/deliveries").json()["deliveries"]
+        blocked_rows = [row for row in empty_ledger["entries"] if row["event"] == "blocked"]
+        check("拒打包也在真实服务留痕",
+              empty_ledger["summary"]["blocked"] == 1 and bool(blocked_rows)
+              and not blocked_rows[0]["ok"] and blocked_rows[0]["verdict"] == "blocked"
+              and bool(blocked_rows[0].get("blockers")), True)
+        check("清理空项目", client.delete(f"/api/factory/projects/{empty_project['id']}").status_code, 200)
+
+        broken = client.post("/api/factory/projects", json={
+            "title": "契约核验失败历史",
+            "graph": {"nodes": [{"id": "t", "type": "text_input", "pos": [0, 0], "params": {"text": ""}}], "edges": []},
+        }).json()["project"]
+        broken_id = str(broken["id"])
+        broken_run = client.post(f"/api/factory/projects/{broken_id}/run", json={}).json()["job"]
+        deadline = time.time() + 60
+        broken_done = broken_run
+        while broken_done.get("status") in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.3)
+            broken_done = client.get(f"/api/factory/jobs/{broken_run['id']}").json()["job"]
+        check("失败运行如实收尾", broken_done["status"], "error")
+        check("失败运行点名可续跑岗位", broken_done["retry_nodes"], ["t"])
+        broken_runs = client.get(f"/api/factory/projects/{broken_id}/runs").json()["runs"]
+        check("失败运行历史摘要带续跑目标", broken_runs[0]["retry_nodes"], ["t"])
+        retry_run = client.post(f"/api/factory/projects/{broken_id}/run",
+                                json={"targets": broken_done["retry_nodes"]}).json()["job"]
+        check("按历史续跑目标可受理", retry_run["targets"], ["t"])
+        deadline = time.time() + 60
+        retry_done = retry_run
+        while retry_done.get("status") in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.3)
+            retry_done = client.get(f"/api/factory/jobs/{retry_run['id']}").json()["job"]
+        check("续跑只跑未完成岗位", retry_done.get("plan_size"), 1)
+        check("续跑仍失败也如实落盘", retry_done["status"], "error")
+        broken_stats = client.get(f"/api/factory/projects/{broken_id}/stats").json()["stats"]
+        broken_stats_node = broken_stats["nodes"][0]
+        check("失败统计按作业计数", (broken_stats["runs"]["total"], broken_stats["runs"]["error"]), (2, 2))
+        check("失败统计成功率归零", broken_stats["runs"]["success_rate"], 0.0)
+        check("失败统计点名岗位与错误",
+              (broken_stats_node["node_id"], broken_stats_node["error"], "文本输入节点为空" in broken_stats_node["last_error"]),
+              ("t", 2, True))
+        check("失败统计带可回放现场",
+              {row["job_id"] for row in broken_stats["failures"]}, {broken_run["id"], retry_run["id"]})
+        check("对比跨项目作业 404",
+              client.get(f"/api/factory/projects/{factory_id}/runs/compare?base={broken_run['id']}&target={first_run['id']}").status_code, 404)
+        check("清理失败历史项目", client.delete(f"/api/factory/projects/{broken_id}").status_code, 200)
+
+        second_run = client.post(f"/api/factory/projects/{factory_id}/run", json={}).json()["job"]
+        deadline = time.time() + 90
+        second_done = second_run
+        while second_done.get("status") in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.4)
+            second_done = client.get(f"/api/factory/jobs/{second_run['id']}").json()["job"]
+        check("二跑全命中缓存", second_done["counts"].get("cached"), 12)
+        check("二跑没有重跑岗位", second_done["counts"].get("ok", 0), 0)
+
+        stats_runs_before = len(client.get(f"/api/factory/projects/{factory_id}/runs?limit=100").json()["runs"])
+        stats = client.get(f"/api/factory/projects/{factory_id}/stats").json()["stats"]
+        stats_limited = client.get(f"/api/factory/projects/{factory_id}/stats?limit=1").json()["stats"]
+        stats_node = {row["node_id"]: row for row in stats["nodes"]}["n-sb"]
+        check("统计窗口=2 次已结束运行", stats["window"], 2)
+        check("统计成功率按作业算", stats["runs"]["success_rate"], 1.0)
+        check("统计复用率=复用/(交付+复用)",
+              (stats["runs"]["cached"], stats["runs"]["delivered"], stats["runs"]["cache_rate"]),
+              (12, 12, 0.5))
+        check("岗位画像按轮次聚合",
+              (stats_node["appearances"], stats_node["ok"], stats_node["cached"], stats_node["cache_rate"]),
+              (2, 1, 1, 0.5))
+        check("部门汇总覆盖全部岗位出现",
+              sum(row["appearances"] for row in stats["departments"]), 24)
+        check("统计窗口可收窄", stats_limited["window"], 1)
+        check("统计 limit 越界 422",
+              client.get(f"/api/factory/projects/{factory_id}/stats?limit=0").status_code, 422)
+        check("统计未知项目 404",
+              client.get("/api/factory/projects/no-such-project/stats").status_code, 404)
+        stats_runs_after = len(client.get(f"/api/factory/projects/{factory_id}/runs?limit=100").json()["runs"])
+        check("统计只读不建作业", stats_runs_after, stats_runs_before)
+
+        compare_runs_before = len(client.get(f"/api/factory/projects/{factory_id}/runs?limit=100").json()["runs"])
+        compared = client.get(
+            f"/api/factory/projects/{factory_id}/runs/compare?base={first_run['id']}&target={second_run['id']}"
+        )
+        check("运行对比 200", compared.status_code, 200)
+        compare = compared.json()["compare"]
+        compare_sb = {row["node_id"]: row for row in compare["nodes"]}["n-sb"]
+        check("对比两侧都已完成", (compare["base"]["status"], compare["target"]["status"]), ("ok", "ok"))
+        check("对比逐岗命中缓存", (compare["changes"]["cache_hit"], len(compare["nodes"])), (12, 12))
+        check("对比没有回退或仍失败", (compare["changes"]["regressed"], compare["changes"]["still_failed"]), (0, 0))
+        check("对比产物结构稳定", compare["changes"]["output_changed"], 0)
+        check("对比点名岗位迁移", (compare_sb["change"], compare_sb["target"]["cached"]), ("cache_hit", True))
+        compare_runs_after = len(client.get(f"/api/factory/projects/{factory_id}/runs?limit=100").json()["runs"])
+        check("对比只读不建作业", compare_runs_after, compare_runs_before)
+        check("对比同一次运行 400",
+              client.get(f"/api/factory/projects/{factory_id}/runs/compare?base={first_run['id']}&target={first_run['id']}").status_code, 400)
+        check("对比未知作业 404",
+              client.get(f"/api/factory/projects/{factory_id}/runs/compare?base=frun-missing&target={second_run['id']}").status_code, 404)
+        check("对比未知项目 404",
+              client.get("/api/factory/projects/no-such-project/runs/compare?base=a&target=b").status_code, 404)
+        check("对比缺参数 422",
+              client.get(f"/api/factory/projects/{factory_id}/runs/compare?base={first_run['id']}").status_code, 422)
+
+        force_preview_res = client.post(
+            f"/api/factory/projects/{factory_id}/preview",
+            json={"targets": ["n-sb"], "force_nodes": ["n-sb"]},
+        )
+        check("岗位强跑预检 200", force_preview_res.status_code, 200)
+        force_preview = force_preview_res.json()["preview"]
+        force_preview_sb = {row["node_id"]: row for row in force_preview["nodes"]}["n-sb"]
+        check("强跑预检只重跑指定岗位",
+              (force_preview["counts"]["run"], force_preview["counts"]["cached"], len(force_preview["plan"])),
+              (1, len(force_preview["plan"]) - 1, len(force_preview["plan"])))
+        check("强跑预检点名原因",
+              (force_preview_sb["state"], "强制重跑" in force_preview_sb["reason"]), ("run", True))
+        check("强跑预检记录名单", force_preview["force_nodes"], ["n-sb"])
+        check("未知强跑岗位 400",
+              client.post(f"/api/factory/projects/{factory_id}/preview",
+                          json={"force_nodes": ["n-ghost"]}).status_code, 400)
+        ignored_preview = client.post(
+            f"/api/factory/projects/{factory_id}/preview",
+            json={"targets": ["n-sb"], "force_nodes": ["n-sup"]},
+        ).json()["preview"]
+        check("计划外强跑如实忽略",
+              (ignored_preview["force_nodes"], ignored_preview["ignored_force_nodes"]), ([], ["n-sup"]))
+
+        force_accepted = client.post(
+            f"/api/factory/projects/{factory_id}/run",
+            json={"targets": ["n-sb"], "force_nodes": ["n-sb"]},
+        ).json()["job"]
+        deadline = time.time() + 90
+        force_job = force_accepted
+        while force_job.get("status") in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.4)
+            force_job = client.get(f"/api/factory/jobs/{force_accepted['id']}").json()["job"]
+        check("强跑作业受理记录",
+              (force_job.get("force"), force_job.get("force_nodes"), force_job.get("ignored_force_nodes")),
+              (False, ["n-sb"], []))
+        force_counts = force_job.get("counts") or {}
+        check("强跑只重跑指定岗位",
+              (force_counts.get("ok"), force_counts.get("cached"), force_job.get("plan_size")),
+              (1, len(force_preview["plan"]) - 1, len(force_preview["plan"])))
+        force_nodes = (force_job.get("result") or {}).get("nodes") or {}
+        check("强跑岗位标记与上游复用",
+              (force_nodes["n-sb"].get("cached"), force_nodes["n-sb"].get("forced"),
+               force_nodes["n-brief"].get("cached")),
+              (False, True, True))
+
+        override_preview_res = client.post(
+            f"/api/factory/projects/{factory_id}/preview",
+            json={"targets": ["n-sb"], "param_overrides": {"n-sb": {"max_shot_s": 6.5}}},
+        )
+        check("本轮改参预检 200", override_preview_res.status_code, 200)
+        override_preview = override_preview_res.json()["preview"]
+        override_plan_size = len(override_preview["plan"])
+        override_preview_sb = {row["node_id"]: row for row in override_preview["nodes"]}["n-sb"]
+        check("改参预检只重跑该岗位与下游",
+              (override_preview["counts"]["run"], override_preview["counts"]["cached"]),
+              (1, override_plan_size - 1))
+        check("改参预检回显补丁与参数名",
+              (override_preview["param_overrides"], override_preview_sb["override_keys"]),
+              ({"n-sb": {"max_shot_s": 6.5}}, ["max_shot_s"]))
+        check("改参预检点名签名变化",
+              (override_preview_sb["state"], "改变签名" in override_preview_sb["reason"]), ("run", True))
+        ignored_override_preview = client.post(
+            f"/api/factory/projects/{factory_id}/preview",
+            json={"targets": ["n-sb"], "param_overrides": {"n-sup": {"strict": True}}},
+        ).json()["preview"]
+        check("计划外改参如实忽略",
+              (ignored_override_preview["param_overrides"], ignored_override_preview["ignored_param_overrides"]),
+              ({}, ["n-sup"]))
+        check("未知改参岗位 400",
+              client.post(f"/api/factory/projects/{factory_id}/preview",
+                          json={"param_overrides": {"n-ghost": {"max_shot_s": 6}}}).status_code, 400)
+        check("改参顶层不是对象 400",
+              client.post(f"/api/factory/projects/{factory_id}/preview",
+                          json={"param_overrides": []}).status_code, 400)
+        check("改参补丁不是对象 400",
+              client.post(f"/api/factory/projects/{factory_id}/preview",
+                          json={"param_overrides": {"n-sb": "硬切"}}).status_code, 400)
+
+        override_accepted = client.post(
+            f"/api/factory/projects/{factory_id}/run",
+            json={"targets": ["n-sb"], "param_overrides": {"n-sb": {"max_shot_s": 6.5}}},
+        ).json()["job"]
+        deadline = time.time() + 90
+        override_job = override_accepted
+        while override_job.get("status") in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.4)
+            override_job = client.get(f"/api/factory/jobs/{override_accepted['id']}").json()["job"]
+        check("改参作业受理记录",
+              (override_job.get("param_overrides"), override_job.get("ignored_param_overrides")),
+              ({"n-sb": {"max_shot_s": 6.5}}, []))
+        override_counts = override_job.get("counts") or {}
+        check("改参只重跑该岗位",
+              (override_counts.get("ok"), override_counts.get("cached"), override_job.get("plan_size")),
+              (1, override_plan_size - 1, override_plan_size))
+        override_nodes = (override_job.get("result") or {}).get("nodes") or {}
+        check("改参岗位标记与上游复用",
+              (override_nodes["n-sb"].get("cached"), override_nodes["n-sb"].get("overridden"),
+               override_nodes["n-sb"].get("forced"), override_nodes["n-brief"].get("cached")),
+              (False, True, False, True))
+        override_stats = client.get(f"/api/factory/projects/{factory_id}/stats").json()["stats"]
+        check("统计记录含改参轮次", override_stats["runs"].get("overridden", 0) >= 1, True)
+        override_runs = client.get(f"/api/factory/projects/{factory_id}/runs").json()["runs"]
+        check("历史摘要保留改参补丁",
+              override_runs[0].get("param_overrides"), {"n-sb": {"max_shot_s": 6.5}})
+        saved_factory = client.get(f"/api/factory/projects/{factory_id}").json()["project"]
+        saved_sb = {node["id"]: node for node in saved_factory["graph"]["nodes"]}["n-sb"]
+        check("改参不写入保存的画布", "max_shot_s" in saved_sb.get("params", {}), False)
+
+        check("删项目回收", client.delete(f"/api/factory/projects/{factory_id}").json()["deleted"], factory_id)
+        check("删除后项目 404", client.get(f"/api/factory/projects/{factory_id}").status_code, 404)
+        check("删除后交付包 404", client.get(f"/api/factory/projects/{factory_id}/bundle").status_code, 404)
+        check("删除后作业 404", client.get(f"/api/factory/jobs/{first_run['id']}").status_code, 404)
 
         print("[生成通道 span 对齐]")
         gen_trace = client.get(f"/api/tasks/{vid}/trace").json()

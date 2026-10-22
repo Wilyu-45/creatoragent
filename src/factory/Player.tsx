@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { pickRecorderMime } from '../vg/exporter.ts';
 import { mediaUrl } from './api.ts';
+import { IconDownload, IconPause, IconPlay, IconRewind } from '../components/icons.tsx';
 
 export interface ShotFrame {
   url: string;
@@ -391,13 +392,14 @@ export function Player({ timeline, onToast }: { timeline: FactoryTimeline | null
       <div className="fc-side">
         <div className="row" style={{ gap: 8, alignItems: 'center' }}>
           <button className="btn btn-sm btn-primary" onClick={toggle}>
-            {playing ? '⏸ 暂停' : '▶ 播放'}
+            {playing ? <IconPause size={14} /> : <IconPlay size={14} />}
+            {playing ? '暂停' : '播放'}
           </button>
           <button className="btn btn-sm btn-ghost" onClick={() => seek(0)}>
-            ⏮ 回到开头
+            <IconRewind size={14} /> 回到开头
           </button>
           <button className="btn btn-sm btn-ghost" onClick={exportWebm} disabled={Boolean(exporting)}>
-            {exporting ? '导出中…' : '⬇ 导出视频'}
+            <IconDownload size={14} /> {exporting ? '导出中…' : '导出视频'}
           </button>
         </div>
         <div className="fc-scrub">

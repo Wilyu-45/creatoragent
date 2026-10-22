@@ -1,11 +1,18 @@
 import { useState } from 'react';
 import type { AssetKind, Brief, BriefAsset, Priority } from '../lib/types.ts';
 import { createEmptyBrief } from '../lib/types.ts';
+import { PRIORITY_LABEL } from '../lib/format.ts';
 import { Spinner } from './ui.tsx';
 
 const CHANNELS = ['小红书', '抖音', '公众号', '知乎', '电商详情页', '官网', 'PR'];
 const OBJECTIVES = ['曝光', '互动', '转化', '教育', '信任'];
-const PRIORITY_LABEL: Record<Priority, string> = { low: '低', normal: '普通', high: '高', urgent: '紧急' };
+const LANGUAGES: [string, string][] = [
+  ['zh', '中文'],
+  ['en', 'English'],
+  ['ja', '日本語'],
+  ['ko', '한국어'],
+  ['es', 'Español'],
+];
 
 function fromLines(value: string): string[] {
   return value
@@ -38,22 +45,37 @@ function toAssets(value: string): BriefAsset[] {
     });
 }
 
+function assetLines(assets: BriefAsset[] | undefined): string {
+  return (assets ?? [])
+    .map((asset) => (asset.title ? `${asset.title}=${asset.ref}` : asset.ref))
+    .join('\n');
+}
+
 export function BriefForm({
   industries,
   submitting,
+  initial,
   onClose,
   onSubmit,
 }: {
   industries: string[];
   submitting: boolean;
+  /** 传入现有任务 Brief 时作为「复制新建」的起点；不传则是空白新建。 */
+  initial?: Brief;
   onClose: () => void;
   onSubmit: (brief: Partial<Brief>, autoApprove: boolean) => void;
 }) {
-  const [form, setForm] = useState<Brief>(() => createEmptyBrief());
-  const [keywords, setKeywords] = useState('冷萃咖啡, 办公室, 提神');
-  const [constraints, setConstraints] = useState('不使用绝对化用语\n不承诺功效');
-  const [deliverables, setDeliverables] = useState('图文笔记 1 篇\n标题备选 5 条');
-  const [assets, setAssets] = useState('');
+  const [form, setForm] = useState<Brief>(() => ({ ...createEmptyBrief(), ...initial }));
+  const [keywords, setKeywords] = useState(() =>
+    initial ? initial.keywords.join(', ') : '冷萃咖啡, 办公室, 提神',
+  );
+  const [constraints, setConstraints] = useState(() =>
+    initial ? initial.constraints.join('\n') : '不使用绝对化用语\n不承诺功效',
+  );
+  const [deliverables, setDeliverables] = useState(() =>
+    initial ? initial.deliverables.join('\n') : '图文笔记 1 篇\n标题备选 5 条',
+  );
+  const [assets, setAssets] = useState(() => (initial ? assetLines(initial.assets) : ''));
   const [autoApprove, setAutoApprove] = useState(false);
 
   const patch = (key: keyof Brief, value: string): void => {
@@ -64,6 +86,7 @@ export function BriefForm({
     onSubmit(
       {
         ...form,
+        deadline: form.deadline?.trim() ? form.deadline : null,
         keywords: fromLines(keywords),
         constraints: fromLines(constraints),
         deliverables: fromLines(deliverables),
@@ -76,9 +99,11 @@ export function BriefForm({
   return (
     <div className="modal-mask" onClick={onClose}>
       <div className="modal" onClick={(event) => event.stopPropagation()}>
-        <h2>新建创作任务</h2>
+        <h2>{initial ? '以现有 Brief 新建任务' : '新建创作任务'}</h2>
         <div className="muted small">
-          提交后 A0 总控会拆解任务卡，编排「策略 → 创意 → 策划 → 文案 → 审校 → 核查 → 合规 → 审批」流水线。
+          {initial
+            ? `以「${initial.brand} · ${initial.product}」的 Brief 为起点创建全新任务，提交不会修改原任务；确认或调整内容后即可启动流水线。`
+            : '提交后 A0 总控会拆解任务卡，编排「策略 → 创意 → 策划 → 文案 → 审校 → 核查 → 合规 → 审批」流水线。'}
         </div>
 
         <div className="form-grid">
@@ -96,13 +121,17 @@ export function BriefForm({
           </div>
           <div className="field">
             <label>传播目标</label>
-            <select value={form.objective} onChange={(e) => patch('objective', e.target.value)}>
+            <input
+              value={form.objective}
+              onChange={(e) => patch('objective', e.target.value)}
+              list="objective-options"
+              placeholder="例如：曝光"
+            />
+            <datalist id="objective-options">
               {OBJECTIVES.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
+                <option key={item} value={item} />
               ))}
-            </select>
+            </datalist>
           </div>
           <div className="field">
             <label>目标受众</label>
@@ -141,6 +170,16 @@ export function BriefForm({
             <input value={form.tone} onChange={(e) => patch('tone', e.target.value)} />
           </div>
           <div className="field">
+            <label>目标语言</label>
+            <select value={form.language} onChange={(e) => patch('language', e.target.value)}>
+              {LANGUAGES.map(([code, label]) => (
+                <option key={code} value={code}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
             <label>优先级</label>
             <select value={form.priority} onChange={(e) => patch('priority', e.target.value)}>
               {(Object.keys(PRIORITY_LABEL) as Priority[]).map((item) => (
@@ -149,6 +188,15 @@ export function BriefForm({
                 </option>
               ))}
             </select>
+          </div>
+          <div className="field">
+            <label>截止时间（可选）</label>
+            <input
+              type="date"
+              value={form.deadline ?? ''}
+              onChange={(e) => patch('deadline', e.target.value)}
+            />
+            <div className="muted small">过期后会在任务列表与页头标红提示。</div>
           </div>
         </div>
 
@@ -200,7 +248,7 @@ export function BriefForm({
             取消
           </button>
           <button className="btn btn-primary" onClick={submit} disabled={submitting || !form.brand || !form.product}>
-            {submitting ? <Spinner /> : null} 提交并启动流水线
+            {submitting ? <Spinner /> : null} {initial ? '创建新任务' : '提交并启动流水线'}
           </button>
         </div>
       </div>

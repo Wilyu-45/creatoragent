@@ -69,15 +69,18 @@ export function Chip({
   tone,
   mono,
   title,
+  className,
 }: {
   children: ReactNode;
   tone?: string;
   mono?: boolean;
   title?: string;
+  className?: string;
 }) {
   const classes = ['chip'];
   if (mono) classes.push('mono');
   if (tone) classes.push(tone);
+  if (className) classes.push(className);
   return (
     <span className={classes.join(' ')} title={title}>
       {children}

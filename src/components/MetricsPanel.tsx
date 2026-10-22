@@ -15,7 +15,7 @@ const SYSTEM_LABELS: [string, string, string][] = [
   ['gate_pass_rate', '门禁通过率', '%'],
   ['fact_accuracy', '事实准确率', '%'],
   ['brand_consistency', '品牌一致性', ''],
-  ['turn_budget_hit_rate', 'Turn Budget 触顶率', '%'],
+  ['turn_budget_hit_rate', '轮次预算触顶率', '%'],
   ['p99_agent_latency_ms', 'P99 智能体延迟', 'ms'],
   ['simulated_ratio', '离线引擎占比', '%'],
 ];

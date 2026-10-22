@@ -505,7 +505,7 @@ export function SettingsDrawer({
             <div className="section-h">编排与门禁</div>
             <div className="form-grid">
               <div className="field">
-                <label>Turn Budget</label>
+                <label>轮次预算</label>
                 <input type="number" value={turnBudget} onChange={(e) => setTurnBudget(Number(e.target.value))} />
               </div>
               <div className="field">

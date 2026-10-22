@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Graph, GraphEdge, GraphNode, NodeRunState, NodeSpec, PortSpec } from './api.ts';
 import { NODE_STATUS_LABEL } from './api.ts';
+import { IconExpand, IconMinus, IconMuted, IconPlus, IconVolume } from '../components/icons.tsx';
 
 export const NODE_W = 252;
 const HEAD_H = 36;
@@ -381,7 +382,7 @@ export function Canvas({ graph, specs, selected, runs, badNodes, badEdges, onSel
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={() => onChange({ ...graph, nodes: graph.nodes.map((item) => (item.id === node.id ? { ...item, muted: !node.muted } : item)) })}
               >
-                {node.muted ? '🔇' : '🔊'}
+                {node.muted ? <IconMuted size={14} /> : <IconVolume size={14} />}
               </button>
             </div>
           );
@@ -390,14 +391,14 @@ export function Canvas({ graph, specs, selected, runs, badNodes, badEdges, onSel
 
       <div className="fc-viewbar">
         <button className="btn btn-sm btn-ghost" onClick={fitView}>
-          适应画布
+          <IconExpand size={14} /> 适应画布
         </button>
-        <button className="btn btn-sm btn-ghost" onClick={() => setView((prev) => ({ ...prev, k: Math.max(0.15, prev.k / 1.2) }))}>
-          －
+        <button className="btn btn-sm btn-ghost fc-zoom" onClick={() => setView((prev) => ({ ...prev, k: Math.max(0.15, prev.k / 1.2) }))} title="缩小">
+          <IconMinus size={14} />
         </button>
         <span className="muted small">{Math.round(view.k * 100)}%</span>
-        <button className="btn btn-sm btn-ghost" onClick={() => setView((prev) => ({ ...prev, k: Math.min(2.2, prev.k * 1.2) }))}>
-          ＋
+        <button className="btn btn-sm btn-ghost fc-zoom" onClick={() => setView((prev) => ({ ...prev, k: Math.min(2.2, prev.k * 1.2) }))} title="放大">
+          <IconPlus size={14} />
         </button>
         <button className="btn btn-sm btn-ghost" onClick={deleteSelected} disabled={!selected.length} title="删除选中岗位（Del）">
           删除选中

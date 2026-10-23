@@ -473,6 +473,18 @@ export interface FilmMeta {
   refs: string[];
 }
 
+/** 回看差异摘要：现在这条与最近交付装箱那条相比，改了哪些引用/时长/镜数变了多少。 */
+export interface FilmDiff {
+  refs_added: string[];
+  refs_removed: string[];
+  /** 按一级目录归类的增删（images/audio/video/… → {added, removed}），让「改了哪类素材」一眼可读。 */
+  by_dir: Record<string, { added: number; removed: number }>;
+  shots_delta: number;
+  duration_delta_s: number;
+  /** 基准来自旧版台账的截断存储（film_refs）时增删仅为近似；新版全量快照 film_baseline.json 为 false。 */
+  refs_truncated: boolean;
+}
+
 /** 回看对账：现在这条成片与最新一次交付装箱的那条内容是否一致（只读台账派生）。 */
 export interface FilmDelivery {
   delivered_at: string;
@@ -484,6 +496,8 @@ export interface FilmDelivery {
   live_fingerprint: string;
   /** 一致 true / 之后又改过 false / 无成片或从未交付 null（无从比对）。 */
   matches: boolean | null;
+  /** 差异摘要；无成片或旧版未存基准时为 null。 */
+  diff: FilmDiff | null;
 }
 
 /** `GET .../film` 回值：选中的成片元数据 + 原始时间轴对象 + 回看对账（无成片轴时 film/timeline 为 null）。 */
@@ -527,6 +541,8 @@ export interface DeliveryEntry {
   film_duration?: number;
   /** 仅放行且带成片时记：那次装箱成片的内容指纹，供放映室回看对账。 */
   film_fingerprint?: string;
+  /** 仅旧版交付时记：那次装箱成片的素材引用（截断存储）；新版基准改存 film_baseline.json。 */
+  film_refs?: string[];
   /** 仅拦下时有：阻断项原文。 */
   blockers?: string[];
 }

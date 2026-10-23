@@ -238,10 +238,10 @@ sample/http 不联网真读，就不写这份记忆（宁可不记，也不拿�
 **不把半成品或只有工作流的空包说成交付完成**。
 交付台账 `data/factory/<project_id>/deliveries.json` 与 `project.json`/`artifacts/` 同口径**保留文件不迁 pg**（总表 #16）：
 `build_bundle` 每到一个终端决策点（放行 / 被验收拦下 / 无产物）就往台账**追加**一条留痕（时间、验收 verdict/counts、
-终端就绪、产物数与字节、放行时附交付包 sha256 与大小（带成片时另记成片内容指纹 `film_fingerprint`）、拦下时附阻断项），只留最近 50 条、原子重写；
+终端就绪、产物数与字节、放行时附交付包 sha256 与大小（带成片时另记成片内容指纹 `film_fingerprint`；当时的素材引用基准不塞台账，另存全量快照 `film_baseline.json`）、拦下时附阻断项），只留最近 50 条、原子重写；
 写台账失败只告警不抛（不能把一个已写好的 zip 说成失败）。`GET .../deliveries` 只读派生、不建 `factory_jobs` 行，
 跨租户按不存在处理；删项目随目录一并回收。固定名 `delivery.zip` 只说明「现在这版包里有什么」，台账才回答「交过没、何时、当时量出什么结论」。
-**成片轴的唯一口径是 `acceptance.select_film`**（拓扑序最靠后、`kind=="timeline"`、镜数>0 且时长>0）：验收报告的 `film`、包内 `timeline.json` 与只读端点 `GET .../film`（`{film, timeline}`）都读它，放映室不再自己逐岗位选轴（live==delivered）；同样只读不建作业、跨租户按不存在处理。**回看对账**：`_film_fingerprint` 对成片内容算规范化 JSON 的 sha256（与 zip 字节无关，只看逐镜引用/时长/顺序），`_assemble_bundle` 写入 `manifest.film.fingerprint` 与台账 `delivered` 条的 `film_fingerprint`；`GET .../film` 额外回 `delivery = {delivered_at, archive_sha256, download_name, film_fingerprint, live_fingerprint, matches}`，`matches` 把实时内容指纹与最新一条已交付留痕的指纹对比——一致 `true`、之后又改过 `false`、无成片或从未交付过带成片的版 `null`（不比旧包字节、只比内容，因固定名覆盖旧版字节已不存在，不装作能回放）。
+**成片轴的唯一口径是 `acceptance.select_film`**（拓扑序最靠后、`kind=="timeline"`、镜数>0 且时长>0）：验收报告的 `film`、包内 `timeline.json` 与只读端点 `GET .../film`（`{film, timeline}`）都读它，放映室不再自己逐岗位选轴（live==delivered）；同样只读不建作业、跨租户按不存在处理。**回看对账**：`_film_fingerprint` 对成片内容算规范化 JSON 的 sha256（与 zip 字节无关，只看逐镜引用/时长/顺序），`_assemble_bundle` 写入 `manifest.film.fingerprint` 与台账 `delivered` 条的 `film_fingerprint`；`GET .../film` 额外回 `delivery = {delivered_at, archive_sha256, download_name, film_fingerprint, live_fingerprint, matches}`，`matches` 把实时内容指纹与最新一条已交付留痕的指纹对比——一致 `true`、之后又改过 `false`、无成片或从未交付过带成片的版 `null`（不比旧包字节、只比内容，因固定名覆盖旧版字节已不存在，不装作能回放）。**差异摘要**：`delivery` 另回 `diff = {refs_added, refs_removed, by_dir, shots_delta, duration_delta_s, refs_truncated}`——基准优先读 `data/factory/<project_id>/film_baseline.json`（装箱成功才更新的**全量快照**：delivered_at/archive_sha256/film_fingerprint/film 本体与装箱剪辑决定 `timeline`，与台账同口径保留文件不迁 pg、旁路写失败只告警不抛）；采信前先拿内嵌本体重算内容指纹自证——JSON 能解析≠内容可信，**指纹字段没变、本体被改坏**（手工篡改/磁盘损坏）时整个快照不采信，与台账指纹不符（两份旁路漂移）时宁可不比对，旧版没快照时回退台账里存过截断 `film_refs` 的最后一条 delivered（截断存储增删只能当近似，`refs_truncated=true` 如实标出；快照基准则 `false`）；都拿不到或现在无成片时 `diff` 为 `null`（不拿空集把全部引用误报成新增）。`by_dir` 按一级目录归类增删（`_ref_dir` 只做展示归类，不另立口径）。同一对账信号在放映室 chip 与「产物」页台账头两处展示（横幅 + 重新下载按钮），共用 `film()` 一个真相不各算一套。
 三个多副本注意点：
 - 作业存储需共享（PG 表或 Redis Hash）；
 - `sample` 内置引擎的「按流逝时间惰性推进」是**进程内**行为，多副本下要么

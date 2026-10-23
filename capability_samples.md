@@ -378,12 +378,13 @@
   写一份顶层 `timeline.json` 进包（逐镜引用 `artifacts/` 里的素材）——拆包的人不只拿到散件，还能拼回那条片子；无成片轴则不附（`manifest.film=null`）。
   **回看对账**：包内 `manifest.film.fingerprint` 与台账 `delivered` 条都记一条成片内容指纹（规范化 JSON 的 sha256）；只读 `GET .../film` 回 `delivery.matches`，
   把屏幕上这条与最近一次装箱那条比内容——一致/改过/无从比对（`true`/`false`/`null`）。固定名覆盖旧包字节已不存在，不比旧包只比内容，**不装作能回放**。
+  **差异摘要**：`delivery.diff`（`{refs_added, refs_removed, by_dir, shots_delta, duration_delta_s, refs_truncated}`）拿当时引用基准与现在这条比，不只说“改了”，还点名改了哪些引用（`by_dir` 按素材类型归类增删）、时长/镜数变了多少。基准优先读全量快照 `film_baseline.json`（装箱成功才换；旁路写失败只告警；内嵌装箱本体，读回时重算内容指纹自证——本体被改坏的脏快照整个不采信），旧版没快照时回退台账存过的截断 `film_refs`（如实标 `refs_truncated=true` 增删仅近似），都拿不到或无成片为 `null`（不拿空集误报全部为新增）。同一信号在放映室 chip 与「产物」页台账头两处展示（过时/未装箱横幅 + 重新下载按钮），共用 `film()` 一个口径。
   **写包前先过交付验收**（`app/factory/acceptance.py`，与引擎预检同口径）：工作流体检有错、终端岗位没跑或缓存过期、
   产物引用文件不在盘或 0 字节、时间轴为空都拒打包（409）；占位产物/终端静音/孤儿产物只带警告不拦。
   无产物或仍有运行在写产物时同样拒绝（409），跨租户按不存在处理（404）；
   不把只有工作流的空包或半截素材说成交付完成。
 - **交付台账**：固定名 `delivery.zip` 只说明「现在这版包里有什么」，台账（`GET .../deliveries`）才回答「这个项目交过没、何时、当时量出什么」。
-  `build_bundle` 每到一个终端决策点就向 `deliveries.json` **追加**一条留痕：放行（`delivered`：时间、验收 verdict/counts、终端就绪、产物数与字节、**交付包 sha256 与大小**、带成片时**成片内容指纹 `film_fingerprint`**）、
+  `build_bundle` 每到一个终端决策点就向 `deliveries.json` **追加**一条留痕：放行（`delivered`：时间、验收 verdict/counts、终端就绪、产物数与字节、**交付包 sha256 与大小**、带成片时**成片内容指纹 `film_fingerprint`**；当时的素材引用基准另存全量快照 `film_baseline.json`不塞台账）、
   被验收拦下（`blocked`：前几条阻断项原文 + `refs_missing`）、无产物（`blocked`）——**拒打包也留痕**，不把拦下的尝试抹成什么都没发生过。
   只留最近 50 条（超出丢最旧），写台账失败只告警不抛（不能把一个已写好的 zip 说成失败），读取只派生不建作业、跨租户按 404。
 - **重启回收**：跑图靠进程内后台线程；服务重启后落盘里仍停在 `queued`/`running` 的作业会在启动时统一标为中断
@@ -397,9 +398,9 @@
   `GET .../runs`（历史摘要，带 `retry_nodes`）、`GET .../stats`（运行统计：成功率/复用率/耗时/失败热点，只读派生）、
   `GET .../runs/compare?base=&target=`（两次已结束运行的逐岗迁移与产物结构差异，只读派生）、
   `GET /api/factory/jobs/{job_id}`、`POST .../cancel`（`cancelling` → `cancelled`，未开工岗位标 `cancelled`）、
-  `GET .../outputs/{node_id}`、`GET .../artifacts[/{rel}]`、`GET .../acceptance`（只读交付验收报告）、`GET .../deliveries`（只读交付台账：每次打包的放行/拦截留痕，新的在前、不建作业）、`GET .../film`（只读成片时间轴 `{film, timeline, delivery}`：与验收 film / 包内 timeline.json 同一口径 `select_film`，`delivery.matches` 回看对账——现在这条与最近交付装箱那条内容一致/改过/无从比对）、`GET .../bundle`（交付包 zip；写包前过验收，验收未过/无产物/运行中都 409；有剪辑成片时附 `timeline.json`）。
+  `GET .../outputs/{node_id}`、`GET .../artifacts[/{rel}]`、`GET .../acceptance`（只读交付验收报告）、`GET .../deliveries`（只读交付台账：每次打包的放行/拦截留痕，新的在前、不建作业）、`GET .../film`（只读成片时间轴 `{film, timeline, delivery}`：与验收 film / 包内 timeline.json 同一口径 `select_film`，`delivery.matches` 回看对账——现在这条与最近交付装箱那条内容一致/改过/无从比对（`true`/`false`/`null`），`delivery.diff` 给出改了哪些引用/时长镜数变了多少的差异摘要）、`GET .../bundle`（交付包 zip；写包前过验收，验收未过/无产物/运行中都 409；有剪辑成片时附 `timeline.json`）。
 - **存储**：`data/factory/<project_id>/project.json`（工作流）+ `artifacts/`（产物）+ `exports/delivery.zip`（按需重生成的交付包，含成片时附 `timeline.json`）
-  + `deliveries.json`（交付台账：每次打包放行/拦下的 append-only 留痕，只留最近 50 条）保留文件不迁 pg；运行作业行走 `factory_jobs`（file：`data/factory_jobs.json`；pg：同构表），见
+  + `deliveries.json`（交付台账：每次打包放行/拦下的 append-only 留痕，只留最近 50 条）+ `film_baseline.json`（最近一次装箱成片的引用基准全量快照，内嵌装箱本体供读回指纹自证，供回看差异摘要）保留文件不迁 pg；运行作业行走 `factory_jobs`（file：`data/factory_jobs.json`；pg：同构表），见
   [`storage_contract.md`](storage_contract.md) 总表 #10 / #16。
 - **回归**：`scripts/doctor.py` 的 `check_factory()` 覆盖 60 岗位注册与部门归档、五种预设展图与静态体检、
   环路 / 端口告警、**结构体检**（岗位 id 为空或重复点名不误报成环路、悬空端点说「已不存在」、自环与重复连线）、增量缓存（首岗交付即落盘）、**运行预检**（全缓存、改分镜只波及 `n-sb`/`n-sup`/`n-act`、force 全重跑、
@@ -414,7 +415,7 @@
   上游仍复用、计划外补丁记入 `ignored_param_overrides`、未知岗位/非对象补丁/静音岗位拒绝且不建作业、实跑逐岗 `overridden` 只在
   真执行时为真、画布参数未被改写、跑完后普通预检如实要求重跑以证明缓存槽已换新签名）、岗位边界取消（`cancelling` → `cancelled`、剩余岗位标 `cancelled`、
   进度按计划岗位数）、离线真落盘与 `simulated` 自报、异步作业生命周期、未知目标拒绝、重启回收（含 `cancelling`）、
-  交付验收与交付包（跑完生成台 `verdict=warn`、删一个被引用产物即阻断且 `build_bundle` 抛 `AcceptanceBlocked`、未跑项目终端未交付阻断；manifest/sha256、重复下载覆盖、无产物/跨租户/运行中拒绝）、**回看闭环**（交付包内含 `timeline.json`、`film.node_id` 在项目节点集内、镜数>0 时长>0 且与包内实际一致、**它引用的素材逐个能在包内 `artifacts/` 找到**）、**回看对账**（`manifest.film.fingerprint` 与最新 `delivered` 台账条一致（64 位）、刚交付时 `store.film.delivery.matches is True`、篡改缓存后翻脸判 `False`）、**交付台账**（同一项目≥ 2 条 `delivered` 带 64 位 sha256/包大小>0、≥ 1 条 `blocked` 带阻断项与 `refs_missing≥1`、新的在前、汇总计数一致、跨租户 KeyError、只读不建作业）、租户隔离、产物越界与删除回收；
+  交付验收与交付包（跑完生成台 `verdict=warn`、删一个被引用产物即阻断且 `build_bundle` 抛 `AcceptanceBlocked`、未跑项目终端未交付阻断；manifest/sha256、重复下载覆盖、无产物/跨租户/运行中拒绝）、**回看闭环**（交付包内含 `timeline.json`、`film.node_id` 在项目节点集内、镜数>0 时长>0 且与包内实际一致、**它引用的素材逐个能在包内 `artifacts/` 找到**）、**回看对账**（`manifest.film.fingerprint` 与最新 `delivered` 台账条一致（64 位）、刚交付时 `store.film.delivery.matches is True` 且 `diff` 全零（引用增删空、时长/镜数零）、篡改缓存后翻脸判 `False` 且 `diff.duration_delta_s≈` 篡改量、`by_dir` 仍空（没动引用就不许报某类素材变了）、**基准快照**（`film_baseline.json` 指纹==最新 delivered、快照基准 `refs_truncated=false`；移走快照时无旧格式台账判 `diff=null` 不装准确、回退旧台账截断存储时如实标近似；**快照自洽**（指纹字段不动、只改坏装箱本体也要整个快照不采信，`diff=null` 诚实「无从点名」，绝不拿损坏误报成用户改了素材）））、**交付台账**（同一项目≥ 2 条 `delivered` 带 64 位 sha256/包大小>0、≥ 1 条 `blocked` 带阻断项与 `refs_missing≥1`、新的在前、汇总计数一致、跨租户 KeyError、只读不建作业）、租户隔离、产物越界与删除回收；
   `scripts/verify_contracts.py` 在真实服务下核验建项目 → 跑图 → 预检（整图全缓存 / 闭包收窄 / force 全重跑 / 不建作业 / 未知目标 400）
   → 运行历史（成功运行无可续跑；空文本项目运行失败并点名 `retry_nodes`，带这些目标续跑可受理且只跑 1 岗）
   → 运行统计（2 次运行的 12/12/0.5 复用率、岗位画像、limit 越界 422、未知项目 404、统计只读、失败现场 `job_id` 集合）

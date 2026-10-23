@@ -697,10 +697,11 @@ try:
               (film_meta_http.get("node_id"), film_meta_http.get("shots")),
               ((accept_report.get("film") or {}).get("node_id"), (accept_report.get("film") or {}).get("shots")))
         film_delivery = film_body.get("delivery") or {}
-        check("成片回看对账契约：字段齐、无成片时 matches 为 null 且 live_fingerprint 空",
-              {"delivered_at", "archive_sha256", "film_fingerprint", "live_fingerprint", "matches"} <= set(film_delivery)
+        check("成片回看对账契约：字段齐、无成片时 matches/diff 为 null 且 live_fingerprint 空",
+              {"delivered_at", "archive_sha256", "film_fingerprint", "live_fingerprint", "matches", "diff"} <= set(film_delivery)
               and (bool(film_meta_http)
-                   or (film_delivery.get("matches") is None and not film_delivery.get("live_fingerprint"))),
+                   or (film_delivery.get("matches") is None and film_delivery.get("diff") is None
+                       and not film_delivery.get("live_fingerprint"))),
               True)
         check("成片未知项目 404",
               client.get("/api/factory/projects/no-such-project/film").status_code, 404)

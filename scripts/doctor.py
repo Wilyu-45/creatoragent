@@ -4597,7 +4597,10 @@ def check_factory() -> bool:
     里的 deliveries.json，只读不建作业——固定名交付包只说「现在这版」，台账才回答「交过没、何时、当时量出什么」）；
     台账之外再钉一条**回看闭环**（交付包内含最下游那条成片时间轴 timeline.json，它引用的素材必须逐个在包内——
     拆包的人不只拿到散件，还能拼回那条片子）；闭环之上再做**回看对账**（成片区内容指纹存进台账与 manifest，
-    刚交付时屏幕这条与装箱那条一致、篡改缓存后应翻脸判不一致——不比旧包字节只比内容，诚实回答“改了没”）。
+    刚交付时屏幕这条与装箱那条一致、篡改缓存后应翻脸判不一致——不比旧包字节只比内容，诚实回答“改了没”；
+    当时的引用基准全量存 film_baseline.json（不塞台账、不截断；快照缺失回退旧台账截断存储时如实标近似，
+    重新交付必须换基准快照，否则以后的差异点名会用过时基准；快照内嵌装箱本体供读回时重算指纹自证，
+    本体被改坏的脏快照整个不采信，差异诚实「无从点名」而不拿损坏误报成用户改了素材）。
 
     诚实口径与其余旁路通道一致：离线路径只用标准库把产物落到项目工作区并一律带
     ``simulated=True``，绝不假装接了真机；缺素材/缺交付物如实落到节点状态而不是补一条假连线。
@@ -5415,15 +5418,64 @@ def check_factory() -> bool:
          if row.get("event") == "delivered"),
         {},
     )
+    # 基准快照：装箱成功才落 film_baseline.json，全量存引用（不再塞台账、不再截断近似）
+    baseline_path = factory_store.store._film_baseline_file(project_id)
+    baseline_raw = factory_store.store._load_film_baseline(baseline_path)
     live_delivery = live.get("delivery") or {}
+    live_diff = live_delivery.get("diff") or {}
     film_reconcile_ok = (
         len(film_fp) == 64
         and str(recon_delivered.get("film_fingerprint") or "") == film_fp
         and str(live_delivery.get("film_fingerprint") or "") == film_fp
         and len(str(live_delivery.get("live_fingerprint") or "")) == 64
         and live_delivery.get("matches") is True
+        and live_delivery.get("diff") is not None
+        and str(baseline_raw.get("film_fingerprint") or "") == film_fp
+        and isinstance((baseline_raw.get("film") or {}).get("refs"), list)
+        and bool((baseline_raw.get("film") or {}).get("refs"))
+        # 快照自洽的前提是本体确实写进去了：重算装箱本体的内容指纹必须与记录指纹对得上
+        and baseline_raw.get("timeline") is not None
+        and factory_store._film_fingerprint(baseline_raw.get("timeline")) == film_fp
+        and live_diff.get("refs_added") == [] and live_diff.get("refs_removed") == []
+        and isinstance(live_diff.get("by_dir"), dict) and live_diff.get("by_dir") == {}
+        and int(live_diff.get("shots_delta") or 0) == 0
+        and abs(float(live_diff.get("duration_delta_s") or 0)) < 1e-6
+        and live_diff.get("refs_truncated") is False  # 快照基准全量无截断
     )
-    # 篡改缓存（把这条成片时长改一下）→ 对账应立刻判“不一致”；随后原样还回，不污染后续 bundle/台账断言
+    # 移走快照（模拟旧版/快照被删）：两种降级都要诚实——连旧格式台账也没有就「无从点名」（null，
+    # 不拿空集装准确）；回退旧版台账的截断 film_refs 时如实标近似；对账本身始终靠指纹成立
+    baseline_bak = baseline_path.with_suffix(".bak")
+    baseline_path.rename(baseline_bak)
+    nodelivery = factory_store.store.film(project_id, "default").get("delivery") or {}
+    degraded = factory_store.store._deliveries_file(project_id).read_text(encoding="utf-8")
+    legacy_entry = dict(recon_delivered)
+    legacy_entry["film_refs"] = [str(r) for r in ((live.get("film") or {}).get("refs") or [])]
+    factory_store.store._deliveries_file(project_id).write_text(
+        json.dumps([legacy_entry], ensure_ascii=False), encoding="utf-8")
+    fb_delivery = factory_store.store.film(project_id, "default").get("delivery") or {}
+    factory_store.store._deliveries_file(project_id).write_text(degraded, encoding="utf-8")
+    baseline_bak.rename(baseline_path)
+    fb_diff = fb_delivery.get("diff") or {}
+    film_fallback_ok = (
+        nodelivery.get("matches") is True and nodelivery.get("diff") is None
+        and fb_delivery.get("matches") is True
+        and fb_diff
+        and fb_diff.get("refs_truncated") is True
+        and fb_diff.get("refs_added") == [] and fb_diff.get("refs_removed") == []
+    )
+    # 快照自洽：指纹字段不动、只改坏装箱本体（模拟手工篡改/磁盘损坏）→ 与台账的指纹校验仍能
+    # 通过，但重算本体指纹对不上——整个快照必须不采信，差异诚实「无从点名」（新格式台账无截断
+    # 引用可回退，宁 null 不拿脏基准编造）；对账本身靠台账指纹成立不受影响；还原后基准恢复
+    base_snap = json.loads(baseline_path.read_text(encoding="utf-8"))
+    base_dirty = json.loads(json.dumps(base_snap))
+    base_dirty["timeline"]["_doctor_tamper"] = 1
+    baseline_path.write_text(json.dumps(base_dirty, ensure_ascii=False), encoding="utf-8")
+    guard_delivery = factory_store.store.film(project_id, "default").get("delivery") or {}
+    baseline_path.write_text(json.dumps(base_snap, ensure_ascii=False), encoding="utf-8")
+    film_baseline_guard_ok = (
+        guard_delivery.get("matches") is True and guard_delivery.get("diff") is None
+    )
+    # 篡改缓存（把这条成片时长改 +0.5）→ 对账应立刻判“不一致”，且差异摘要点名时长变了；随后原样还回
     ws_film = factory_store.workspace_for(project_id)
     cache_orig = ws_film.load_cache()
     cache_drift = json.loads(json.dumps(cache_orig))
@@ -5431,12 +5483,32 @@ def check_factory() -> bool:
     cache_drift[_fnode]["outputs"][_fport]["duration_s"] = float(
         (cache_drift[_fnode]["outputs"][_fport] or {}).get("duration_s") or 0) + 0.5
     ws_film.save_cache(cache_drift)
-    drift_matches = (factory_store.store.film(project_id, "default").get("delivery") or {}).get("matches")
+    drift_delivery = factory_store.store.film(project_id, "default").get("delivery") or {}
     ws_film.save_cache(cache_orig)
-    film_drift_ok = drift_matches is False
+    drift_diff = drift_delivery.get("diff") or {}
+    film_drift_ok = (
+        drift_delivery.get("matches") is False
+        and abs(float(drift_diff.get("duration_delta_s") or 0) - 0.5) < 1e-6
+        and drift_diff.get("refs_added") == [] and drift_diff.get("refs_removed") == []
+        and drift_diff.get("by_dir") == {}  # 只改时长没动引用：归类增删必须仍为空，不能乱报某类素材变了
+        and drift_diff.get("refs_truncated") is False  # 基准仍是快照，近似标记不许乱响
+    )
+    # 基准必须跟着最新一次交付走：取台账最新 delivered 的指纹与基线快照比对（只读，不额外打包——
+    # 篡改态下重打包会用被改的指纹换基准，会污染后续 film_readonly/bundle_stable 的前提）
+    latest_delivered = next(
+        (row for row in reversed(factory_store.store.delivery_log(project_id, "default")["entries"])
+         if row.get("event") == "delivered"),
+        {},
+    )
+    re_base = factory_store.store._load_film_baseline(factory_store.store._film_baseline_file(project_id))
+    film_baseline_swap_ok = (
+        str(re_base.get("film_fingerprint") or "") == film_fp
+        and str(latest_delivered.get("film_fingerprint") or "") == film_fp
+    )
     film_ok = (
         film_ok and film_live_ok and film_tenant_ok and film_readonly_ok
-        and film_reconcile_ok and film_drift_ok
+        and film_reconcile_ok and film_fallback_ok and film_drift_ok and film_baseline_swap_ok
+        and film_baseline_guard_ok
     )
     # 再打一次：固定文件名覆盖，exports 里只留一份 delivery.zip，不留 .tmp
     archive_again, _ = factory_store.store.build_bundle(project_id, "default")
@@ -5471,7 +5543,7 @@ def check_factory() -> bool:
     print(
         f"    交付包：zip 条目 {len(entries)}（产物 {len(packed_artifacts)}）｜manifest/README 校验={bundle_ok}"
         f"｜成片回看闭环（timeline.json {len(film_json.get('shots') or [])} 镜·引用全在包内·与 film 端点同一条"
-        f"·回看对账（刚交付一致={film_reconcile_ok}/改过翻脸={film_drift_ok}））={film_ok}"
+        f"·回看对账（刚交付一致={film_reconcile_ok}/改过翻脸={film_drift_ok}/无快照回退近似={film_fallback_ok}/重交付换基准={film_baseline_swap_ok}/快照篡改不采信={film_baseline_guard_ok}））={film_ok}"
         f"｜重复打包覆盖同一份={bundle_stable_ok}｜未跑拒打包={bundle_empty_ok}"
         f"｜跨租户拒绝={bundle_tenant_ok}｜运行中拒打包={bundle_busy_ok}"
     )

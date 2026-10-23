@@ -75,6 +75,11 @@ BUNDLE_NAME = "delivery.zip"
 DELIVERIES_NAME = "deliveries.json"
 #: 台账只留最近 N 条（追加式，超出丢最旧的）：审计留痕不是历史数据库
 MAX_DELIVERIES = 50
+#: 最近一次装箱成片的引用基准快照：对账只需要「最新一条」的单值真相，不该把引用列表
+#: 塞进每条台账（50 条 × 每条约 240 个引用的截断近似，大制作永远只能得到近似 diff）。
+#: 与 deliveries.json 同口径保留文件不迁 pg、旁路写失败只告警不抛；快照内嵌装箱本体
+#: （timeline），读回时重算内容指纹自证，防止「指纹字段没变、本体被改」的脏文件被当基准编造差异。
+FILM_BASELINE_NAME = "film_baseline.json"
 
 _UNSAFE_FILENAME = re.compile(r'[\\/:*?"<>|\r\n]+')
 
@@ -105,6 +110,15 @@ def _film_fingerprint(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
+
+
+def _ref_dir(ref: str) -> str:
+    """素材引用归到一级目录（images/audio/video/…）：没有目录结构的记 `(根目录)`。
+
+    只拿来做差异摘要的归类展示，不另立口径——引用本身仍来自 select_film 的 `_collect`。
+    """
+    head = str(ref).replace("\\", "/").strip("/").split("/", 1)
+    return head[0] if len(head) > 1 and head[0] else "(根目录)"
 
 
 def _simulated_nodes(cache: dict[str, Any]) -> list[str]:
@@ -385,6 +399,58 @@ class FactoryStore:
             matches: bool | None = None
         else:
             matches = live_fp == last_fp
+        # 差异摘要：不光说“改了”，还点名改了哪些引用/时长/镜数变了多少。基准优先读
+        # film_baseline.json 全量快照（只对账最新一条，与 ledger 同源指纹一致才采信；不一致说明
+        # 两份旁路文件漂移，宁可不比对）；旧版没快照时回退台账里存过 film_refs 的最后一条 delivered
+        #（那是截断存储，增删只能当近似）；都拿不到则置 null，不拿空集把“全部引用”误报成新增。
+        baseline = self._load_film_baseline(self._film_baseline_file(str(record["id"])))
+        # 快照自洽：JSON 能解析 ≠ 内容可信——手工改坏/磁盘损坏可能只伤本体而指纹字段没动，
+        # 此时它与台账校验仍能通过，拿这种基准比差异会把损坏当「用户改了素材」误报。
+        # 内嵌装箱本体时重算其内容指纹与记录的指纹核对，不符整个快照不采信（走回退/降级）；
+        # 旧格式快照没存本体、无从核验，照旧采信（宽容，不误伤历史文件）。
+        if baseline:
+            _stored_fp = str(baseline.get("film_fingerprint") or "")
+            _body = baseline.get("timeline")
+            if _body is not None and _film_fingerprint(_body) != _stored_fp:
+                baseline = {}
+        base_from_ledger = False
+        base_film: dict[str, Any] = {}
+        if baseline and str(baseline.get("film_fingerprint") or "") == last_fp:
+            base_film = baseline.get("film") if isinstance(baseline.get("film"), dict) else {}
+        else:
+            legacy = [row for row in delivered if "film_refs" in row]
+            if not legacy or not meta:
+                diff: dict[str, Any] | None = None
+                baseline = {}
+            else:
+                base_from_ledger = True
+                last_row = legacy[-1]
+                base_film = {
+                    "refs": last_row.get("film_refs") or [],
+                    "shots": last_row.get("film_shots") or 0,
+                    "duration_s": last_row.get("film_duration") or 0.0,
+                }
+        if not meta or not base_film:
+            diff: dict[str, Any] | None = None
+        else:
+            live_refs = [str(ref) for ref in (meta.get("refs") or [])]
+            last_refs = [str(ref) for ref in (base_film.get("refs") or [])]
+            live_set, last_set = set(live_refs), set(last_refs)
+            # by_dir：按一级目录归类增删（图片/音频/视频…），让「改了哪类素材」一眼可读
+            by_dir: dict[str, dict[str, int]] = {}
+            for ref in live_set - last_set:
+                by_dir.setdefault(_ref_dir(ref), {"added": 0, "removed": 0})["added"] += 1
+            for ref in last_set - live_set:
+                by_dir.setdefault(_ref_dir(ref), {"added": 0, "removed": 0})["removed"] += 1
+            diff = {
+                "refs_added": sorted(live_set - last_set),
+                "refs_removed": sorted(last_set - live_set),
+                "by_dir": by_dir,
+                "shots_delta": int(meta.get("shots") or 0) - int(base_film.get("shots") or 0),
+                "duration_delta_s": round(float(meta.get("duration_s") or 0) - float(base_film.get("duration_s") or 0), 3),
+                # 快照基准全量无截断；回退源（旧版台账 film_refs）本就是截断存储，增删只能当近似
+                "refs_truncated": base_from_ledger,
+            }
         return {
             "film": meta,
             "timeline": value,
@@ -395,6 +461,7 @@ class FactoryStore:
                 "film_fingerprint": last_fp,
                 "live_fingerprint": live_fp,
                 "matches": matches,
+                "diff": diff,
             },
         }
 
@@ -526,6 +593,12 @@ class FactoryStore:
                 film_fingerprint=film_fp,
             ),
         )
+        if film_value is not None:
+            # 装箱成功才换基准：全量存这份成片的引用/时长/镜数快照与装箱本体，供以后的回看点名改了哪些
+            self._save_film_baseline(
+                record, film, film_fp, timeline=film_value,
+                archive_sha=_sha256_of(archive), download_name=download_name,
+            )
         return archive, download_name
 
     @staticmethod
@@ -585,6 +658,48 @@ class FactoryStore:
             log.warning(f"交付台账写入失败（忽略）：{error}")
 
     @staticmethod
+    def _film_baseline_file(project_id: str) -> Path:
+        return FACTORY_DIR / safe_project_id(project_id) / FILM_BASELINE_NAME
+
+    def _save_film_baseline(
+        self, record: dict[str, Any], film: dict[str, Any], fingerprint: str, *, timeline: Any,
+        archive_sha: str, download_name: str
+    ) -> None:
+        """把最近一次装箱成片的引用基准全量快照落盘（原子写，无上限截断）。
+
+        与台账同口径的旁路：写不进只告警不抛——对账拿不到基准会诚实降级为
+        「无从点名」，不能反过来把一个已写好的交付包说成失败。
+        """
+        try:
+            path = self._film_baseline_file(str(record["id"]))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "delivered_at": _now(),
+                "archive_sha256": archive_sha,
+                "download_name": download_name,
+                "film_fingerprint": fingerprint,
+                "film": film,
+                # 装箱的剪辑决定本体：读回时重算指纹自证，防「指纹没变、本体被改」的脏快照被当基准
+                "timeline": timeline,
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(path)
+        except OSError as error:
+            log.warning(f"成片引用基准快照写入失败（忽略）：{error}")
+
+    @staticmethod
+    def _load_film_baseline(path: Path) -> dict[str, Any]:
+        """读回基准快照；文件不存在或脏了一律当空——对账自会回退/降级，不能拖垮页面。"""
+        if not path.is_file():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    @staticmethod
     def _delivery_entry(
         event: str,
         report: dict[str, Any],
@@ -621,6 +736,7 @@ class FactoryStore:
         film = report.get("film") or {}
         if film.get("node_id"):
             # 台账记下这版交付带的成片（回看闭环）：几镜、多久、来自哪个岗位
+            #（当时引用基准不再塞进台账，改存 film_baseline.json 全量快照；旧条目里的 film_refs 仅作回退读）
             entry["film_node"] = str(film["node_id"])
             entry["film_shots"] = int(film.get("shots") or 0)
             entry["film_duration"] = float(film.get("duration_s") or 0.0)

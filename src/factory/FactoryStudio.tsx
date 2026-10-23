@@ -41,6 +41,7 @@ import type {
   DeliveryLog,
   EventRow,
   FilmDelivery,
+  FilmDiff,
   Graph,
   GraphIssue,
   NodeOutputs,
@@ -250,6 +251,37 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 素材一级目录的展示名：只翻译认得的，其余原样透出（未知归类不硬掰成已知类型）。 */
+const REF_DIR_LABEL: Record<string, string> = {
+  images: '图片',
+  audio: '音频',
+  videos: '视频',
+  video: '视频',
+  files: '文件',
+  '(根目录)': '根目录',
+};
+
+/** 回看差异摘要一句话：按素材类型归类、只显非零变化——放映室 chip 与台账横幅共用，不两处各写一套。
+ * 无基准（旧版交付没存 film_refs）时如实说无从点名，不拿空 diff 装成「无实质变化」。 */
+function filmDiffSummary(diff: FilmDiff | null): string {
+  if (!diff) return '当时引用基准未记录，无法点名改了哪些（内容指纹已判定：改过）';
+  const bits: string[] = [];
+  for (const [dir, c] of Object.entries(diff.by_dir || {})) {
+    const label = REF_DIR_LABEL[dir] ?? dir;
+    if (c.added) bits.push(`${label} +${c.added}`);
+    if (c.removed) bits.push(`${label} −${c.removed}`);
+  }
+  if (!bits.length && (diff.refs_added.length || diff.refs_removed.length)) {
+    bits.push(`引用 +${diff.refs_added.length}/−${diff.refs_removed.length}`);
+  }
+  if (diff.duration_delta_s) {
+    bits.push(`时长 ${diff.duration_delta_s > 0 ? '+' : ''}${diff.duration_delta_s.toFixed(1)}s`);
+  }
+  if (diff.shots_delta) bits.push(`镜头 ${diff.shots_delta > 0 ? '+' : ''}${diff.shots_delta}`);
+  if (!bits.length) return '剪辑内容无实质变化';
+  return bits.join(' · ') + (diff.refs_truncated ? '（引用较多，增删为近似）' : '');
 }
 
 function downloadFile(name: string, blob: Blob): void {
@@ -2133,9 +2165,24 @@ export function FactoryStudio({
               {' · '}放行 {deliveries.summary.delivered} · 拦下 {deliveries.summary.blocked} 次
               {deliveries.summary.last_delivered_at ? ` · 最近交付 ${deliveries.summary.last_delivered_at}` : ' · 尚未交付过'}
             </span>
+            {filmDelivery && filmDelivery.matches !== true && filmDelivery.live_fingerprint ? (
+              <span
+                className={`fc-ledger-stale ${filmDelivery.matches === false ? 'warn' : 'idle'}`}
+                title="回看对账：台账这一侧也回答「现在这条成片交出去没有、之后又改过没」"
+              >
+                {filmDelivery.matches === false
+                  ? `⚠ 当前成片在最近交付后又改过：${filmDiffSummary(filmDelivery.diff)}`
+                  : '● 当前成片尚未随交付包装箱'}
+              </span>
+            ) : null}
             <button className="btn btn-sm btn-ghost" onClick={() => projectId && void runDeliveries(projectId)} disabled={!projectId} title="重读台账（只读）">
               刷新
             </button>
+            {filmDelivery && filmDelivery.matches !== true && filmDelivery.live_fingerprint ? (
+              <button className="btn btn-sm" onClick={() => void downloadBundle()} title="按现在这条成片重新打一个交付包（写包前仍会过验收）">
+                {filmDelivery.matches === false ? '重新下载交付包' : '下载交付包'}
+              </button>
+            ) : null}
           </div>
           {!deliveries.entries.length ? (
             <div className="muted small">还没有打包记录：每次点「下载交付包」都会在这里留下一笔（无论放行还是被拦）。</div>
@@ -2224,13 +2271,23 @@ export function FactoryStudio({
           className={`fc-reconcile ${filmDelivery?.matches === true ? 'ok' : filmDelivery?.matches === false ? 'warn' : 'idle'}`}
           title="回看对账：拿现在这条成片的内容指纹，与最近一次交付装箱的那条比——不回放旧包，只说清内容变了没"
         >
-          {filmDelivery?.matches === true ? (
-            <>✓ 与最近一次交付一致（{filmDelivery.delivered_at}）{filmDelivery.archive_sha256 ? ` · 包 sha256 ${filmDelivery.archive_sha256.slice(0, 12)}` : ''}</>
-          ) : filmDelivery?.matches === false ? (
-            <>⚠ 这条片子在最近一次交付后又改过，交付包里的成片已过时——需重新下载交付包</>
-          ) : (
-            <>这条成片尚未随交付包装箱：到「产物」页下载交付包后即可回看对账</>
-          )}
+          <span className="fc-reconcile-text">
+            {filmDelivery?.matches === true ? (
+              <>✓ 与最近一次交付一致（{filmDelivery.delivered_at}）{filmDelivery.archive_sha256 ? ` · 包 sha256 ${filmDelivery.archive_sha256.slice(0, 12)}` : ''}</>
+            ) : filmDelivery?.matches === false ? (
+              <>
+                ⚠ 这条片子在交付后又改过，包内成片已过时
+                {filmDelivery.diff ? <span className="fc-reconcile-diff">{filmDiffSummary(filmDelivery.diff)}</span> : null}
+              </>
+            ) : (
+              <>这条成片尚未随交付包装箱</>
+            )}
+          </span>
+          {filmDelivery?.matches !== true ? (
+            <button className="btn btn-sm btn-ghost" onClick={() => void downloadBundle()} title="按现在这条成片重新打一个交付包（写包前仍会过验收）">
+              {filmDelivery?.matches === false ? '重新下载交付包' : '下载交付包'}
+            </button>
+          ) : null}
         </div>
       ) : null}
       <Player timeline={timeline?.data ?? null} onToast={onToast} />

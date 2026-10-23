@@ -4124,11 +4124,27 @@ button.fc-chip {
 .fc-reconcile {
   margin: 6px 0;
   padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel-2);
   color: var(--text-2);
   font-size: 12px;
+}
+
+.fc-reconcile-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fc-reconcile-diff {
+  margin-left: 6px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  opacity: 0.85;
 }
 
 .fc-reconcile.ok {
@@ -4144,6 +4160,22 @@ button.fc-chip {
 }
 
 .fc-reconcile.idle {
+  color: var(--text-3);
+}
+
+/* 台账头的回看对账横幅：把「过时/未装箱」信号从放映室带到交付管理侧 */
+.fc-ledger-stale {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.fc-ledger-stale.warn {
+  color: var(--warn);
+}
+
+.fc-ledger-stale.idle {
   color: var(--text-3);
 }
 
